@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod store;
 
 use anyhow::Result;
 use clap::Parser;
@@ -15,6 +16,9 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Node(command) => commands::node::run(command.command).await,
+        Command::Config(command) => match command.command {
+            cli::ConfigSubcommand::Network(command) => commands::config::run(command).await,
+        },
     }
 }
 

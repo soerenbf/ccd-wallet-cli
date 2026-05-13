@@ -1,3 +1,4 @@
+use crate::commands::config::network::NetworkCommand;
 use crate::config;
 use clap::{Args, Parser, Subcommand};
 use concordium_rust_sdk::v2;
@@ -17,6 +18,20 @@ pub struct Cli {
 pub enum Command {
     /// Node-related commands.
     Node(NodeCommand),
+    /// Configuration commands.
+    Config(ConfigCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigCommand {
+    #[command(subcommand)]
+    pub command: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigSubcommand {
+    /// Manage network configurations.
+    Network(NetworkCommand),
 }
 
 #[derive(Debug, Args)]
@@ -33,12 +48,22 @@ pub enum NodeSubcommand {
 
 #[derive(Debug, Args)]
 pub struct NodeInfoArgs {
+    /// Registered network name to resolve from the config store.
+    #[arg(
+        long = "network",
+        conflicts_with = "node",
+        required_unless_present = "node",
+        value_name = "NAME"
+    )]
+    pub network: Option<String>,
+
     /// Concordium node gRPC endpoint.
     #[arg(
         long = "node",
         env = config::NODE_ENDPOINT_ENV,
-        default_value = config::DEFAULT_NODE_ENDPOINT,
+        conflicts_with = "network",
+        required_unless_present = "network",
         value_name = "ENDPOINT"
     )]
-    pub node: v2::Endpoint,
+    pub node: Option<v2::Endpoint>,
 }

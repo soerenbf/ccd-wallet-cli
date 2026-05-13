@@ -33,8 +33,8 @@ impl Default for AppConfig {
 
 /// Returns `~/.config/ccd-wallet/config.json`, resolved from `$HOME`.
 pub fn config_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .context("could not determine home directory: $HOME is not set")?;
+    let home =
+        std::env::var("HOME").context("could not determine home directory: $HOME is not set")?;
     Ok(PathBuf::from(home)
         .join(".config")
         .join("ccd-wallet")
@@ -71,8 +71,7 @@ pub fn save(config: &AppConfig) -> Result<()> {
         })?;
     }
 
-    let contents = serde_json::to_string_pretty(config)
-        .context("failed to serialise config")?;
+    let contents = serde_json::to_string_pretty(config).context("failed to serialise config")?;
     fs::write(&path, contents)
         .with_context(|| format!("failed to write config file at {}", path.display()))
 }
