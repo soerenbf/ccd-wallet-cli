@@ -1,6 +1,9 @@
 use crate::{
     config,
-    store::config::{NetworkEntry, load, save},
+    store::{
+        config::{NetworkEntry, load, save},
+        state::{load as load_state, save as save_state},
+    },
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
@@ -20,7 +23,9 @@ pub struct NetworkCommand {
 pub enum NetworkSubcommand {
     /// Register a named Concordium network by connecting to a node and
     /// deriving its genesis hash.
-    Add(NetworkAddArgs),
+    Add(Box<NetworkAddArgs>),
+    /// Set the active network by name.
+    Use(NetworkUseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -32,6 +37,13 @@ pub struct NetworkAddArgs {
     /// Concordium node gRPC endpoint to connect to.
     #[arg(long = "node", value_name = "ENDPOINT")]
     pub node: v2::Endpoint,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkUseArgs {
+    /// Name of a registered network to set as active.
+    #[arg(value_name = "NAME")]
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +92,26 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
     println!("Network '{}' registered successfully.", args.name);
     println!("  endpoint:     {endpoint_label}");
     println!("  genesis hash: {genesis_hash}");
+
+    Ok(())
+}
+
+pub async fn use_network(args: NetworkUseArgs) -> Result<()> {
+    let app_config = load()?;
+
+    if !app_config.networks.contains_key(&args.name) {
+        bail!(
+            "network '{}' is not registered; run `ccd-wallet config network add --name {} --node <ENDPOINT>` first",
+            args.name,
+            args.name
+        );
+    }
+
+    let mut app_state = load_state()?;
+    app_state.active_network = Some(args.name.clone());
+    save_state(&app_state)?;
+
+    println!("Active network set to '{}'.", args.name);
 
     Ok(())
 }

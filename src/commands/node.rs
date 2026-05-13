@@ -1,7 +1,7 @@
 use crate::{
     cli::{NodeInfoArgs, NodeSubcommand},
     config,
-    store::config::load,
+    store::{config::load, state::load as load_state},
 };
 use anyhow::{Context, Result, bail};
 use concordium_rust_sdk::v2;
@@ -20,35 +20,49 @@ pub async fn run(command: NodeSubcommand) -> Result<()> {
     }
 }
 
+fn resolve_registered_network(network_name: &str) -> Result<(v2::Endpoint, String)> {
+    let app_config = load()?;
+    let entry = app_config.networks.get(network_name).with_context(|| {
+        format!(
+            "network '{}' is not registered; run `ccd-wallet config network add --name {} --node <ENDPOINT>` first",
+            network_name, network_name
+        )
+    })?;
+
+    let endpoint = v2::Endpoint::from_str(&entry.node_endpoint).with_context(|| {
+        format!(
+            "network '{}' has an invalid stored endpoint: {}",
+            network_name, entry.node_endpoint
+        )
+    })?;
+
+    Ok((endpoint, entry.node_endpoint.clone()))
+}
+
 fn resolve_endpoint(
     network: Option<String>,
     node: Option<v2::Endpoint>,
 ) -> Result<(v2::Endpoint, String)> {
     match (network, node) {
-        (Some(network_name), None) => {
-            let app_config = load()?;
-            let entry = app_config.networks.get(&network_name).with_context(|| {
-                format!(
-                    "network '{}' is not registered; run `ccd-wallet config network add --name {} --node <ENDPOINT>` first",
-                    network_name, network_name
-                )
-            })?;
-
-            let endpoint = v2::Endpoint::from_str(&entry.node_endpoint).with_context(|| {
-                format!(
-                    "network '{}' has an invalid stored endpoint: {}",
-                    network_name, entry.node_endpoint
-                )
-            })?;
-
-            Ok((endpoint, entry.node_endpoint.clone()))
-        }
+        (Some(network_name), None) => resolve_registered_network(&network_name),
         (None, Some(node)) => {
             let label = config::endpoint_label(&node);
             Ok((node, label))
         }
         (Some(_), Some(_)) => bail!("--network and --node are mutually exclusive"),
-        (None, None) => bail!("one of `--network` or `--node` is required"),
+        (None, None) => {
+            let app_state = load_state()?;
+            let active_network = app_state.active_network.with_context(|| {
+                "no active network is set; provide `--network` or `--node`, or run `ccd-wallet config network use <NAME>`"
+            })?;
+
+            resolve_registered_network(&active_network).with_context(|| {
+                format!(
+                    "active network '{}' is no longer registered; update it with `ccd-wallet config network use <NAME>` or provide `--network` / `--node` explicitly",
+                    active_network
+                )
+            })
+        }
     }
 }
 

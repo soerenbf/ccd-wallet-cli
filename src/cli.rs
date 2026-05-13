@@ -17,7 +17,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Node-related commands.
-    Node(NodeCommand),
+    Node(Box<NodeCommand>),
     /// Configuration commands.
     Config(ConfigCommand),
 }
@@ -49,12 +49,7 @@ pub enum NodeSubcommand {
 #[derive(Debug, Args)]
 pub struct NodeInfoArgs {
     /// Registered network name to resolve from the config store.
-    #[arg(
-        long = "network",
-        conflicts_with = "node",
-        required_unless_present = "node",
-        value_name = "NAME"
-    )]
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
     pub network: Option<String>,
 
     /// Concordium node gRPC endpoint.
@@ -62,7 +57,6 @@ pub struct NodeInfoArgs {
         long = "node",
         env = config::NODE_ENDPOINT_ENV,
         conflicts_with = "network",
-        required_unless_present = "network",
         value_name = "ENDPOINT"
     )]
     pub node: Option<v2::Endpoint>,
