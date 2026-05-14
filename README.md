@@ -63,6 +63,30 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
   cargo run -- node info
 ```
 
+### Example: register and select a network
+
+```bash
+cargo run -- network add --name testnet --node https://grpc.testnet.concordium.com:20000
+cargo run -- network use testnet
+```
+
+### Example: manage seed phrases
+
+```bash
+cargo run -- seed add main_seed
+cargo run -- seed use main_seed
+cargo run -- seed show
+cargo run -- seed show main_seed
+```
+
+`seed add` requests the seed phrase and password through hidden interactive prompts. Do not pass seed phrases or seed passwords as command-line arguments.
+
+`seed use <LABEL>` sets the active seed. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed.
+
+For safety, `seed show` displays the seed phrase in a temporary terminal view and hides it when you press any key or after 30 seconds, whichever happens first. This reduces terminal scrollback exposure, but it cannot protect against screenshots, terminal/session logging, tmux/screen behavior, or clipboard history if you copy the phrase.
+
+Seed labels may contain only ASCII letters, digits, dash (`-`), and underscore (`_`).
+
 ## Logging
 
 Tracing output is controlled with `RUST_LOG`.

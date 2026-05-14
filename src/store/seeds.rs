@@ -184,7 +184,7 @@ fn unlock_dek(
     zeroizing_array_from_slice::<KEY_LEN>(&dek, "DEK")
 }
 
-fn find_by_label(conn: &Connection, label: &str) -> Result<Option<SeedRecord>> {
+pub fn find_by_label(conn: &Connection, label: &str) -> Result<Option<SeedRecord>> {
     conn.query_row(
         "SELECT id, label, created_at, updated_at FROM seeds WHERE label = ?1",
         params![label],
@@ -290,6 +290,15 @@ mod tests {
 
         let err = add(&conn, "main_seed", b"other", "password").unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn find_by_label_returns_metadata_without_unlocking() {
+        let conn = conn();
+        let seed = add(&conn, "main_seed", b"seed secret", "password").unwrap();
+
+        assert_eq!(find_by_label(&conn, "main_seed").unwrap(), Some(seed));
+        assert_eq!(find_by_label(&conn, "missing").unwrap(), None);
     }
 
     #[test]

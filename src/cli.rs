@@ -18,20 +18,47 @@ pub struct Cli {
 pub enum Command {
     /// Node-related commands.
     Node(Box<NodeCommand>),
-    /// Configuration commands.
-    Config(ConfigCommand),
+    /// Network configuration commands.
+    Network(NetworkCommand),
+    /// Seed phrase commands.
+    Seed(SeedCommand),
 }
 
 #[derive(Debug, Args)]
-pub struct ConfigCommand {
+pub struct SeedCommand {
     #[command(subcommand)]
-    pub command: ConfigSubcommand,
+    pub command: SeedSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ConfigSubcommand {
-    /// Manage network configurations.
-    Network(NetworkCommand),
+pub enum SeedSubcommand {
+    /// Add a password-protected seed phrase.
+    Add(SeedAddArgs),
+    /// Set the active seed by label.
+    Use(SeedUseArgs),
+    /// Show a seed phrase after password authentication.
+    Show(SeedShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SeedAddArgs {
+    /// Local label for the seed. Use letters, digits, dash, or underscore only.
+    #[arg(value_name = "LABEL")]
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SeedUseArgs {
+    /// Label of the seed to make active.
+    #[arg(value_name = "LABEL")]
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SeedShowArgs {
+    /// Label of the seed to show. If omitted, the active seed is used.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Args)]

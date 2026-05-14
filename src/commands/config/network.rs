@@ -102,7 +102,7 @@ pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> 
 
     if !app_config.networks.contains_key(&args.name) {
         bail!(
-            "network '{}' is not registered; run `ccd-wallet config network add --name {} --node <ENDPOINT>` first",
+            "network '{}' is not registered; run `ccd-wallet network add --name {} --node <ENDPOINT>` first",
             args.name,
             args.name
         );

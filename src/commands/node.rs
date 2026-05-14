@@ -25,7 +25,7 @@ fn resolve_registered_network(network_name: &str) -> Result<(v2::Endpoint, Strin
     let app_config = load()?;
     let entry = app_config.networks.get(network_name).with_context(|| {
         format!(
-            "network '{}' is not registered; run `ccd-wallet config network add --name {} --node <ENDPOINT>` first",
+            "network '{}' is not registered; run `ccd-wallet network add --name {} --node <ENDPOINT>` first",
             network_name, network_name
         )
     })?;
@@ -54,12 +54,12 @@ fn resolve_endpoint(
         (Some(_), Some(_)) => bail!("--network and --node are mutually exclusive"),
         (None, None) => {
             let active_network = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(|| {
-                "no active network is set; provide `--network` or `--node`, or run `ccd-wallet config network use <NAME>`"
+                "no active network is set; provide `--network` or `--node`, or run `ccd-wallet network use <NAME>`"
             })?;
 
             resolve_registered_network(&active_network).with_context(|| {
                 format!(
-                    "active network '{}' is no longer registered; update it with `ccd-wallet config network use <NAME>` or provide `--network` / `--node` explicitly",
+                    "active network '{}' is no longer registered; update it with `ccd-wallet network use <NAME>` or provide `--network` / `--node` explicitly",
                     active_network
                 )
             })

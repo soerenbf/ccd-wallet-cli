@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub const ACTIVE_NETWORK_KEY: &str = "active_network";
+pub const ACTIVE_SEED_KEY: &str = "active_seed";
 
 pub fn get(conn: &Connection, key: &str) -> Result<Option<String>> {
     conn.query_row(
@@ -22,4 +23,23 @@ pub fn set(conn: &Connection, key: &str, value: &str) -> Result<()> {
     .with_context(|| format!("failed to write wallet state key '{key}'"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::migrations;
+
+    #[test]
+    fn active_seed_can_be_written_and_read() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+
+        set(&conn, ACTIVE_SEED_KEY, "main_seed").unwrap();
+
+        assert_eq!(
+            get(&conn, ACTIVE_SEED_KEY).unwrap(),
+            Some("main_seed".to_owned())
+        );
+    }
 }
