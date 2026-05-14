@@ -2,12 +2,13 @@ use crate::{
     config,
     store::{
         config::{NetworkEntry, load, save},
-        state::{load as load_state, save as save_state},
+        wallet_state,
     },
 };
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use concordium_rust_sdk::v2;
+use rusqlite::Connection;
 
 // ---------------------------------------------------------------------------
 // CLI types
@@ -96,7 +97,7 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
     Ok(())
 }
 
-pub async fn use_network(args: NetworkUseArgs) -> Result<()> {
+pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> {
     let app_config = load()?;
 
     if !app_config.networks.contains_key(&args.name) {
@@ -107,9 +108,7 @@ pub async fn use_network(args: NetworkUseArgs) -> Result<()> {
         );
     }
 
-    let mut app_state = load_state()?;
-    app_state.active_network = Some(args.name.clone());
-    save_state(&app_state)?;
+    wallet_state::set(conn, wallet_state::ACTIVE_NETWORK_KEY, &args.name)?;
 
     println!("Active network set to '{}'.", args.name);
 

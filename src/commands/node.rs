@@ -1,10 +1,11 @@
 use crate::{
     cli::{NodeInfoArgs, NodeSubcommand},
     config,
-    store::{config::load, state::load as load_state},
+    store::{config::load, wallet_state},
 };
 use anyhow::{Context, Result, bail};
 use concordium_rust_sdk::v2;
+use rusqlite::Connection;
 use serde::Serialize;
 use std::str::FromStr;
 
@@ -14,9 +15,9 @@ pub struct NodeInfoOutput {
     pub node_info: String,
 }
 
-pub async fn run(command: NodeSubcommand) -> Result<()> {
+pub async fn run(conn: &Connection, command: NodeSubcommand) -> Result<()> {
     match command {
-        NodeSubcommand::Info(args) => info(args).await,
+        NodeSubcommand::Info(args) => info(conn, args).await,
     }
 }
 
@@ -40,6 +41,7 @@ fn resolve_registered_network(network_name: &str) -> Result<(v2::Endpoint, Strin
 }
 
 fn resolve_endpoint(
+    conn: &Connection,
     network: Option<String>,
     node: Option<v2::Endpoint>,
 ) -> Result<(v2::Endpoint, String)> {
@@ -51,8 +53,7 @@ fn resolve_endpoint(
         }
         (Some(_), Some(_)) => bail!("--network and --node are mutually exclusive"),
         (None, None) => {
-            let app_state = load_state()?;
-            let active_network = app_state.active_network.with_context(|| {
+            let active_network = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(|| {
                 "no active network is set; provide `--network` or `--node`, or run `ccd-wallet config network use <NAME>`"
             })?;
 
@@ -66,8 +67,8 @@ fn resolve_endpoint(
     }
 }
 
-async fn info(args: NodeInfoArgs) -> Result<()> {
-    let (endpoint, endpoint_label) = resolve_endpoint(args.network, args.node)?;
+async fn info(conn: &Connection, args: NodeInfoArgs) -> Result<()> {
+    let (endpoint, endpoint_label) = resolve_endpoint(conn, args.network, args.node)?;
 
     let mut client = v2::Client::new(endpoint)
         .await
