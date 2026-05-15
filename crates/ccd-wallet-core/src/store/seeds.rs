@@ -116,6 +116,18 @@ pub fn list(conn: &Connection) -> Result<Vec<SeedRecord>> {
         .context("failed to read seed rows")
 }
 
+pub fn remove(conn: &Connection, label: &str) -> Result<()> {
+    let affected = conn
+        .execute("DELETE FROM seeds WHERE label = ?1", params![label])
+        .with_context(|| format!("failed to remove seed '{label}'"))?;
+
+    if affected == 0 {
+        bail!("seed '{label}' is not configured");
+    }
+
+    Ok(())
+}
+
 pub fn unlock(conn: &Connection, label: &str, password: &str) -> Result<Zeroizing<Vec<u8>>> {
     let (record, vault) = load_seed_and_vault(conn, label)?;
     let dek = unlock_dek(&record.id, password, &vault)?;
@@ -299,6 +311,30 @@ mod tests {
 
         assert_eq!(find_by_label(&conn, "main_seed").unwrap(), Some(seed));
         assert_eq!(find_by_label(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn remove_deletes_existing_seed_and_cascades_vault() {
+        let conn = conn();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
+        add(&conn, "main_seed", b"seed secret", "password").unwrap();
+
+        remove(&conn, "main_seed").unwrap();
+
+        assert!(find_by_label(&conn, "main_seed").unwrap().is_none());
+        let vault_count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM seed_vaults", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(vault_count, 0);
+    }
+
+    #[test]
+    fn remove_unknown_seed_errors() {
+        let conn = conn();
+
+        let err = remove(&conn, "missing").unwrap_err();
+
+        assert!(err.to_string().contains("seed 'missing' is not configured"));
     }
 
     #[test]

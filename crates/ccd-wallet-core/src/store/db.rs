@@ -40,6 +40,8 @@ pub fn open() -> Result<Connection> {
 
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open wallet database at {}", path.display()))?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")
+        .context("failed to enable SQLite foreign-key enforcement")?;
     migrations::run(&conn)?;
     Ok(conn)
 }

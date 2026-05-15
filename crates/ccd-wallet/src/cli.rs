@@ -1,5 +1,5 @@
 use crate::commands::config::network::NetworkCommand;
-use crate::config;
+use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
 use concordium_rust_sdk::v2;
 
@@ -22,6 +22,8 @@ pub enum Command {
     Network(NetworkCommand),
     /// Seed phrase commands.
     Seed(SeedCommand),
+    /// Identity issuance commands.
+    Identity(Box<IdentityCommand>),
 }
 
 #[derive(Debug, Args)]
@@ -38,6 +40,8 @@ pub enum SeedSubcommand {
     Use(SeedUseArgs),
     /// Show a seed phrase after password authentication.
     Show(SeedShowArgs),
+    /// Remove a seed phrase.
+    Remove(SeedRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +49,10 @@ pub struct SeedAddArgs {
     /// Local label for the seed. Use letters, digits, dash, or underscore only.
     #[arg(value_name = "LABEL")]
     pub label: String,
+
+    /// Generate a new random 24-word seed phrase instead of prompting for one.
+    #[arg(long)]
+    pub random: bool,
 }
 
 #[derive(Debug, Args)]
@@ -59,6 +67,52 @@ pub struct SeedShowArgs {
     /// Label of the seed to show. If omitted, the active seed is used.
     #[arg(value_name = "LABEL")]
     pub label: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SeedRemoveArgs {
+    /// Label of the seed to remove.
+    #[arg(value_name = "LABEL")]
+    pub label: String,
+}
+
+#[derive(Debug, Args)]
+pub struct IdentityCommand {
+    #[command(subcommand)]
+    pub command: IdentitySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IdentitySubcommand {
+    /// Issue a new identity.
+    New(IdentityNewArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IdentityNewArgs {
+    /// Local label for the identity. Use letters, digits, dash, or underscore only.
+    #[arg(value_name = "LABEL")]
+    pub label: String,
+
+    /// Identity provider id to use directly.
+    #[arg(long, value_name = "ID", conflicts_with = "interactive")]
+    pub provider: Option<u32>,
+
+    /// Query the node for available providers and choose interactively.
+    #[arg(long, conflicts_with = "provider")]
+    pub interactive: bool,
+
+    /// Seed label to use. Defaults to the active seed.
+    #[arg(long, value_name = "LABEL")]
+    pub seed: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
 }
 
 #[derive(Debug, Args)]

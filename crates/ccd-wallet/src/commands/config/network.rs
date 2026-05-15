@@ -1,11 +1,11 @@
-use crate::{
+use anyhow::{Context, Result, bail};
+use ccd_wallet_core::{
     config,
     store::{
         config::{NetworkEntry, load, save},
         wallet_state,
     },
 };
-use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use concordium_rust_sdk::v2;
 use rusqlite::Connection;
@@ -38,6 +38,10 @@ pub struct NetworkAddArgs {
     /// Concordium node gRPC endpoint to connect to.
     #[arg(long = "node", value_name = "ENDPOINT")]
     pub node: v2::Endpoint,
+
+    /// Wallet proxy base URL used to resolve wallet-facing identity provider metadata.
+    #[arg(long = "wallet-proxy", value_name = "URL")]
+    pub wallet_proxy: String,
 }
 
 #[derive(Debug, Args)]
@@ -67,7 +71,7 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
     }
 
     // Connect to the node.
-    let mut client = v2::Client::new(args.node)
+    let mut client = config::connect_v2_client(args.node)
         .await
         .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
 
@@ -79,20 +83,28 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
 
     let genesis_hash = format!("{}", consensus_info.genesis_block);
 
+    let wallet_proxy = config::normalize_url_string(
+        reqwest::Url::parse(&args.wallet_proxy)
+            .with_context(|| format!("invalid wallet proxy URL: {}", args.wallet_proxy))?
+            .as_ref(),
+    );
+
     // Persist — only after all fallible operations have succeeded.
     app_config.networks.insert(
         args.name.clone(),
         NetworkEntry {
             node_endpoint: endpoint_label.clone(),
             genesis_hash: genesis_hash.clone(),
+            wallet_proxy: wallet_proxy.clone(),
         },
     );
 
     save(&app_config)?;
 
     println!("Network '{}' registered successfully.", args.name);
-    println!("  endpoint:     {endpoint_label}");
-    println!("  genesis hash: {genesis_hash}");
+    println!("  endpoint:      {endpoint_label}");
+    println!("  genesis hash:  {genesis_hash}");
+    println!("  wallet proxy:  {wallet_proxy}");
 
     Ok(())
 }

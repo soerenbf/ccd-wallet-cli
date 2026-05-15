@@ -1,9 +1,9 @@
-use crate::{
-    cli::{NodeInfoArgs, NodeSubcommand},
+use crate::cli::{NodeInfoArgs, NodeSubcommand};
+use anyhow::{Context, Result, bail};
+use ccd_wallet_core::{
     config,
     store::{config::load, wallet_state},
 };
-use anyhow::{Context, Result, bail};
 use concordium_rust_sdk::v2;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -30,17 +30,18 @@ fn resolve_registered_network(network_name: &str) -> Result<(v2::Endpoint, Strin
         )
     })?;
 
-    let endpoint = v2::Endpoint::from_str(&entry.node_endpoint).with_context(|| {
-        format!(
-            "network '{}' has an invalid stored endpoint: {}",
-            network_name, entry.node_endpoint
-        )
-    })?;
+    let endpoint = v2::Endpoint::from_str(&config::normalize_url_string(&entry.node_endpoint))
+        .with_context(|| {
+            format!(
+                "network '{}' has an invalid stored endpoint: {}",
+                network_name, entry.node_endpoint
+            )
+        })?;
 
     Ok((endpoint, entry.node_endpoint.clone()))
 }
 
-fn resolve_endpoint(
+pub(crate) fn resolve_endpoint(
     conn: &Connection,
     network: Option<String>,
     node: Option<v2::Endpoint>,
@@ -70,7 +71,7 @@ fn resolve_endpoint(
 async fn info(conn: &Connection, args: NodeInfoArgs) -> Result<()> {
     let (endpoint, endpoint_label) = resolve_endpoint(conn, args.network, args.node)?;
 
-    let mut client = v2::Client::new(endpoint)
+    let mut client = config::connect_v2_client(endpoint)
         .await
         .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
 

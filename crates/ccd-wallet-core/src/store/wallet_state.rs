@@ -25,6 +25,13 @@ pub fn set(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn remove(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM wallet_state WHERE key = ?1", params![key])
+        .with_context(|| format!("failed to delete wallet state key '{key}'"))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

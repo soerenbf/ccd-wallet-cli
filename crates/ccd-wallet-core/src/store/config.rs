@@ -16,6 +16,7 @@ pub struct AppConfig {
 pub struct NetworkEntry {
     pub node_endpoint: String,
     pub genesis_hash: String,
+    pub wallet_proxy: String,
 }
 
 impl Default for AppConfig {

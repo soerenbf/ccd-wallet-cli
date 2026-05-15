@@ -1,9 +1,8 @@
 mod cli;
 mod commands;
-mod config;
-mod store;
 
 use anyhow::Result;
+use ccd_wallet_core::store;
 use clap::Parser;
 use cli::{Cli, Command};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -19,6 +18,9 @@ async fn main() -> Result<()> {
         Command::Node(command) => commands::node::run(&conn, command.command).await,
         Command::Network(command) => commands::config::run(&conn, command).await,
         Command::Seed(command) => commands::seed::run(&conn, command.command).await,
+        Command::Identity(command) => match command.command {
+            cli::IdentitySubcommand::New(args) => commands::identity::run(&conn, args).await,
+        },
     }
 }
 

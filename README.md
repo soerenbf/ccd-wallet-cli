@@ -9,17 +9,24 @@ This repository currently provides the initial project bootstrap: a Cargo binary
 - Rust toolchain (Cargo + rustc)
 - Access to a Concordium node gRPC endpoint
 
+## Workspace layout
+
+This repository is now a Cargo workspace:
+
+- `crates/ccd-wallet-core`: shared library crate for storage, wallet cryptography, and identity issuance helpers
+- `crates/ccd-wallet`: CLI binary crate
+
 ## Build
 
 ```bash
-cargo build
+cargo build --workspace
 ```
 
 ## Lint
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 ## Run
@@ -41,51 +48,70 @@ You can override the node endpoint with either:
 ### Example: local node
 
 ```bash
-cargo run -- node info
+cargo run -p ccd-wallet -- node info
 ```
 
 ### Example: explicit local endpoint
 
 ```bash
-cargo run -- node info --node http://127.0.0.1:20001
+cargo run -p ccd-wallet -- node info --node http://127.0.0.1:20001
 ```
 
 ### Example: public testnet TLS endpoint
 
 ```bash
-cargo run -- node info --node https://grpc.testnet.concordium.com:20000
+cargo run -p ccd-wallet -- node info --node https://grpc.testnet.concordium.com:20000
 ```
 
 ### Example: environment override
 
 ```bash
 CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
-  cargo run -- node info
+  cargo run -p ccd-wallet -- node info
 ```
 
 ### Example: register and select a network
 
 ```bash
-cargo run -- network add --name testnet --node https://grpc.testnet.concordium.com:20000
-cargo run -- network use testnet
+cargo run -p ccd-wallet -- network add --name testnet --node https://grpc.testnet.concordium.com:20000 --wallet-proxy https://wallet-proxy.testnet.concordium.com
+cargo run -p ccd-wallet -- network use testnet
 ```
 
 ### Example: manage seed phrases
 
 ```bash
-cargo run -- seed add main_seed
-cargo run -- seed use main_seed
-cargo run -- seed show
-cargo run -- seed show main_seed
+cargo run -p ccd-wallet -- seed add main_seed
+cargo run -p ccd-wallet -- seed add generated_seed --random
+cargo run -p ccd-wallet -- seed use main_seed
+cargo run -p ccd-wallet -- seed show
+cargo run -p ccd-wallet -- seed show main_seed
+cargo run -p ccd-wallet -- seed remove main_seed
 ```
 
-`seed add` requests the seed phrase and password through hidden interactive prompts. Do not pass seed phrases or seed passwords as command-line arguments.
+`seed add` requests the seed phrase and password through hidden interactive prompts. Do not pass seed phrases or seed passwords as command-line arguments. Use `seed add <LABEL> --random` to generate a new 24-word seed phrase; the generated phrase is temporarily revealed after it is encrypted and stored, and can later be shown again with `seed show <LABEL>`.
 
 `seed use <LABEL>` sets the active seed. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed.
+
+`seed remove <LABEL>` removes a seed after asking you to type the label as confirmation. If the removed seed is active, the active seed selection is cleared.
 
 For safety, `seed show` displays the seed phrase in a temporary terminal view and hides it when you press any key or after 30 seconds, whichever happens first. This reduces terminal scrollback exposure, but it cannot protect against screenshots, terminal/session logging, tmux/screen behavior, or clipboard history if you copy the phrase.
 
 Seed labels may contain only ASCII letters, digits, dash (`-`), and underscore (`_`).
+
+### Example: issue a new identity
+
+```bash
+cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet
+cargo run -p ccd-wallet -- identity new my_identity --interactive --network testnet
+cargo run -p ccd-wallet -- identity new my_identity --provider 1 --seed main_seed --network testnet
+cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --node https://grpc.testnet.concordium.com:20000
+```
+
+`identity new <LABEL>` uses the active seed by default, unless `--seed <LABEL>` is supplied. `--provider <ID>` selects an identity provider directly; `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries.
+
+Identity labels follow the same format as seed labels and must be unique within a seed.
+
+The current identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, opens the identity provider URL in your browser, and then asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal.
 
 ## Logging
 
