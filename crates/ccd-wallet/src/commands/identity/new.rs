@@ -444,7 +444,7 @@ async fn poll_identity(
             }
             PollResult::ProviderError(detail) => {
                 spin.clear();
-                identities::set_error(conn, record_id)?;
+                identities::delete(conn, record_id)?;
                 bail!(detail);
             }
         }

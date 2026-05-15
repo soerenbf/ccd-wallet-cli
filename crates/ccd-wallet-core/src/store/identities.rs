@@ -137,6 +137,18 @@ pub fn set_error(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn delete(conn: &Connection, id: i64) -> Result<()> {
+    let affected = conn
+        .execute("DELETE FROM identities WHERE id = ?1", params![id])
+        .with_context(|| format!("failed to delete identity {id}"))?;
+
+    if affected == 0 {
+        bail!("identity {id} is not configured");
+    }
+
+    Ok(())
+}
+
 pub fn find_by_network_and_label(
     conn: &Connection,
     network_genesis_hash: &str,
@@ -307,5 +319,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(record.status, IdentityStatus::Error);
+    }
+
+    #[test]
+    fn delete_removes_identity_and_frees_label_and_index() {
+        let conn = conn();
+        let id =
+            insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code").unwrap();
+
+        delete(&conn, id).unwrap();
+
+        assert!(
+            find_by_network_and_label(&conn, MAINNET, "identity")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(next_index(&conn, MAINNET, "seed_a", 7).unwrap(), 0);
+        insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code-2").unwrap();
     }
 }
