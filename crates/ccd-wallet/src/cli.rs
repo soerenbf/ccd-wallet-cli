@@ -113,6 +113,10 @@ pub struct IdentityNewArgs {
     /// Concordium node gRPC endpoint.
     #[arg(long = "node", value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
+
+    /// Use manual callback paste instead of the default local browser callback.
+    #[arg(long = "manual-callback")]
+    pub manual_callback: bool,
 }
 
 #[derive(Debug, Args)]

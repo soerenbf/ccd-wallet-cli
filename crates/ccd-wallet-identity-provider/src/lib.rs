@@ -1,8 +1,8 @@
 pub mod callback;
 pub mod client;
 
-use crate::wallet::ConcordiumHdWallet;
 use anyhow::{Result, bail};
+use ccd_wallet_core::wallet::ConcordiumHdWallet;
 use concordium_rust_sdk::base::{
     common::{VERSION_0, Versioned},
     id::{

@@ -13,7 +13,8 @@ This repository currently provides the initial project bootstrap: a Cargo binary
 
 This repository is now a Cargo workspace:
 
-- `crates/ccd-wallet-core`: shared library crate for storage, wallet cryptography, and identity issuance helpers
+- `crates/ccd-wallet-core`: shared library crate for storage, config, and wallet cryptography
+- `crates/ccd-wallet-identity-provider`: shared library crate for identity issuance request construction, provider HTTP helpers, and callback handling
 - `crates/ccd-wallet`: CLI binary crate
 
 ## Build
@@ -109,9 +110,11 @@ cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testn
 
 `identity new <LABEL>` uses the active seed by default, unless `--seed <LABEL>` is supplied. `--provider <ID>` selects an identity provider directly; `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries.
 
-Identity labels follow the same format as seed labels and must be unique within a seed.
+Identity labels follow the same format as seed labels and must be unique within a network.
 
-The current identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, opens the identity provider URL in your browser, and then asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal.
+The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. After verification, the browser returns to the local callback page and the CLI continues automatically.
+
+If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal.
 
 ## Logging
 

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 ccd-wallet-core = { path = "../ccd-wallet-core" }
+ccd-wallet-identity-provider = { path = "../ccd-wallet-identity-provider" }
 anyhow.workspace = true
 bip39.workspace = true
 clap.workspace = true

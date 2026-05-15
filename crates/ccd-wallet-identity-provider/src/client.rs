@@ -114,7 +114,7 @@ pub async fn start_issuance(
             .context("identity provider redirect Location header was not valid UTF-8")?
             .to_owned();
 
-        if location.contains(redirect_uri) {
+        if is_final_redirect_location(&location, redirect_uri) {
             return Ok(location);
         }
 
@@ -124,6 +124,24 @@ pub async fn start_issuance(
     }
 
     bail!("identity provider redirect chain exceeded 10 hops")
+}
+
+fn is_final_redirect_location(location: &str, redirect_uri: &str) -> bool {
+    location.contains(redirect_uri)
+        || location.contains(&percent_encode_uri_component(redirect_uri))
+}
+
+fn percent_encode_uri_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 pub async fn poll_code_uri(code_uri: &str) -> Result<PollResult> {
@@ -195,6 +213,34 @@ mod tests {
         assert_eq!(
             location,
             "ConcordiumRedirectToken#code_uri=https://issuer.example/code/123"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_issuance_stops_at_full_loopback_redirect_uri() {
+        let redirect_uri = "http://127.0.0.1:38123/callback/abc123";
+        let url = serve_once(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:38123/callback/abc123#code_uri=https://issuer.example/code/123\r\nContent-Length: 0\r\n\r\n",
+        );
+
+        let location = start_issuance(&url, redirect_uri, "{}").await.unwrap();
+        assert_eq!(
+            location,
+            "http://127.0.0.1:38123/callback/abc123#code_uri=https://issuer.example/code/123"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_issuance_stops_at_encoded_loopback_redirect_uri() {
+        let redirect_uri = "http://127.0.0.1:38123/callback/abc123";
+        let url = serve_once(
+            "HTTP/1.1 302 Found\r\nLocation: https://issuer.example/finish?redirect_uri=http%3A%2F%2F127.0.0.1%3A38123%2Fcallback%2Fabc123\r\nContent-Length: 0\r\n\r\n",
+        );
+
+        let location = start_issuance(&url, redirect_uri, "{}").await.unwrap();
+        assert_eq!(
+            location,
+            "https://issuer.example/finish?redirect_uri=http%3A%2F%2F127.0.0.1%3A38123%2Fcallback%2Fabc123"
         );
     }
 

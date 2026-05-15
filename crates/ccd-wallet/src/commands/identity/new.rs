@@ -1,16 +1,16 @@
 use crate::cli::IdentityNewArgs;
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
-    identity_provider::{
-        self,
-        callback::{CallbackReceiver, ManualPasteReceiver},
-        client::{self, PollResult, WalletProxyIpEntry},
-    },
     store::{
         config::{NetworkEntry, load},
         identities, seeds, wallet_state,
     },
     wallet::{ConcordiumHdWallet, Net},
+};
+use ccd_wallet_identity_provider::{
+    self as identity_provider,
+    callback::{CallbackSession, LoopbackCallbackSession, ManualPasteSession},
+    client::{self, PollResult, WalletProxyIpEntry},
 };
 use cliclack::{password, select, spinner};
 use concordium_rust_sdk::{
@@ -24,20 +24,15 @@ use std::{
     time::{Duration, Instant},
 };
 
-const REDIRECT_URI_SENTINEL: &str = "ConcordiumRedirectToken";
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn run(conn: &Connection, args: IdentityNewArgs) -> Result<()> {
-    let receiver = ManualPasteReceiver;
-    run_with_receiver(conn, args, &receiver).await
+    run_with_callback_session(conn, args).await
 }
 
-async fn run_with_receiver(
-    conn: &Connection,
-    args: IdentityNewArgs,
-    receiver: &impl CallbackReceiver,
-) -> Result<()> {
+async fn run_with_callback_session(conn: &Connection, args: IdentityNewArgs) -> Result<()> {
     validate_identity_label(&args.label)?;
 
     let seed_label = resolve_seed_label(conn, args.seed.as_deref())?;
@@ -111,11 +106,14 @@ async fn run_with_receiver(
     )?;
     spin.clear();
 
+    let callback_session = prepare_callback_session(args.manual_callback).await?;
+    let redirect_uri = callback_session.redirect_uri().to_owned();
+
     let spin = spinner();
     spin.start("Contacting identity provider...");
     let browser_url = client::start_issuance(
         &wallet_proxy_entry.metadata.issuance_start,
-        REDIRECT_URI_SENTINEL,
+        &redirect_uri,
         &request_json,
     )
     .await?;
@@ -123,7 +121,7 @@ async fn run_with_receiver(
     if let Err(err) = open::that(&browser_url) {
         cliclack::log::warning(format!("failed to open browser automatically: {err}"))?;
     }
-    let code_uri = receiver.receive(&browser_url)?;
+    let code_uri = callback_session.receive(&browser_url).await?;
 
     let record_id = identities::insert_pending(
         conn,
@@ -238,6 +236,16 @@ fn unlock_seed_phrase(conn: &Connection, seed_label: &str) -> Result<String> {
     Ok(std::str::from_utf8(&seed)
         .context("stored seed phrase is not UTF-8")?
         .to_owned())
+}
+
+async fn prepare_callback_session(manual_callback: bool) -> Result<CallbackSession> {
+    if manual_callback {
+        return Ok(CallbackSession::Manual(ManualPasteSession));
+    }
+
+    Ok(CallbackSession::Loopback(
+        LoopbackCallbackSession::bind(CALLBACK_TIMEOUT).await?,
+    ))
 }
 
 fn infer_net(network_name: &str, wallet_proxy: &str, endpoint_label: &str) -> Net {
