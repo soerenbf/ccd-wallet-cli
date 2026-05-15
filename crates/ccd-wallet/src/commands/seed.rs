@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
-use ccd_wallet_core::store::{seeds, wallet_state};
+use ccd_wallet_core::store::{accounts, identities, seeds, wallet_state};
 use cliclack::{input, password};
 use console::Term;
 use rusqlite::Connection;
@@ -19,10 +19,15 @@ const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 
 pub trait SeedPrompts {
     fn prompt_seed_label(&mut self, prompt: &str) -> Result<String>;
+    fn prompt_seed_label_with_placeholder(
+        &mut self,
+        prompt: &str,
+        placeholder: &str,
+    ) -> Result<String>;
     fn select_seed_label(
         &mut self,
         prompt: &str,
-        labels: &[String],
+        items: &[SelectItem<String>],
         active: Option<&str>,
     ) -> Result<String>;
     fn prompt_seed_phrase(&mut self) -> Result<String>;
@@ -51,22 +56,31 @@ impl SeedPrompts for TerminalSeedPrompts {
             .interact()?)
     }
 
+    fn prompt_seed_label_with_placeholder(
+        &mut self,
+        prompt: &str,
+        placeholder: &str,
+    ) -> Result<String> {
+        Ok(input(prompt)
+            .placeholder(placeholder)
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Seed label is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?)
+    }
+
     fn select_seed_label(
         &mut self,
         prompt: &str,
-        labels: &[String],
+        items: &[SelectItem<String>],
         active: Option<&str>,
     ) -> Result<String> {
-        let items = labels
-            .iter()
-            .map(|label| SelectItem {
-                value: label.clone(),
-                label: label.clone(),
-                hint: String::new(),
-            })
-            .collect::<Vec<_>>();
         let initial = active.map(str::to_owned);
-        select_or_single(prompt, &items, initial.as_ref())
+        select_or_single(prompt, items, initial.as_ref())
     }
 
     fn prompt_seed_phrase(&mut self) -> Result<String> {
@@ -135,6 +149,17 @@ async fn run_with_io(
             )
             .await
         }
+        SeedSubcommand::List => list_seeds(conn).await,
+        SeedSubcommand::Rename(args) => {
+            rename_seed(
+                conn,
+                args.old_label,
+                args.new_label,
+                args.non_interactive,
+                prompts,
+            )
+            .await
+        }
         SeedSubcommand::Use(args) => {
             use_seed(conn, args.label, args.non_interactive, prompts).await
         }
@@ -190,6 +215,100 @@ async fn add(
 
     println!("Seed '{label}' added successfully.");
 
+    Ok(())
+}
+
+async fn list_seeds(conn: &Connection) -> Result<()> {
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+    let seeds = seeds::list(conn)?;
+    let identities = identities::list(conn)?;
+    let accounts = accounts::list(conn)?;
+    for seed in seeds {
+        let identity_count = identities
+            .iter()
+            .filter(|record| record.seed_id == seed.id)
+            .count();
+        let account_count = accounts
+            .iter()
+            .filter(|record| record.seed_id == seed.id)
+            .count();
+        println!(
+            "{}",
+            render_seed_list_text(
+                &seed.label,
+                active.as_deref() == Some(seed.label.as_str()),
+                identity_count,
+                account_count,
+            )
+        );
+    }
+    Ok(())
+}
+
+fn render_seed_list_text(
+    label: &str,
+    active: bool,
+    identity_count: usize,
+    account_count: usize,
+) -> String {
+    render_seed_text(label, active, identity_count, account_count, true)
+}
+
+fn render_seed_selector_text(label: &str, identity_count: usize, account_count: usize) -> String {
+    render_seed_text(label, false, identity_count, account_count, false)
+}
+
+fn render_seed_text(
+    label: &str,
+    active: bool,
+    identity_count: usize,
+    account_count: usize,
+    show_active: bool,
+) -> String {
+    let mut text = format!(
+        "{label} — {} • {}",
+        format_count(identity_count, "identity", "identities"),
+        format_count(account_count, "account", "accounts"),
+    );
+    if show_active && active {
+        text.push_str(" • active");
+    }
+    text
+}
+
+fn format_count(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
+}
+
+async fn rename_seed(
+    conn: &Connection,
+    old_label: Option<String>,
+    new_label: Option<String>,
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<()> {
+    let old_label = match old_label {
+        Some(label) => label,
+        None if non_interactive => bail!("seed label must be provided in --non-interactive mode"),
+        None => select_seed_label(conn, prompts)?,
+    };
+    ensure_seed_exists(conn, &old_label)?;
+    let new_label = match new_label {
+        Some(label) => label,
+        None if non_interactive => {
+            bail!("new seed label must be provided in --non-interactive mode")
+        }
+        None => prompts.prompt_seed_label_with_placeholder("New seed label:", &old_label)?,
+    };
+    validate_seed_label(&new_label)?;
+    seeds::rename(conn, &old_label, &new_label)?;
+    if wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.as_deref()
+        == Some(old_label.as_str())
+    {
+        wallet_state::set(conn, wallet_state::ACTIVE_SEED_KEY, &new_label)?;
+    }
+    println!("Seed '{old_label}' renamed to '{new_label}'.");
     Ok(())
 }
 
@@ -299,15 +418,31 @@ fn select_seed_label(conn: &Connection, prompts: &mut impl SeedPrompts) -> Resul
     if seeds.is_empty() {
         bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
     }
-    let labels = seeds
-        .iter()
-        .map(|seed| seed.label.clone())
-        .collect::<Vec<_>>();
-    if labels.len() == 1 {
-        return Ok(labels[0].clone());
-    }
+    let identities = identities::list(conn)?;
+    let accounts = accounts::list(conn)?;
     let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
-    prompts.select_seed_label("Select seed", &labels, active.as_deref())
+    let items = seeds
+        .iter()
+        .map(|seed| {
+            let identity_count = identities
+                .iter()
+                .filter(|record| record.seed_id == seed.id)
+                .count();
+            let account_count = accounts
+                .iter()
+                .filter(|record| record.seed_id == seed.id)
+                .count();
+            SelectItem {
+                value: seed.label.clone(),
+                label: render_seed_selector_text(&seed.label, identity_count, account_count),
+                hint: String::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if items.len() == 1 {
+        return Ok(items[0].value.clone());
+    }
+    prompts.select_seed_label("Select seed", &items, active.as_deref())
 }
 
 pub fn normalize_seed_phrase(input: &str) -> String {
@@ -410,10 +545,18 @@ mod tests {
             Ok(self.seed_label.clone())
         }
 
+        fn prompt_seed_label_with_placeholder(
+            &mut self,
+            _prompt: &str,
+            _placeholder: &str,
+        ) -> Result<String> {
+            Ok(self.seed_label.clone())
+        }
+
         fn select_seed_label(
             &mut self,
             _prompt: &str,
-            _labels: &[String],
+            _items: &[SelectItem<String>],
             active: Option<&str>,
         ) -> Result<String> {
             self.select_seed_calls += 1;
@@ -926,6 +1069,52 @@ mod tests {
             wallet_state::get(&conn, wallet_state::ACTIVE_SEED_KEY).unwrap(),
             Some("main_seed".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn seed_rename_updates_active_seed() {
+        let conn = conn();
+        add_test_seed(&conn);
+        wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
+        let mut prompts = TestPrompts::default();
+
+        rename_seed(
+            &conn,
+            Some("main_seed".to_owned()),
+            Some("daily".to_owned()),
+            false,
+            &mut prompts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_SEED_KEY).unwrap(),
+            Some("daily".to_owned())
+        );
+        assert!(seeds::find_by_label(&conn, "daily").unwrap().is_some());
+    }
+
+    #[test]
+    fn render_seed_list_text_marks_active_seed() {
+        assert_eq!(
+            render_seed_list_text("main_seed", true, 2, 3),
+            "main_seed — 2 identities • 3 accounts • active"
+        );
+        assert_eq!(
+            render_seed_list_text("other_seed", false, 1, 0),
+            "other_seed — 1 identity • 0 accounts"
+        );
+        assert_eq!(
+            render_seed_selector_text("main_seed", 2, 3),
+            "main_seed — 2 identities • 3 accounts"
+        );
+    }
+
+    #[test]
+    fn format_count_handles_singular_and_plural() {
+        assert_eq!(format_count(1, "account", "accounts"), "1 account");
+        assert_eq!(format_count(2, "account", "accounts"), "2 accounts");
     }
 
     #[test]

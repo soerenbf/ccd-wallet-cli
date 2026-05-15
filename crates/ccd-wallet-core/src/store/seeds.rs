@@ -135,6 +135,26 @@ pub fn remove(conn: &Connection, label: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn rename(conn: &Connection, old_label: &str, new_label: &str) -> Result<()> {
+    if old_label == new_label {
+        return Ok(());
+    }
+    if find_by_label(conn, new_label)?.is_some() {
+        bail!("seed label '{new_label}' already exists");
+    }
+    let now = now_unix_seconds()?;
+    let affected = conn
+        .execute(
+            "UPDATE seeds SET label = ?1, updated_at = ?2 WHERE label = ?3",
+            params![new_label, now, old_label],
+        )
+        .with_context(|| format!("failed to rename seed '{old_label}' to '{new_label}'"))?;
+    if affected == 0 {
+        bail!("seed '{old_label}' is not configured");
+    }
+    Ok(())
+}
+
 pub fn unlock(conn: &Connection, label: &str, password: &str) -> Result<Zeroizing<Vec<u8>>> {
     Ok(unlock_context(conn, label, password)?.secret)
 }
@@ -365,6 +385,28 @@ mod tests {
         let err = remove(&conn, "missing").unwrap_err();
 
         assert!(err.to_string().contains("seed 'missing' is not configured"));
+    }
+
+    #[test]
+    fn rename_updates_label_but_preserves_id() {
+        let conn = conn();
+        let seed = add(&conn, "main_seed", b"seed secret", "password").unwrap();
+
+        rename(&conn, "main_seed", "daily").unwrap();
+
+        let renamed = find_by_label(&conn, "daily").unwrap().unwrap();
+        assert_eq!(renamed.id, seed.id);
+        assert!(find_by_label(&conn, "main_seed").unwrap().is_none());
+    }
+
+    #[test]
+    fn rename_rejects_duplicate_target_label() {
+        let conn = conn();
+        add(&conn, "seed_a", b"a", "password").unwrap();
+        add(&conn, "seed_b", b"b", "password").unwrap();
+
+        let err = rename(&conn, "seed_a", "seed_b").unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 
     #[test]

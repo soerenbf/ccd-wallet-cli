@@ -29,6 +29,12 @@ pub(crate) struct SelectItem<T> {
     pub hint: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FuzzySelectItem<T> {
+    pub value: T,
+    pub text: String,
+}
+
 pub(crate) fn format_resolved_context(lines: &[ContextLine<'_>]) -> Option<String> {
     let visible = lines
         .iter()
@@ -75,6 +81,21 @@ where
     let mut picker = select(prompt);
     for item in ordered {
         picker = picker.item(item.value, item.label, item.hint);
+    }
+    Ok(picker.interact()?)
+}
+
+pub(crate) fn fuzzy_select_or_single<T>(prompt: &str, items: &[FuzzySelectItem<T>]) -> Result<T>
+where
+    T: Clone + Eq,
+{
+    if items.len() == 1 {
+        return Ok(items[0].value.clone());
+    }
+
+    let mut picker = select(prompt).filter_mode().max_rows(10);
+    for item in items {
+        picker = picker.item(item.value.clone(), item.text.clone(), "");
     }
     Ok(picker.interact()?)
 }

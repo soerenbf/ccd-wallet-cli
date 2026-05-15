@@ -1,7 +1,8 @@
 use crate::{
-    cli::{AccountNewArgs, AccountSubcommand},
+    cli::{AccountListArgs, AccountNewArgs, AccountRenameArgs, AccountSubcommand},
     commands::ui::{
-        ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single,
+        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
+        log_resolved_context, select_or_single,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -34,12 +35,176 @@ use concordium_rust_sdk::{
 };
 use futures_util::StreamExt;
 use rusqlite::Connection;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ScopeSelection {
+    All,
+    One(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountListStatus {
+    Pending,
+    Finalized,
+}
+
+impl AccountListStatus {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "finalized" => Ok(Self::Finalized),
+            other => bail!("unsupported account status '{other}'"),
+        }
+    }
+}
 
 pub async fn run(conn: &mut Connection, command: AccountSubcommand) -> Result<()> {
     match command {
-        AccountSubcommand::New(args) => new(conn, args).await,
+        AccountSubcommand::List(args) => list_accounts(conn, args).await,
+        AccountSubcommand::New(args) => new(conn, *args).await,
+        AccountSubcommand::Rename(args) => rename_account(conn, args).await,
     }
+}
+
+async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<()> {
+    let seed_scope = resolve_seed_scope(
+        conn,
+        args.seed.as_deref(),
+        args.non_interactive,
+        args.no_defaults,
+        true,
+    )?;
+    let network_scope = resolve_network_scope(
+        conn,
+        args.network.as_deref(),
+        args.non_interactive,
+        args.no_defaults,
+        true,
+    )?;
+    let status_filter = args
+        .status
+        .as_deref()
+        .map(AccountListStatus::parse)
+        .transpose()?;
+
+    log_scope_context(&seed_scope, &network_scope)?;
+
+    let seeds_by_id = seed_labels_by_id(conn)?;
+    let networks_by_hash = network_names_by_genesis_hash()?;
+    let mut accounts = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| matches_seed_scope(record, &seed_scope, &seeds_by_id))
+        .filter(|record| matches_network_scope(record, &network_scope, &networks_by_hash))
+        .filter(|record| matches_account_status(record, status_filter))
+        .collect::<Vec<_>>();
+    accounts.sort_by(|a, b| a.label.cmp(&b.label));
+
+    let address_map = if args.show_addresses {
+        load_account_addresses(conn, &accounts, &seeds_by_id, &seed_scope)?
+    } else {
+        BTreeMap::new()
+    };
+
+    for record in accounts {
+        let seed_label = seeds_by_id
+            .get(&record.seed_id)
+            .cloned()
+            .unwrap_or_else(|| "<unknown-seed>".to_owned());
+        let network_name = networks_by_hash
+            .get(&record.network_genesis_hash)
+            .cloned()
+            .unwrap_or_else(|| record.network_genesis_hash.clone());
+        println!(
+            "{}",
+            render_account_fuzzy_text(
+                &record,
+                &seed_label,
+                &network_name,
+                address_map.get(&record.id).map(String::as_str),
+            )
+        );
+    }
+    Ok(())
+}
+
+async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Result<()> {
+    let seeds_by_id = seed_labels_by_id(conn)?;
+    let networks_by_hash = network_names_by_genesis_hash()?;
+
+    let seed_scope = if args.show_addresses {
+        Some(resolve_seed_scope_for_addresses(
+            conn,
+            args.seed.as_deref(),
+            args.non_interactive,
+        )?)
+    } else {
+        None
+    };
+
+    let record = match args.old_label.as_deref() {
+        Some(old_label) => {
+            let matches = accounts::list(conn)?
+                .into_iter()
+                .filter(|record| record.label == old_label)
+                .filter(|record| {
+                    seed_scope_matches_record(record, seed_scope.as_ref(), &seeds_by_id)
+                })
+                .collect::<Vec<_>>();
+            choose_account_match(
+                matches,
+                &seeds_by_id,
+                &networks_by_hash,
+                args.show_addresses,
+                seed_scope.as_ref(),
+                conn,
+                args.non_interactive,
+            )?
+        }
+        None if args.non_interactive => {
+            bail!("account label must be provided in --non-interactive mode")
+        }
+        None => {
+            let candidates = accounts::list(conn)?
+                .into_iter()
+                .filter(|record| {
+                    seed_scope_matches_record(record, seed_scope.as_ref(), &seeds_by_id)
+                })
+                .collect::<Vec<_>>();
+            select_account_fuzzy(
+                conn,
+                candidates,
+                &seeds_by_id,
+                &networks_by_hash,
+                args.show_addresses,
+                seed_scope.as_ref(),
+            )?
+        }
+    };
+
+    let new_label = match args.new_label {
+        Some(label) => label,
+        None if args.non_interactive => {
+            bail!("new account label must be provided in --non-interactive mode")
+        }
+        None => input("New account label:")
+            .placeholder(&record.label)
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Account label is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?,
+    };
+    validate_label("account", &new_label)?;
+    accounts::rename(conn, record.id, &new_label)?;
+    println!("Account '{}' renamed to '{}'.", record.label, new_label);
+    Ok(())
 }
 
 async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
@@ -231,6 +396,375 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         "Account '{label}' created successfully. Address: {account_address}"
     ))?;
     Ok(())
+}
+
+fn seed_labels_by_id(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    Ok(seeds::list(conn)?
+        .into_iter()
+        .map(|seed| (seed.id, seed.label))
+        .collect())
+}
+
+fn network_names_by_genesis_hash() -> Result<BTreeMap<String, String>> {
+    Ok(load()?
+        .networks
+        .into_iter()
+        .map(|(name, entry)| (entry.genesis_hash, name))
+        .collect())
+}
+
+fn resolve_seed_scope(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+    allow_all: bool,
+) -> Result<(ScopeSelection, ResolutionSource)> {
+    match explicit {
+        Some("all") if allow_all => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
+        Some(label) => seeds::find_by_label(conn, label)?
+            .map(|seed| (ScopeSelection::One(seed.label), ResolutionSource::Explicit))
+            .with_context(|| format!("seed '{}' is not configured", label)),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+            if no_defaults {
+                return Ok((
+                    prompt_for_seed_scope(conn, active.as_deref(), allow_all)?,
+                    ResolutionSource::Prompted,
+                ));
+            }
+            match active {
+                Some(label) => Ok((ScopeSelection::One(label), ResolutionSource::ActiveDefault)),
+                None if non_interactive => bail!(
+                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
+                ),
+                None => Ok((
+                    prompt_for_seed_scope(conn, None, allow_all)?,
+                    ResolutionSource::Prompted,
+                )),
+            }
+        }
+    }
+}
+
+fn resolve_network_scope(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+    allow_all: bool,
+) -> Result<(ScopeSelection, ResolutionSource)> {
+    let app_config = load()?;
+    match explicit {
+        Some("all") if allow_all => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
+        Some(name) => app_config
+            .networks
+            .get(name)
+            .map(|_| {
+                (
+                    ScopeSelection::One(name.to_owned()),
+                    ResolutionSource::Explicit,
+                )
+            })
+            .with_context(|| format!("network '{}' is not registered", name)),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+            if no_defaults {
+                return Ok((
+                    prompt_for_network_scope(&app_config, active.as_deref(), allow_all)?,
+                    ResolutionSource::Prompted,
+                ));
+            }
+            match active {
+                Some(name) => Ok((ScopeSelection::One(name), ResolutionSource::ActiveDefault)),
+                None if non_interactive => bail!(
+                    "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
+                ),
+                None => Ok((
+                    prompt_for_network_scope(&app_config, None, allow_all)?,
+                    ResolutionSource::Prompted,
+                )),
+            }
+        }
+    }
+}
+
+fn resolve_seed_scope_for_addresses(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+) -> Result<ScopeSelection> {
+    match explicit {
+        Some(label) => seeds::find_by_label(conn, label)?
+            .map(|seed| ScopeSelection::One(seed.label))
+            .with_context(|| format!("seed '{}' is not configured", label)),
+        None if non_interactive => {
+            bail!("`--seed <LABEL>` is required with `--show-addresses` in --non-interactive mode")
+        }
+        None => prompt_for_seed_scope(
+            conn,
+            wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.as_deref(),
+            false,
+        ),
+    }
+}
+
+fn prompt_for_seed_scope(
+    conn: &Connection,
+    active: Option<&str>,
+    allow_all: bool,
+) -> Result<ScopeSelection> {
+    let seeds = seeds::list(conn)?;
+    if seeds.is_empty() {
+        bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
+    }
+    let mut items = Vec::new();
+    if allow_all {
+        items.push(SelectItem {
+            value: ScopeSelection::All,
+            label: "All seeds".to_owned(),
+            hint: String::new(),
+        });
+    }
+    items.extend(seeds.into_iter().map(|seed| SelectItem {
+        value: ScopeSelection::One(seed.label.clone()),
+        label: seed.label,
+        hint: String::new(),
+    }));
+    let initial = active.map(|value| ScopeSelection::One(value.to_owned()));
+    select_or_single("Select seed", &items, initial.as_ref())
+}
+
+fn prompt_for_network_scope(
+    app_config: &AppConfig,
+    active: Option<&str>,
+    allow_all: bool,
+) -> Result<ScopeSelection> {
+    if app_config.networks.is_empty() {
+        bail!("no networks are configured; run `ccd-wallet network add` first")
+    }
+    let mut items = Vec::new();
+    if allow_all {
+        items.push(SelectItem {
+            value: ScopeSelection::All,
+            label: "All networks".to_owned(),
+            hint: String::new(),
+        });
+    }
+    items.extend(app_config.networks.iter().map(|(name, entry)| SelectItem {
+        value: ScopeSelection::One(name.clone()),
+        label: name.clone(),
+        hint: entry.node_endpoint.clone(),
+    }));
+    let initial = active.map(|value| ScopeSelection::One(value.to_owned()));
+    select_or_single("Select network", &items, initial.as_ref())
+}
+
+fn log_scope_context(
+    seed_scope: &(ScopeSelection, ResolutionSource),
+    network_scope: &(ScopeSelection, ResolutionSource),
+) -> Result<()> {
+    log_resolved_context(&[
+        ContextLine {
+            label: "seed:",
+            value: match &seed_scope.0 {
+                ScopeSelection::All => "all".to_owned(),
+                ScopeSelection::One(value) => value.clone(),
+            },
+            source: seed_scope.1,
+        },
+        ContextLine {
+            label: "network:",
+            value: match &network_scope.0 {
+                ScopeSelection::All => "all".to_owned(),
+                ScopeSelection::One(value) => value.clone(),
+            },
+            source: network_scope.1,
+        },
+    ])
+}
+
+fn matches_seed_scope(
+    record: &accounts::AccountRecord,
+    scope: &(ScopeSelection, ResolutionSource),
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    match &scope.0 {
+        ScopeSelection::All => true,
+        ScopeSelection::One(label) => labels.get(&record.seed_id) == Some(label),
+    }
+}
+
+fn matches_network_scope(
+    record: &accounts::AccountRecord,
+    scope: &(ScopeSelection, ResolutionSource),
+    names: &BTreeMap<String, String>,
+) -> bool {
+    match &scope.0 {
+        ScopeSelection::All => true,
+        ScopeSelection::One(name) => names.get(&record.network_genesis_hash) == Some(name),
+    }
+}
+
+fn matches_account_status(
+    record: &accounts::AccountRecord,
+    status: Option<AccountListStatus>,
+) -> bool {
+    match status {
+        None => true,
+        Some(AccountListStatus::Pending) => record.status == accounts::AccountStatus::Pending,
+        Some(AccountListStatus::Finalized) => record.status == accounts::AccountStatus::Finalized,
+    }
+}
+
+fn seed_scope_matches_record(
+    record: &accounts::AccountRecord,
+    seed_scope: Option<&ScopeSelection>,
+    labels: &BTreeMap<String, String>,
+) -> bool {
+    match seed_scope {
+        None => true,
+        Some(ScopeSelection::All) => true,
+        Some(ScopeSelection::One(label)) => labels.get(&record.seed_id) == Some(label),
+    }
+}
+
+fn load_account_addresses(
+    conn: &Connection,
+    records: &[accounts::AccountRecord],
+    seeds_by_id: &BTreeMap<String, String>,
+    seed_scope: &(ScopeSelection, ResolutionSource),
+) -> Result<BTreeMap<i64, String>> {
+    let mut by_seed: BTreeMap<String, Vec<&accounts::AccountRecord>> = BTreeMap::new();
+    for record in records {
+        by_seed
+            .entry(record.seed_id.clone())
+            .or_default()
+            .push(record);
+    }
+
+    let mut addresses = BTreeMap::new();
+    for (seed_id, seed_records) in by_seed {
+        let seed_label = seeds_by_id
+            .get(&seed_id)
+            .context("account references unknown seed")?;
+        let password: String =
+            password(format!("Password for seed '{}': ", seed_label)).interact()?;
+        let unlocked = seeds::unlock_context(conn, seed_label, &password)?;
+        for record in seed_records {
+            let payload = accounts::decrypt_private_payload(conn, record.id, &unlocked.dek)?;
+            addresses.insert(record.id, payload.account_address);
+        }
+        if matches!(&seed_scope.0, ScopeSelection::One(_)) {
+            break;
+        }
+    }
+    Ok(addresses)
+}
+
+fn render_account_fuzzy_text(
+    record: &accounts::AccountRecord,
+    seed_label: &str,
+    network_name: &str,
+    address: Option<&str>,
+) -> String {
+    let prefix = match record.status {
+        accounts::AccountStatus::Pending => "[pending] ",
+        accounts::AccountStatus::Finalized => "",
+    };
+    let label = match address {
+        Some(address) => format!("{}{} ({address})", prefix, record.label),
+        None => format!("{}{}", prefix, record.label),
+    };
+    format!(
+        "{} — {} • seed:{} • provider:{} • identity:{} • cred:{}",
+        label,
+        network_name,
+        seed_label,
+        record.ip_identity,
+        record.identity_index,
+        record.credential_counter
+    )
+}
+
+fn select_account_fuzzy(
+    conn: &Connection,
+    candidates: Vec<accounts::AccountRecord>,
+    seeds_by_id: &BTreeMap<String, String>,
+    networks_by_hash: &BTreeMap<String, String>,
+    show_addresses: bool,
+    seed_scope: Option<&ScopeSelection>,
+) -> Result<accounts::AccountRecord> {
+    if candidates.is_empty() {
+        bail!("no matching accounts are available")
+    }
+    let addresses = if show_addresses {
+        let concrete_seed_scope = seed_scope
+            .cloned()
+            .context("a seed must be resolved to show addresses")?;
+        load_account_addresses(
+            conn,
+            &candidates,
+            seeds_by_id,
+            &(concrete_seed_scope, ResolutionSource::Explicit),
+        )?
+    } else {
+        BTreeMap::new()
+    };
+    let items = candidates
+        .iter()
+        .map(|record| {
+            let seed_label = seeds_by_id
+                .get(&record.seed_id)
+                .cloned()
+                .unwrap_or_else(|| "<unknown-seed>".to_owned());
+            let network_name = networks_by_hash
+                .get(&record.network_genesis_hash)
+                .cloned()
+                .unwrap_or_else(|| record.network_genesis_hash.clone());
+            FuzzySelectItem {
+                value: record.id,
+                text: render_account_fuzzy_text(
+                    record,
+                    &seed_label,
+                    &network_name,
+                    addresses.get(&record.id).map(String::as_str),
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    let id = fuzzy_select_or_single("Select account", &items)?;
+    candidates
+        .into_iter()
+        .find(|record| record.id == id)
+        .context("selected account was not found")
+}
+
+fn choose_account_match(
+    matches: Vec<accounts::AccountRecord>,
+    seeds_by_id: &BTreeMap<String, String>,
+    networks_by_hash: &BTreeMap<String, String>,
+    show_addresses: bool,
+    seed_scope: Option<&ScopeSelection>,
+    conn: &Connection,
+    non_interactive: bool,
+) -> Result<accounts::AccountRecord> {
+    if matches.is_empty() {
+        bail!("account is not configured")
+    } else if matches.len() == 1 {
+        Ok(matches.into_iter().next().unwrap())
+    } else if non_interactive {
+        bail!("account label is ambiguous across multiple networks; rerun interactively")
+    } else {
+        select_account_fuzzy(
+            conn,
+            matches,
+            seeds_by_id,
+            networks_by_hash,
+            show_addresses,
+            seed_scope,
+        )
+    }
 }
 
 fn resolve_account_label(explicit: Option<String>, non_interactive: bool) -> Result<String> {
@@ -698,6 +1232,13 @@ fn now_unix_seconds() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ccd_wallet_core::store::migrations;
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        conn
+    }
 
     fn identity(status: IdentityStatus, expires_at: Option<i64>) -> IdentityRecord {
         IdentityRecord {
@@ -749,5 +1290,78 @@ mod tests {
         validate_label("account", "main-account_1").unwrap();
         assert!(validate_label("account", "bad label").is_err());
         assert!(validate_label("account", "bad.label").is_err());
+    }
+
+    #[test]
+    fn account_status_filter_matches_status() {
+        let pending = accounts::AccountRecord {
+            id: 1,
+            seed_id: "seed-id".to_owned(),
+            network_genesis_hash: "genesis".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            label: "pending-account".to_owned(),
+            status: accounts::AccountStatus::Pending,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let finalized = accounts::AccountRecord {
+            status: accounts::AccountStatus::Finalized,
+            label: "finalized-account".to_owned(),
+            ..pending.clone()
+        };
+
+        assert!(matches_account_status(
+            &pending,
+            Some(AccountListStatus::Pending)
+        ));
+        assert!(matches_account_status(
+            &finalized,
+            Some(AccountListStatus::Finalized)
+        ));
+        assert!(!matches_account_status(
+            &pending,
+            Some(AccountListStatus::Finalized)
+        ));
+    }
+
+    #[test]
+    fn render_account_fuzzy_text_uses_conditional_badges() {
+        let pending = accounts::AccountRecord {
+            id: 1,
+            seed_id: "seed-id".to_owned(),
+            network_genesis_hash: "genesis".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            label: "pending-account".to_owned(),
+            status: accounts::AccountStatus::Pending,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let finalized = accounts::AccountRecord {
+            status: accounts::AccountStatus::Finalized,
+            label: "finalized-account".to_owned(),
+            ..pending.clone()
+        };
+
+        assert!(
+            render_account_fuzzy_text(&pending, "test", "testnet", None)
+                .starts_with("[pending] pending-account")
+        );
+        assert!(
+            render_account_fuzzy_text(&finalized, "test", "testnet", None)
+                .starts_with("finalized-account")
+        );
+    }
+
+    #[test]
+    fn show_addresses_requires_seed_in_non_interactive_mode() {
+        let conn = conn();
+        let err = resolve_seed_scope_for_addresses(&conn, None, true).unwrap_err();
+        assert!(err.to_string().contains("--seed <LABEL>"));
     }
 }

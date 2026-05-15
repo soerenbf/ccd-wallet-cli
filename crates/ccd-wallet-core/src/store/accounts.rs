@@ -173,6 +173,23 @@ pub fn set_finalized(
     Ok(())
 }
 
+pub fn list(conn: &Connection) -> Result<Vec<AccountRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index,
+                    credential_counter, label, status, transaction_hash, created_at, updated_at
+             FROM accounts ORDER BY label",
+        )
+        .context("failed to prepare account list query")?;
+
+    let rows = stmt
+        .query_map([], map_account_row)
+        .context("failed to query accounts")?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read account rows")
+}
+
 pub fn find_by_network_and_label(
     conn: &Connection,
     network_genesis_hash: &str,
@@ -250,7 +267,31 @@ pub fn decrypt_private_payload(
     decrypt_private_payload_for_record(conn, &record, seed_dek)
 }
 
-fn find_by_id(conn: &Connection, id: i64) -> Result<AccountRecord> {
+pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
+    let record = find_by_id(conn, id)?;
+    if record.label == new_label {
+        return Ok(());
+    }
+    if find_by_network_and_label(conn, &record.network_genesis_hash, new_label)?.is_some() {
+        bail!(
+            "account label '{}' already exists for network '{}'",
+            new_label,
+            record.network_genesis_hash
+        );
+    }
+    let affected = conn
+        .execute(
+            "UPDATE accounts SET label = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_label, now_unix_seconds()?, id],
+        )
+        .with_context(|| format!("failed to rename account {id} to '{new_label}'"))?;
+    if affected == 0 {
+        bail!("account {id} is not configured");
+    }
+    Ok(())
+}
+
+pub fn find_by_id(conn: &Connection, id: i64) -> Result<AccountRecord> {
     conn.query_row(
         "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index,
                 credential_counter, label, status, transaction_hash, created_at, updated_at
@@ -493,6 +534,63 @@ mod tests {
         insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
         let err = insert_pending(&conn, pending(&seed_id, "account-2", 0)).unwrap_err();
         assert!(err.to_string().contains("credential counter 0"));
+    }
+
+    #[test]
+    fn list_returns_all_accounts() {
+        let conn = conn();
+        let (seed_id, _) = seed(&conn, "seed_a");
+        insert_pending(&conn, pending(&seed_id, "account-b", 0)).unwrap();
+        insert_pending(
+            &conn,
+            PendingAccount {
+                network_genesis_hash: TESTNET,
+                seed_id: &seed_id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 1,
+                label: "account-a",
+            },
+        )
+        .unwrap();
+
+        let labels = list(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["account-a".to_owned(), "account-b".to_owned()]);
+    }
+
+    #[test]
+    fn rename_updates_label_within_network_scope() {
+        let conn = conn();
+        let (seed_id, _) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&seed_id, "account", 0)).unwrap();
+
+        rename(&conn, id, "account-renamed").unwrap();
+
+        assert!(
+            find_by_network_and_label(&conn, MAINNET, "account")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_by_network_and_label(&conn, MAINNET, "account-renamed")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rename_rejects_duplicate_label_in_network_scope() {
+        let conn = conn();
+        let (seed_id, _) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&seed_id, "account-a", 0)).unwrap();
+        insert_pending(&conn, pending(&seed_id, "account-b", 1)).unwrap();
+
+        let err = rename(&conn, id, "account-b").unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 
     #[test]

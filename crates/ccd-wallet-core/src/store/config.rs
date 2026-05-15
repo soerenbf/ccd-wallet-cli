@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -26,6 +26,29 @@ impl Default for AppConfig {
             networks: BTreeMap::new(),
         }
     }
+}
+
+pub fn list_networks(config: &AppConfig) -> Vec<(String, NetworkEntry)> {
+    config
+        .networks
+        .iter()
+        .map(|(name, entry)| (name.clone(), entry.clone()))
+        .collect()
+}
+
+pub fn rename_network(config: &mut AppConfig, old_name: &str, new_name: &str) -> Result<()> {
+    if old_name == new_name {
+        return Ok(());
+    }
+    if config.networks.contains_key(new_name) {
+        bail!("network '{new_name}' is already registered");
+    }
+    let entry = config
+        .networks
+        .remove(old_name)
+        .with_context(|| format!("network '{old_name}' is not registered"))?;
+    config.networks.insert(new_name.to_owned(), entry);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -75,4 +98,60 @@ pub fn save(config: &AppConfig) -> Result<()> {
     let contents = serde_json::to_string_pretty(config).context("failed to serialise config")?;
     fs::write(&path, contents)
         .with_context(|| format!("failed to write config file at {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str) -> NetworkEntry {
+        NetworkEntry {
+            node_endpoint: format!("https://{name}.example.com:20000"),
+            genesis_hash: format!("hash-{name}"),
+            wallet_proxy: format!("https://wallet-proxy.{name}.example.com"),
+        }
+    }
+
+    #[test]
+    fn list_networks_returns_sorted_entries() {
+        let mut config = AppConfig::default();
+        config
+            .networks
+            .insert("testnet".to_owned(), entry("testnet"));
+        config
+            .networks
+            .insert("mainnet".to_owned(), entry("mainnet"));
+
+        let networks = list_networks(&config);
+        assert_eq!(networks[0].0, "mainnet");
+        assert_eq!(networks[1].0, "testnet");
+    }
+
+    #[test]
+    fn rename_network_moves_key_and_preserves_entry() {
+        let mut config = AppConfig::default();
+        config
+            .networks
+            .insert("testnet".to_owned(), entry("testnet"));
+
+        rename_network(&mut config, "testnet", "staging").unwrap();
+
+        assert!(!config.networks.contains_key("testnet"));
+        let staging = config.networks.get("staging").unwrap();
+        assert_eq!(staging.genesis_hash, "hash-testnet");
+    }
+
+    #[test]
+    fn rename_network_rejects_duplicate_target() {
+        let mut config = AppConfig::default();
+        config
+            .networks
+            .insert("testnet".to_owned(), entry("testnet"));
+        config
+            .networks
+            .insert("mainnet".to_owned(), entry("mainnet"));
+
+        let err = rename_network(&mut config, "testnet", "mainnet").unwrap_err();
+        assert!(err.to_string().contains("already registered"));
+    }
 }

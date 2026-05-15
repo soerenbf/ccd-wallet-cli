@@ -197,32 +197,33 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn list(conn: &Connection) -> Result<Vec<IdentityRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+             FROM identities ORDER BY label",
+        )
+        .context("failed to prepare identity list query")?;
+
+    let rows = stmt
+        .query_map([], map_identity_row)
+        .context("failed to query identities")?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read identity rows")
+}
+
 pub fn list_by_network_and_seed(
     conn: &Connection,
     network_genesis_hash: &str,
     seed_id: &str,
 ) -> Result<Vec<IdentityRecord>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
-             FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 ORDER BY label",
-        )
-        .with_context(|| {
-            format!(
-                "failed to prepare identity list query for seed '{seed_id}' on network '{network_genesis_hash}'"
-            )
-        })?;
-
-    let rows = stmt
-        .query_map(params![network_genesis_hash, seed_id], map_identity_row)
-        .with_context(|| {
-            format!(
-                "failed to query identities for seed '{seed_id}' on network '{network_genesis_hash}'"
-            )
-        })?;
-
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("failed to read identity rows")
+    Ok(list(conn)?
+        .into_iter()
+        .filter(|record| {
+            record.network_genesis_hash == network_genesis_hash && record.seed_id == seed_id
+        })
+        .collect())
 }
 
 pub fn find_by_network_seed_and_label(
@@ -294,7 +295,31 @@ pub fn decrypt_private_payload(
     decrypt_private_payload_for_record(conn, &record, seed_dek)
 }
 
-fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
+pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
+    let record = find_by_id(conn, id)?;
+    if record.label == new_label {
+        return Ok(());
+    }
+    if find_by_network_and_label(conn, &record.network_genesis_hash, new_label)?.is_some() {
+        bail!(
+            "identity label '{}' already exists for network '{}'",
+            new_label,
+            record.network_genesis_hash
+        );
+    }
+    let affected = conn
+        .execute(
+            "UPDATE identities SET label = ?1 WHERE id = ?2",
+            params![new_label, id],
+        )
+        .with_context(|| format!("failed to rename identity {id} to '{new_label}'"))?;
+    if affected == 0 {
+        bail!("identity {id} is not configured");
+    }
+    Ok(())
+}
+
+pub fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
     conn.query_row(
         "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE id = ?1",
@@ -732,6 +757,106 @@ mod tests {
         .unwrap();
 
         assert!(decrypt_private_payload(&conn, id_2, &key).is_err());
+    }
+
+    #[test]
+    fn list_returns_all_identities() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity-b",
+            "https://code-1",
+        )
+        .unwrap();
+        let (seed_id2, key2) = seed(&conn, "seed_b");
+        insert_pending(
+            &mut conn,
+            &key2,
+            TESTNET,
+            &seed_id2,
+            8,
+            0,
+            "identity-a",
+            "https://code-2",
+        )
+        .unwrap();
+
+        let labels = list(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.label)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec!["identity-a".to_owned(), "identity-b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rename_updates_label_within_network_scope() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let record_id = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity",
+            "https://code",
+        )
+        .unwrap();
+
+        rename(&conn, record_id, "identity-renamed").unwrap();
+
+        assert!(
+            find_by_network_and_label(&conn, MAINNET, "identity")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_by_network_and_label(&conn, MAINNET, "identity-renamed")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rename_rejects_duplicate_label_in_network_scope() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let record_a = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity-a",
+            "https://code-a",
+        )
+        .unwrap();
+        insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            1,
+            "identity-b",
+            "https://code-b",
+        )
+        .unwrap();
+
+        let err = rename(&conn, record_a, "identity-b").unwrap_err();
+        assert!(err.to_string().contains("already exists"));
     }
 
     #[test]

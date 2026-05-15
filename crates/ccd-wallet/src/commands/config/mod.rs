@@ -7,6 +7,8 @@ use rusqlite::Connection;
 pub async fn run(conn: &Connection, command: NetworkCommand) -> Result<()> {
     match command.command {
         NetworkSubcommand::Add(args) => network::add(*args).await,
+        NetworkSubcommand::List => network::list(conn).await,
+        NetworkSubcommand::Rename(args) => network::rename(conn, args).await,
         NetworkSubcommand::Use(args) => network::use_network(conn, args).await,
     }
 }

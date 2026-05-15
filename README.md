@@ -71,11 +71,13 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
   cargo run -p ccd-wallet -- node info
 ```
 
-### Example: register and select a network
+### Example: register and manage networks
 
 ```bash
 cargo run -p ccd-wallet -- network add --name testnet --node https://grpc.testnet.concordium.com:20000 --wallet-proxy https://wallet-proxy.testnet.concordium.com
-cargo run -p ccd-wallet -- network use testnet
+cargo run -p ccd-wallet -- network list
+cargo run -p ccd-wallet -- network rename testnet staging
+cargo run -p ccd-wallet -- network use staging
 cargo run -p ccd-wallet -- network use
 ```
 
@@ -86,14 +88,18 @@ Most user-facing setup flows can now prompt for missing non-secret values intera
 ```bash
 cargo run -p ccd-wallet -- seed add main_seed
 cargo run -p ccd-wallet -- seed add generated_seed --random
-cargo run -p ccd-wallet -- seed use main_seed
+cargo run -p ccd-wallet -- seed list
+cargo run -p ccd-wallet -- seed rename main_seed daily_seed
+cargo run -p ccd-wallet -- seed use daily_seed
 cargo run -p ccd-wallet -- seed use
 cargo run -p ccd-wallet -- seed show
-cargo run -p ccd-wallet -- seed show main_seed
-cargo run -p ccd-wallet -- seed remove main_seed
+cargo run -p ccd-wallet -- seed show daily_seed
+cargo run -p ccd-wallet -- seed remove daily_seed
 ```
 
 `seed add` requests the seed phrase and password through hidden interactive prompts. If the seed label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. Do not pass seed phrases or seed passwords as command-line arguments. Use `seed add <LABEL> --random` to generate a new 24-word seed phrase; the generated phrase is temporarily revealed after it is encrypted and stored, and can later be shown again with `seed show <LABEL>`.
+
+`seed list` displays configured seed labels without requiring a password. `seed rename [OLD_LABEL] [NEW_LABEL]` changes a seed's label while preserving the underlying seed id and encrypted payload; if the old label is omitted in interactive mode, the CLI lets you select the source seed first.
 
 `seed use [LABEL]` sets the active seed. If the label is omitted, the CLI opens a seed selector instead of asking you to type the label, unless `--non-interactive` is supplied. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed by default, or forces an explicit picker when `--no-defaults` is supplied.
 
@@ -103,14 +109,18 @@ For safety, `seed show` displays the seed phrase in a temporary terminal view an
 
 Seed labels may contain only ASCII letters, digits, dash (`-`), and underscore (`_`).
 
-### Example: issue a new identity
+### Example: issue, inspect, and rename identities
 
 ```bash
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet
 cargo run -p ccd-wallet -- identity new my_identity --interactive --network testnet
-cargo run -p ccd-wallet -- identity new my_identity --provider 1 --seed main_seed --network testnet
+cargo run -p ccd-wallet -- identity new my_identity --provider 1 --seed daily_seed --network testnet
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --node https://grpc.testnet.concordium.com:20000
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --no-wait
+cargo run -p ccd-wallet -- identity list
+cargo run -p ccd-wallet -- identity list --network testnet --provider 1 --status done
+cargo run -p ccd-wallet -- identity rename my_identity primary_identity
+cargo run -p ccd-wallet -- identity rename
 ```
 
 `identity new [LABEL]` uses the active seed by default, unless `--seed <LABEL>` is supplied. If the label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. `--provider <ID>` selects an identity provider directly; if no provider is supplied, the CLI can prompt you to choose one interactively. `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries. Use `--no-defaults` to force explicit selection instead of silently using the active seed or active network.
@@ -121,17 +131,28 @@ The identity issuance flow is browser-assisted: the CLI resolves wallet-facing p
 
 Identity private payloads, including the issuance `code_uri` and issued identity object, are encrypted in SQLite under the owning seed's password domain. Identity labels and public metadata such as network, provider id, status, timestamps, and identity expiry remain plaintext. Expiry metadata is used to avoid account creation attempts with expired identities.
 
-### Example: create an account
+`identity list` is human-oriented and scope-aware. By default it uses the active seed and active network, but you can broaden the scope with `--seed all` and/or `--network all`, then narrow with filters such as `--provider <ID>` and `--status <pending|done|expired>`. `identity rename` supports either an explicit old label or, when omitted in interactive mode, a fuzzy searchable selector across stored identities that includes seed/network metadata.
+
+### Example: create, inspect, and rename accounts
 
 ```bash
-cargo run -p ccd-wallet -- account new my_account --identity my_identity --network testnet
-cargo run -p ccd-wallet -- account new my_account --identity my_identity --network testnet --no-wait
-cargo run -p ccd-wallet -- account new my_account --identity my_identity --seed main_seed --network testnet
+cargo run -p ccd-wallet -- account new my_account --identity primary_identity --network testnet
+cargo run -p ccd-wallet -- account new my_account --identity primary_identity --network testnet --no-wait
+cargo run -p ccd-wallet -- account new my_account --identity primary_identity --seed daily_seed --network testnet
+cargo run -p ccd-wallet -- account list
+cargo run -p ccd-wallet -- account list --network all --status pending
+cargo run -p ccd-wallet -- account list --seed daily_seed --show-addresses
+cargo run -p ccd-wallet -- account rename my_account main_account
+cargo run -p ccd-wallet -- account rename --show-addresses --seed daily_seed
 ```
 
 `account new [LABEL]` creates a normal Concordium account by deriving credential material from the selected seed and issued identity, submitting a credential deployment to the resolved node, and storing the local account record. If `--identity <LABEL>` is omitted, the CLI prompts you to choose a usable identity unless `--non-interactive` is supplied. Usable identities must belong to the selected seed and network and must not be expired. If a selected identity is still pending, the wallet checks the stored encrypted `code_uri` with the identity provider before account creation proceeds.
 
 By default, `account new` waits until the credential deployment finalizes and then stores the new account address encrypted under the owning seed's password domain in a structured account private payload. Use `--no-wait` to return after successful submission; the account remains pending locally for future lazy finalization checks.
+
+`account list` is human-oriented and scope-aware. By default it uses the active seed and active network, but you can broaden the scope with `--seed all` and/or `--network all`, then narrow with `--status <pending|finalized>`. Account addresses remain hidden unless you request `--show-addresses`, which prompts for the necessary seed password material to decrypt them.
+
+`account rename` supports either an explicit old label or, when omitted in interactive mode, a fuzzy searchable selector across stored accounts. `account rename --show-addresses` requires a concrete seed scope, supplied either through `--seed <LABEL>` or through an interactive seed-selection prompt, before the selector can display decrypted addresses.
 
 If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal using the same interactive prompt framework.
 

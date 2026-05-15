@@ -3,8 +3,9 @@ use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     config,
     store::{
-        config::{NetworkEntry, load, save},
-        wallet_state,
+        accounts,
+        config::{NetworkEntry, list_networks, load, rename_network, save},
+        identities, wallet_state,
     },
 };
 use clap::{Args, Subcommand};
@@ -27,6 +28,10 @@ pub enum NetworkSubcommand {
     /// Register a named Concordium network by connecting to a node and
     /// deriving its genesis hash.
     Add(Box<NetworkAddArgs>),
+    /// List configured networks.
+    List,
+    /// Rename a configured network.
+    Rename(NetworkRenameArgs),
     /// Set the active network by name.
     Use(NetworkUseArgs),
 }
@@ -55,6 +60,21 @@ pub struct NetworkUseArgs {
     /// Name of a registered network to set as active.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
+
+    /// Disable prompt fallback and require values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkRenameArgs {
+    /// Existing network name.
+    #[arg(value_name = "OLD_NAME")]
+    pub old_name: Option<String>,
+
+    /// New network name.
+    #[arg(value_name = "NEW_NAME")]
+    pub new_name: Option<String>,
 
     /// Disable prompt fallback and require values on the command line.
     #[arg(long = "non-interactive")]
@@ -168,6 +188,116 @@ fn resolve_required_input(
     }
 }
 
+pub async fn list(conn: &Connection) -> Result<()> {
+    let app_config = load()?;
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+    let identities = identities::list(conn)?;
+    let accounts = accounts::list(conn)?;
+
+    for (name, entry) in list_networks(&app_config) {
+        let identity_count = identities
+            .iter()
+            .filter(|record| record.network_genesis_hash == entry.genesis_hash)
+            .count();
+        let account_count = accounts
+            .iter()
+            .filter(|record| record.network_genesis_hash == entry.genesis_hash)
+            .count();
+        println!(
+            "{}",
+            render_network_list_text(
+                &name,
+                &entry,
+                active.as_deref() == Some(name.as_str()),
+                identity_count,
+                account_count,
+            )
+        );
+    }
+    Ok(())
+}
+
+fn render_network_list_text(
+    name: &str,
+    entry: &NetworkEntry,
+    active: bool,
+    identity_count: usize,
+    account_count: usize,
+) -> String {
+    render_network_text(name, entry, active, identity_count, account_count, true)
+}
+
+fn render_network_selector_text(
+    name: &str,
+    entry: &NetworkEntry,
+    identity_count: usize,
+    account_count: usize,
+) -> String {
+    render_network_text(name, entry, false, identity_count, account_count, false)
+}
+
+fn render_network_text(
+    name: &str,
+    entry: &NetworkEntry,
+    active: bool,
+    identity_count: usize,
+    account_count: usize,
+    show_active: bool,
+) -> String {
+    let mut text = format!(
+        "{name} — {} • {} • {}",
+        entry.node_endpoint,
+        format_count(identity_count, "identity", "identities"),
+        format_count(account_count, "account", "accounts"),
+    );
+    if show_active && active {
+        text.push_str(" • active");
+    }
+    text
+}
+
+fn format_count(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
+}
+
+pub async fn rename(conn: &Connection, args: NetworkRenameArgs) -> Result<()> {
+    let mut app_config = load()?;
+    let old_name = match args.old_name {
+        Some(name) => name,
+        None if args.non_interactive => {
+            bail!("network name must be provided in --non-interactive mode")
+        }
+        None => select_network_name(conn, &app_config)?,
+    };
+    let new_name = match args.new_name {
+        Some(name) => name,
+        None if args.non_interactive => {
+            bail!("new network name must be provided in --non-interactive mode")
+        }
+        None => input("New network name:")
+            .placeholder(&old_name)
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Network name is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?,
+    };
+
+    rename_network(&mut app_config, &old_name, &new_name)?;
+    save(&app_config)?;
+    if wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.as_deref()
+        == Some(old_name.as_str())
+    {
+        wallet_state::set(conn, wallet_state::ACTIVE_NETWORK_KEY, &new_name)?;
+    }
+    println!("Network '{old_name}' renamed to '{new_name}'.");
+    Ok(())
+}
+
 pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> {
     let app_config = load()?;
     let name = resolve_network_use_name(conn, &app_config, args.name, args.non_interactive)?;
@@ -182,7 +312,7 @@ pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> 
 
     wallet_state::set(conn, wallet_state::ACTIVE_NETWORK_KEY, &name)?;
 
-    println!("Active network set to '{}'.", name);
+    println!("Active network set to '{name}'.");
 
     Ok(())
 }
@@ -210,16 +340,28 @@ fn select_network_name(
         bail!("no networks are configured; run `ccd-wallet network add` first")
     }
 
+    let identities = identities::list(conn)?;
+    let accounts = accounts::list(conn)?;
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
     let items = app_config
         .networks
         .iter()
-        .map(|(name, entry)| SelectItem {
-            value: name.clone(),
-            label: name.clone(),
-            hint: entry.node_endpoint.clone(),
+        .map(|(name, entry)| {
+            let identity_count = identities
+                .iter()
+                .filter(|record| record.network_genesis_hash == entry.genesis_hash)
+                .count();
+            let account_count = accounts
+                .iter()
+                .filter(|record| record.network_genesis_hash == entry.genesis_hash)
+                .count();
+            SelectItem {
+                value: name.clone(),
+                label: render_network_selector_text(name, entry, identity_count, account_count),
+                hint: String::new(),
+            }
         })
         .collect::<Vec<_>>();
-    let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
     let initial = active.as_ref();
     select_or_single("Select network", &items, initial)
 }
@@ -277,5 +419,50 @@ mod tests {
         let selected = resolve_network_use_name(&conn, &app_config, None, false).unwrap();
 
         assert_eq!(selected, "testnet");
+    }
+
+    #[test]
+    fn rename_active_network_updates_wallet_state() {
+        let conn = conn();
+        wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "testnet").unwrap();
+
+        let mut app_config = app_config_with_networks(&["testnet"]);
+        rename_network(&mut app_config, "testnet", "staging").unwrap();
+        if wallet_state::get(&conn, wallet_state::ACTIVE_NETWORK_KEY)
+            .unwrap()
+            .as_deref()
+            == Some("testnet")
+        {
+            wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "staging").unwrap();
+        }
+
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_NETWORK_KEY).unwrap(),
+            Some("staging".to_owned())
+        );
+    }
+
+    #[test]
+    fn render_network_list_text_uses_single_line_format() {
+        let entry = NetworkEntry {
+            node_endpoint: "https://grpc.testnet.concordium.com:20000".to_owned(),
+            genesis_hash: "hash-testnet".to_owned(),
+            wallet_proxy: "https://wallet-proxy.testnet.concordium.com".to_owned(),
+        };
+
+        assert_eq!(
+            render_network_list_text("testnet", &entry, true, 2, 3),
+            "testnet — https://grpc.testnet.concordium.com:20000 • 2 identities • 3 accounts • active"
+        );
+        assert_eq!(
+            render_network_selector_text("testnet", &entry, 2, 3),
+            "testnet — https://grpc.testnet.concordium.com:20000 • 2 identities • 3 accounts"
+        );
+    }
+
+    #[test]
+    fn format_count_handles_singular_and_plural() {
+        assert_eq!(format_count(1, "identity", "identities"), "1 identity");
+        assert_eq!(format_count(2, "identity", "identities"), "2 identities");
     }
 }

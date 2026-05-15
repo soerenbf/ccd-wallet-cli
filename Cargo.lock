@@ -560,6 +560,7 @@ dependencies = [
  "bip39",
  "ccd-wallet-core",
  "ccd-wallet-identity-provider",
+ "chrono",
  "clap",
  "cliclack",
  "concordium-rust-sdk",

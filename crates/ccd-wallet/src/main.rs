@@ -18,9 +18,7 @@ async fn main() -> Result<()> {
         Command::Node(command) => commands::node::run(&conn, command.command).await,
         Command::Network(command) => commands::config::run(&conn, command).await,
         Command::Seed(command) => commands::seed::run(&conn, command.command).await,
-        Command::Identity(command) => match command.command {
-            cli::IdentitySubcommand::New(args) => commands::identity::run(&mut conn, args).await,
-        },
+        Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,
     }
 }

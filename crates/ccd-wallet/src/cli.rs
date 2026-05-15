@@ -38,6 +38,10 @@ pub struct SeedCommand {
 pub enum SeedSubcommand {
     /// Add a password-protected seed phrase.
     Add(SeedAddArgs),
+    /// List configured seeds.
+    List,
+    /// Rename a configured seed.
+    Rename(SeedRenameArgs),
     /// Set the active seed by label.
     Use(SeedUseArgs),
     /// Show a seed phrase after password authentication.
@@ -95,6 +99,21 @@ pub struct SeedRemoveArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SeedRenameArgs {
+    /// Existing seed label.
+    #[arg(value_name = "OLD_LABEL")]
+    pub old_label: Option<String>,
+
+    /// New seed label.
+    #[arg(value_name = "NEW_LABEL")]
+    pub new_label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct IdentityCommand {
     #[command(subcommand)]
     pub command: IdentitySubcommand,
@@ -102,8 +121,39 @@ pub struct IdentityCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum IdentitySubcommand {
+    /// List stored identities.
+    List(IdentityListArgs),
     /// Issue a new identity.
-    New(IdentityNewArgs),
+    New(Box<IdentityNewArgs>),
+    /// Rename a stored identity.
+    Rename(IdentityRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IdentityListArgs {
+    /// Seed label to use. Defaults to the active seed.
+    #[arg(long, value_name = "LABEL")]
+    pub seed: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Filter identities by provider id.
+    #[arg(long, value_name = "ID")]
+    pub provider: Option<u32>,
+
+    /// Filter identities by status.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active seed/network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -150,6 +200,21 @@ pub struct IdentityNewArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct IdentityRenameArgs {
+    /// Existing identity label.
+    #[arg(value_name = "OLD_LABEL")]
+    pub old_label: Option<String>,
+
+    /// New identity label.
+    #[arg(value_name = "NEW_LABEL")]
+    pub new_label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct AccountCommand {
     #[command(subcommand)]
     pub command: AccountSubcommand,
@@ -157,8 +222,39 @@ pub struct AccountCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AccountSubcommand {
+    /// List stored accounts.
+    List(AccountListArgs),
     /// Create a new account from a stored identity.
-    New(AccountNewArgs),
+    New(Box<AccountNewArgs>),
+    /// Rename a stored account.
+    Rename(AccountRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AccountListArgs {
+    /// Seed label to use. Defaults to the active seed.
+    #[arg(long, value_name = "LABEL")]
+    pub seed: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Filter accounts by status.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// Reveal decrypted account addresses in the output.
+    #[arg(long = "show-addresses")]
+    pub show_addresses: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active seed/network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -194,6 +290,29 @@ pub struct AccountNewArgs {
     /// Disable silent use of active seed/network defaults and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AccountRenameArgs {
+    /// Existing account label.
+    #[arg(value_name = "OLD_LABEL")]
+    pub old_label: Option<String>,
+
+    /// New account label.
+    #[arg(value_name = "NEW_LABEL")]
+    pub new_label: Option<String>,
+
+    /// Seed label to use when showing addresses in the selector.
+    #[arg(long, value_name = "LABEL")]
+    pub seed: Option<String>,
+
+    /// Reveal decrypted account addresses in the selector.
+    #[arg(long = "show-addresses")]
+    pub show_addresses: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
