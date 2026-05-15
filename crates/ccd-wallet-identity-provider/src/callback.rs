@@ -1,8 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::{
-    io::{self, Write},
-    time::Duration,
-};
+use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,13 +23,6 @@ impl CallbackSession {
             Self::Loopback(session) => session.redirect_uri(),
         }
     }
-
-    pub async fn receive(self, browser_url: &str) -> Result<String> {
-        match self {
-            Self::Manual(session) => session.receive(browser_url).await,
-            Self::Loopback(session) => session.receive(browser_url).await,
-        }
-    }
 }
 
 pub struct ManualPasteSession;
@@ -40,16 +30,6 @@ pub struct ManualPasteSession;
 impl ManualPasteSession {
     pub fn redirect_uri(&self) -> &str {
         MANUAL_REDIRECT_URI
-    }
-
-    pub async fn receive(self, browser_url: &str) -> Result<String> {
-        println!("Open this URL in your browser:\n\n{browser_url}\n");
-        print!("Paste the final redirect URL: ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        parse_callback_url(input.trim())
     }
 }
 
@@ -87,7 +67,7 @@ impl LoopbackCallbackSession {
         &self.redirect_uri
     }
 
-    pub async fn receive(self, _browser_url: &str) -> Result<String> {
+    pub async fn receive(self) -> Result<String> {
         timeout(self.timeout, self.receive_inner())
             .await
             .context(
@@ -301,7 +281,7 @@ mod tests {
             .unwrap();
         let redirect_uri = session.redirect_uri().to_owned();
         let complete_uri = format!("{redirect_uri}/complete");
-        let handle = tokio::spawn(async move { session.receive("browser-url").await });
+        let handle = tokio::spawn(async move { session.receive().await });
 
         let page = reqwest::get(&redirect_uri).await.unwrap();
         assert_eq!(page.status(), reqwest::StatusCode::OK);
@@ -330,7 +310,7 @@ mod tests {
             .await
             .unwrap();
         let complete_uri = format!("{}/complete", session.redirect_uri());
-        let handle = tokio::spawn(async move { session.receive("browser-url").await });
+        let handle = tokio::spawn(async move { session.receive().await });
 
         let response = reqwest::Client::new()
             .post(complete_uri)
@@ -352,7 +332,7 @@ mod tests {
         let redirect_uri = session.redirect_uri().to_owned();
         let wrong_uri = redirect_uri.replace("/callback/", "/callback/wrong-");
         let complete_uri = format!("{redirect_uri}/complete");
-        let handle = tokio::spawn(async move { session.receive("browser-url").await });
+        let handle = tokio::spawn(async move { session.receive().await });
 
         let response = reqwest::get(wrong_uri).await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
@@ -375,7 +355,7 @@ mod tests {
             .await
             .unwrap();
         let complete_uri = format!("{}/complete", session.redirect_uri());
-        let handle = tokio::spawn(async move { session.receive("browser-url").await });
+        let handle = tokio::spawn(async move { session.receive().await });
 
         let first = reqwest::Client::new()
             .post(&complete_uri)

@@ -1,10 +1,14 @@
-use crate::cli::SeedSubcommand;
+use crate::{
+    cli::SeedSubcommand,
+    commands::ui::{SelectItem, select_or_single},
+};
 use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
 use ccd_wallet_core::store::{seeds, wallet_state};
+use cliclack::{input, password};
 use console::Term;
 use rusqlite::Connection;
-use std::{io, sync::mpsc, thread, time::Duration};
+use std::{sync::mpsc, thread, time::Duration};
 
 const SEED_REVEAL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -14,6 +18,13 @@ const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
 const LEAVE_ALT_SCREEN: &str = "\x1b[?1049l";
 
 pub trait SeedPrompts {
+    fn prompt_seed_label(&mut self, prompt: &str) -> Result<String>;
+    fn select_seed_label(
+        &mut self,
+        prompt: &str,
+        labels: &[String],
+        active: Option<&str>,
+    ) -> Result<String>;
     fn prompt_seed_phrase(&mut self) -> Result<String>;
     fn prompt_password(&mut self) -> Result<String>;
     fn prompt_password_confirmation(&mut self) -> Result<String>;
@@ -28,30 +39,67 @@ pub trait SeedPhraseRevealer {
 pub struct TerminalSeedPrompts;
 
 impl SeedPrompts for TerminalSeedPrompts {
+    fn prompt_seed_label(&mut self, prompt: &str) -> Result<String> {
+        Ok(input(prompt)
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Seed label is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?)
+    }
+
+    fn select_seed_label(
+        &mut self,
+        prompt: &str,
+        labels: &[String],
+        active: Option<&str>,
+    ) -> Result<String> {
+        let items = labels
+            .iter()
+            .map(|label| SelectItem {
+                value: label.clone(),
+                label: label.clone(),
+                hint: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let initial = active.map(str::to_owned);
+        select_or_single(prompt, &items, initial.as_ref())
+    }
+
     fn prompt_seed_phrase(&mut self) -> Result<String> {
-        Ok(rpassword::prompt_password("Enter seed phrase: ")?)
+        Ok(password("Enter seed phrase:").mask('▪').interact()?)
     }
 
     fn prompt_password(&mut self) -> Result<String> {
-        Ok(rpassword::prompt_password("Set password: ")?)
+        Ok(password("Set password:").mask('▪').interact()?)
     }
 
     fn prompt_password_confirmation(&mut self) -> Result<String> {
-        Ok(rpassword::prompt_password("Confirm password: ")?)
+        Ok(password("Confirm password:").mask('▪').interact()?)
     }
 
     fn prompt_unlock_password(&mut self, label: &str) -> Result<String> {
-        Ok(rpassword::prompt_password(format!(
-            "Password for seed '{label}': "
-        ))?)
+        Ok(password(format!("Password for seed '{label}':"))
+            .mask('▪')
+            .interact()?)
     }
 
     fn prompt_remove_confirmation(&mut self, label: &str) -> Result<String> {
-        println!("This will remove seed '{label}' and all seed-owned data.");
-        println!("Type '{label}' to confirm:");
-        let mut confirmation = String::new();
-        io::stdin().read_line(&mut confirmation)?;
-        Ok(confirmation.trim().to_owned())
+        cliclack::log::warning(format!(
+            "This will remove seed '{label}' and all seed-owned data."
+        ))?;
+        Ok(input(format!("Type '{label}' to confirm:"))
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Confirmation is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?)
     }
 }
 
@@ -76,20 +124,44 @@ async fn run_with_io(
     revealer: &mut impl SeedPhraseRevealer,
 ) -> Result<()> {
     match command {
-        SeedSubcommand::Add(args) => add(conn, args.label, args.random, prompts, revealer).await,
-        SeedSubcommand::Use(args) => use_seed(conn, args.label).await,
-        SeedSubcommand::Show(args) => show(conn, args.label, prompts, revealer).await,
-        SeedSubcommand::Remove(args) => remove_seed(conn, args.label, prompts).await,
+        SeedSubcommand::Add(args) => {
+            add(
+                conn,
+                args.label,
+                args.random,
+                args.non_interactive,
+                prompts,
+                revealer,
+            )
+            .await
+        }
+        SeedSubcommand::Use(args) => {
+            use_seed(conn, args.label, args.non_interactive, prompts).await
+        }
+        SeedSubcommand::Show(args) => {
+            show(conn, args.label, args.no_defaults, prompts, revealer).await
+        }
+        SeedSubcommand::Remove(args) => {
+            remove_seed(conn, args.label, args.non_interactive, prompts).await
+        }
     }
 }
 
 async fn add(
     conn: &Connection,
-    label: String,
+    label: Option<String>,
     random: bool,
+    non_interactive: bool,
     prompts: &mut impl SeedPrompts,
     revealer: &mut impl SeedPhraseRevealer,
 ) -> Result<()> {
+    let label = resolve_required_seed_label(
+        label,
+        non_interactive,
+        prompts,
+        "Seed label:",
+        "seed label must be provided in --non-interactive mode",
+    )?;
     validate_seed_label(&label)?;
 
     if seeds::find_by_label(conn, &label)?.is_some() {
@@ -121,7 +193,19 @@ async fn add(
     Ok(())
 }
 
-async fn use_seed(conn: &Connection, label: String) -> Result<()> {
+async fn use_seed(
+    conn: &Connection,
+    label: Option<String>,
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<()> {
+    let label = match label {
+        Some(label) => label,
+        None if non_interactive => {
+            bail!("seed label must be provided in --non-interactive mode")
+        }
+        None => select_seed_label(conn, prompts)?,
+    };
     ensure_seed_exists(conn, &label)?;
     wallet_state::set(conn, wallet_state::ACTIVE_SEED_KEY, &label)?;
 
@@ -132,9 +216,17 @@ async fn use_seed(conn: &Connection, label: String) -> Result<()> {
 
 async fn remove_seed(
     conn: &Connection,
-    label: String,
+    label: Option<String>,
+    non_interactive: bool,
     prompts: &mut impl SeedPrompts,
 ) -> Result<()> {
+    let label = resolve_required_seed_label(
+        label,
+        non_interactive,
+        prompts,
+        "Seed label:",
+        "seed label must be provided in --non-interactive mode",
+    )?;
     ensure_seed_exists(conn, &label)?;
     let confirmation = prompts.prompt_remove_confirmation(&label)?;
     if confirmation != label {
@@ -154,10 +246,11 @@ async fn remove_seed(
 async fn show(
     conn: &Connection,
     label: Option<String>,
+    no_defaults: bool,
     prompts: &mut impl SeedPrompts,
     revealer: &mut impl SeedPhraseRevealer,
 ) -> Result<()> {
-    let label = resolve_seed_label(conn, label)?;
+    let label = resolve_seed_label(conn, label, no_defaults, prompts)?;
     ensure_seed_exists(conn, &label)?;
 
     let password = prompts.prompt_unlock_password(&label)?;
@@ -172,13 +265,49 @@ fn ensure_seed_exists(conn: &Connection, label: &str) -> Result<seeds::SeedRecor
     seeds::find_by_label(conn, label)?.with_context(|| format!("seed '{label}' is not configured"))
 }
 
-fn resolve_seed_label(conn: &Connection, label: Option<String>) -> Result<String> {
+fn resolve_required_seed_label(
+    label: Option<String>,
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+    prompt: &str,
+    error: &str,
+) -> Result<String> {
     match label {
         Some(label) => Ok(label),
+        None if non_interactive => bail!("{error}"),
+        None => prompts.prompt_seed_label(prompt),
+    }
+}
+
+fn resolve_seed_label(
+    conn: &Connection,
+    label: Option<String>,
+    no_defaults: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<String> {
+    match label {
+        Some(label) => Ok(label),
+        None if no_defaults => select_seed_label(conn, prompts),
         None => wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.with_context(
             || "no active seed is set; provide a seed label or run `ccd-wallet seed use <LABEL>`",
         ),
     }
+}
+
+fn select_seed_label(conn: &Connection, prompts: &mut impl SeedPrompts) -> Result<String> {
+    let seeds = seeds::list(conn)?;
+    if seeds.is_empty() {
+        bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
+    }
+    let labels = seeds
+        .iter()
+        .map(|seed| seed.label.clone())
+        .collect::<Vec<_>>();
+    if labels.len() == 1 {
+        return Ok(labels[0].clone());
+    }
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+    prompts.select_seed_label("Select seed", &labels, active.as_deref())
 }
 
 pub fn normalize_seed_phrase(input: &str) -> String {
@@ -266,6 +395,9 @@ mod tests {
 
     #[derive(Default)]
     struct TestPrompts {
+        seed_label: String,
+        selected_active_seed: Option<String>,
+        select_seed_calls: usize,
         seed_phrase: String,
         password: String,
         password_confirmation: String,
@@ -274,6 +406,21 @@ mod tests {
     }
 
     impl SeedPrompts for TestPrompts {
+        fn prompt_seed_label(&mut self, _prompt: &str) -> Result<String> {
+            Ok(self.seed_label.clone())
+        }
+
+        fn select_seed_label(
+            &mut self,
+            _prompt: &str,
+            _labels: &[String],
+            active: Option<&str>,
+        ) -> Result<String> {
+            self.select_seed_calls += 1;
+            self.selected_active_seed = active.map(str::to_owned);
+            Ok(self.seed_label.clone())
+        }
+
         fn prompt_seed_phrase(&mut self) -> Result<String> {
             Ok(self.seed_phrase.clone())
         }
@@ -351,19 +498,22 @@ mod tests {
     async fn password_confirmation_mismatch_does_not_write_seed() {
         let conn = conn();
         let mut prompts = TestPrompts {
+            seed_label: String::new(),
             seed_phrase: VALID_MNEMONIC.to_owned(),
             password: "one".to_owned(),
             password_confirmation: "two".to_owned(),
             unlock_password: String::new(),
             remove_confirmation: String::new(),
+            ..Default::default()
         };
         let mut revealer = TestRevealer::default();
 
         let err = run_with_io(
             &conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
-                label: "main_seed".to_owned(),
+                label: Some("main_seed".to_owned()),
                 random: false,
+                non_interactive: false,
             }),
             &mut prompts,
             &mut revealer,
@@ -378,11 +528,13 @@ mod tests {
     async fn invalid_seed_phrase_does_not_write_seed() {
         let conn = conn();
         let mut prompts = TestPrompts {
+            seed_label: String::new(),
             seed_phrase: "not valid".to_owned(),
             password: "password".to_owned(),
             password_confirmation: "password".to_owned(),
             unlock_password: String::new(),
             remove_confirmation: String::new(),
+            ..Default::default()
         };
         let mut revealer = TestRevealer::default();
 
@@ -390,8 +542,9 @@ mod tests {
             run_with_io(
                 &conn,
                 SeedSubcommand::Add(crate::cli::SeedAddArgs {
-                    label: "main_seed".to_owned(),
+                    label: Some("main_seed".to_owned()),
                     random: false,
+                    non_interactive: false,
                 }),
                 &mut prompts,
                 &mut revealer,
@@ -403,11 +556,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_use_without_label_prompts_with_selector() {
+        let conn = conn();
+        add_test_seed(&conn);
+        seeds::add(&conn, "other_seed", VALID_MNEMONIC.as_bytes(), "password").unwrap();
+        wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
+
+        let mut prompts = TestPrompts {
+            seed_label: "main_seed".to_owned(),
+            ..Default::default()
+        };
+        use_seed(&conn, None, false, &mut prompts).await.unwrap();
+
+        assert_eq!(prompts.select_seed_calls, 1);
+        assert_eq!(prompts.selected_active_seed, Some("main_seed".to_owned()));
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_SEED_KEY).unwrap(),
+            Some("main_seed".to_owned())
+        );
+    }
+
+    #[tokio::test]
     async fn seed_use_sets_active_seed() {
         let conn = conn();
         add_test_seed(&conn);
 
-        use_seed(&conn, "main_seed".to_owned()).await.unwrap();
+        let mut prompts = TestPrompts::default();
+        use_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
+            .await
+            .unwrap();
 
         assert_eq!(
             wallet_state::get(&conn, wallet_state::ACTIVE_SEED_KEY).unwrap(),
@@ -419,7 +596,12 @@ mod tests {
     async fn seed_use_rejects_unknown_seed_without_writing_state() {
         let conn = conn();
 
-        assert!(use_seed(&conn, "missing".to_owned()).await.is_err());
+        let mut prompts = TestPrompts::default();
+        assert!(
+            use_seed(&conn, Some("missing".to_owned()), false, &mut prompts)
+                .await
+                .is_err()
+        );
         assert_eq!(
             wallet_state::get(&conn, wallet_state::ACTIVE_SEED_KEY).unwrap(),
             None
@@ -439,6 +621,7 @@ mod tests {
         show(
             &conn,
             Some("main_seed".to_owned()),
+            false,
             &mut prompts,
             &mut revealer,
         )
@@ -465,6 +648,7 @@ mod tests {
             show(
                 &conn,
                 Some("main_seed".to_owned()),
+                false,
                 &mut prompts,
                 &mut revealer,
             )
@@ -486,7 +670,7 @@ mod tests {
         };
         let mut revealer = TestRevealer::default();
 
-        show(&conn, None, &mut prompts, &mut revealer)
+        show(&conn, None, false, &mut prompts, &mut revealer)
             .await
             .unwrap();
 
@@ -494,11 +678,106 @@ mod tests {
         assert_eq!(revealer.revealed[0].1, VALID_MNEMONIC);
     }
 
+    #[tokio::test]
+    async fn seed_show_no_defaults_skips_selection_when_only_one_seed_exists() {
+        let conn = conn();
+        add_test_seed(&conn);
+        wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
+        let mut prompts = TestPrompts {
+            unlock_password: "password".to_owned(),
+            ..Default::default()
+        };
+        let mut revealer = TestRevealer::default();
+
+        show(&conn, None, true, &mut prompts, &mut revealer)
+            .await
+            .unwrap();
+
+        assert_eq!(prompts.select_seed_calls, 0);
+        assert_eq!(prompts.selected_active_seed, None);
+        assert_eq!(revealer.revealed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seed_show_no_defaults_prompts_and_preselects_active_seed() {
+        let conn = conn();
+        add_test_seed(&conn);
+        seeds::add(&conn, "other_seed", VALID_MNEMONIC.as_bytes(), "password").unwrap();
+        wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
+        let mut prompts = TestPrompts {
+            seed_label: "main_seed".to_owned(),
+            unlock_password: "password".to_owned(),
+            ..Default::default()
+        };
+        let mut revealer = TestRevealer::default();
+
+        show(&conn, None, true, &mut prompts, &mut revealer)
+            .await
+            .unwrap();
+
+        assert_eq!(prompts.selected_active_seed, Some("main_seed".to_owned()));
+        assert_eq!(revealer.revealed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seed_add_prompts_for_missing_label_in_interactive_mode() {
+        let conn = conn();
+        let mut prompts = TestPrompts {
+            seed_label: "prompted_seed".to_owned(),
+            seed_phrase: VALID_MNEMONIC.to_owned(),
+            password: "password".to_owned(),
+            password_confirmation: "password".to_owned(),
+            ..Default::default()
+        };
+        let mut revealer = TestRevealer::default();
+
+        run_with_io(
+            &conn,
+            SeedSubcommand::Add(crate::cli::SeedAddArgs {
+                label: None,
+                random: false,
+                non_interactive: false,
+            }),
+            &mut prompts,
+            &mut revealer,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            seeds::find_by_label(&conn, "prompted_seed")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_add_missing_label_errors_in_non_interactive_mode() {
+        let conn = conn();
+        let mut prompts = TestPrompts::default();
+        let mut revealer = TestRevealer::default();
+
+        let err = run_with_io(
+            &conn,
+            SeedSubcommand::Add(crate::cli::SeedAddArgs {
+                label: None,
+                random: false,
+                non_interactive: true,
+            }),
+            &mut prompts,
+            &mut revealer,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("--non-interactive"));
+    }
+
     #[test]
     fn missing_active_seed_is_actionable() {
         let conn = conn();
 
-        let err = resolve_seed_label(&conn, None).unwrap_err();
+        let mut prompts = TestPrompts::default();
+        let err = resolve_seed_label(&conn, None, false, &mut prompts).unwrap_err();
         assert!(err.to_string().contains("ccd-wallet seed use <LABEL>"));
     }
 
@@ -509,7 +788,7 @@ mod tests {
         let mut prompts = TestPrompts::default();
         let mut revealer = TestRevealer::default();
 
-        let err = show(&conn, None, &mut prompts, &mut revealer)
+        let err = show(&conn, None, false, &mut prompts, &mut revealer)
             .await
             .unwrap_err();
 
@@ -537,8 +816,9 @@ mod tests {
         run_with_io(
             &conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
-                label: "random_seed".to_owned(),
+                label: Some("random_seed".to_owned()),
                 random: true,
+                non_interactive: false,
             }),
             &mut prompts,
             &mut revealer,
@@ -570,8 +850,9 @@ mod tests {
             run_with_io(
                 &conn,
                 SeedSubcommand::Add(crate::cli::SeedAddArgs {
-                    label: "main_seed".to_owned(),
+                    label: Some("main_seed".to_owned()),
                     random: true,
+                    non_interactive: false,
                 }),
                 &mut prompts,
                 &mut revealer,
@@ -593,7 +874,7 @@ mod tests {
             ..Default::default()
         };
 
-        remove_seed(&conn, "main_seed".to_owned(), &mut prompts)
+        remove_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
             .await
             .unwrap();
 
@@ -614,7 +895,7 @@ mod tests {
         };
 
         assert!(
-            remove_seed(&conn, "main_seed".to_owned(), &mut prompts)
+            remove_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
                 .await
                 .is_err()
         );
@@ -637,7 +918,7 @@ mod tests {
             ..Default::default()
         };
 
-        remove_seed(&conn, "old_seed".to_owned(), &mut prompts)
+        remove_seed(&conn, Some("old_seed".to_owned()), false, &mut prompts)
             .await
             .unwrap();
 

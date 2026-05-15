@@ -1,4 +1,7 @@
-use crate::cli::{NodeInfoArgs, NodeSubcommand};
+use crate::{
+    cli::{NodeInfoArgs, NodeSubcommand},
+    commands::ui::{SelectItem, select_or_single},
+};
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     config,
@@ -45,6 +48,7 @@ pub(crate) fn resolve_endpoint(
     conn: &Connection,
     network: Option<String>,
     node: Option<v2::Endpoint>,
+    no_defaults: bool,
 ) -> Result<(v2::Endpoint, String)> {
     match (network, node) {
         (Some(network_name), None) => resolve_registered_network(&network_name),
@@ -54,22 +58,52 @@ pub(crate) fn resolve_endpoint(
         }
         (Some(_), Some(_)) => bail!("--network and --node are mutually exclusive"),
         (None, None) => {
-            let active_network = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(|| {
-                "no active network is set; provide `--network` or `--node`, or run `ccd-wallet network use <NAME>`"
-            })?;
+            let app_config = load()?;
+            let active_network = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+            if no_defaults {
+                let selected_network =
+                    prompt_for_network_name(&app_config, active_network.as_deref())?;
+                resolve_registered_network(&selected_network)
+            } else {
+                let active_network = active_network.with_context(|| {
+                    "no active network is set; provide `--network` or `--node`, or run `ccd-wallet network use <NAME>`"
+                })?;
 
-            resolve_registered_network(&active_network).with_context(|| {
-                format!(
-                    "active network '{}' is no longer registered; update it with `ccd-wallet network use <NAME>` or provide `--network` / `--node` explicitly",
-                    active_network
-                )
-            })
+                resolve_registered_network(&active_network).with_context(|| {
+                    format!(
+                        "active network '{}' is no longer registered; update it with `ccd-wallet network use <NAME>` or provide `--network` / `--node` explicitly",
+                        active_network
+                    )
+                })
+            }
         }
     }
 }
 
+fn prompt_for_network_name(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    active: Option<&str>,
+) -> Result<String> {
+    if app_config.networks.is_empty() {
+        bail!("no networks are configured; run `ccd-wallet network add` first")
+    }
+
+    let items = app_config
+        .networks
+        .iter()
+        .map(|(name, entry)| SelectItem {
+            value: name.clone(),
+            label: name.clone(),
+            hint: entry.node_endpoint.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let initial = active.map(str::to_owned);
+    select_or_single("Select network", &items, initial.as_ref())
+}
+
 async fn info(conn: &Connection, args: NodeInfoArgs) -> Result<()> {
-    let (endpoint, endpoint_label) = resolve_endpoint(conn, args.network, args.node)?;
+    let (endpoint, endpoint_label) =
+        resolve_endpoint(conn, args.network, args.node, args.no_defaults)?;
 
     let mut client = config::connect_v2_client(endpoint)
         .await

@@ -1,4 +1,9 @@
-use crate::cli::IdentityNewArgs;
+use crate::{
+    cli::IdentityNewArgs,
+    commands::ui::{
+        ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single,
+    },
+};
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     store::{
@@ -9,10 +14,10 @@ use ccd_wallet_core::{
 };
 use ccd_wallet_identity_provider::{
     self as identity_provider,
-    callback::{CallbackSession, LoopbackCallbackSession, ManualPasteSession},
+    callback::{CallbackSession, LoopbackCallbackSession, ManualPasteSession, parse_callback_url},
     client::{self, PollResult, WalletProxyIpEntry},
 };
-use cliclack::{password, select, spinner};
+use cliclack::{input, password, spinner};
 use concordium_rust_sdk::{
     id::types::{ArIdentity, ArInfo, IpInfo},
     v2,
@@ -33,23 +38,45 @@ pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
 }
 
 async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
-    validate_identity_label(&args.label)?;
+    let label = resolve_identity_label(args.label, args.non_interactive)?;
+    validate_identity_label(&label)?;
 
-    let seed_label = resolve_seed_label(conn, args.seed.as_deref())?;
-    let (network_name, network_entry, endpoint, endpoint_label) =
-        resolve_identity_network_context(conn, args.network.as_deref(), args.node.clone()).await?;
+    let (seed_label, seed_source) = resolve_seed_label(
+        conn,
+        args.seed.as_deref(),
+        args.non_interactive,
+        args.no_defaults,
+    )?;
+    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
+        resolve_identity_network_context(
+            conn,
+            args.network.as_deref(),
+            args.node.clone(),
+            args.non_interactive,
+            args.no_defaults,
+        )
+        .await?;
 
-    if identities::find_by_network_and_label(conn, &network_entry.genesis_hash, &args.label)?
-        .is_some()
-    {
+    if identities::find_by_network_and_label(conn, &network_entry.genesis_hash, &label)?.is_some() {
         bail!(
             "identity label '{}' already exists on network '{}'",
-            args.label,
+            label,
             network_name
         );
     }
 
-    cliclack::log::info(format!("Using seed: {seed_label}"))?;
+    log_resolved_context(&[
+        ContextLine {
+            label: "seed:",
+            value: seed_label.clone(),
+            source: seed_source,
+        },
+        ContextLine {
+            label: "network:",
+            value: format!("{network_name} @ {endpoint_label}"),
+            source: network_source,
+        },
+    ])?;
     let unlocked_seed = unlock_seed(conn, &seed_label)?;
     let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
         .context("stored seed phrase is not UTF-8")?
@@ -75,7 +102,12 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     spin.start("Fetching identity providers...");
     let ip_infos = fetch_identity_providers(&mut client).await?;
     spin.clear();
-    let ip_info = select_provider(&ip_infos, args.provider, args.interactive)?;
+    let ip_info = select_provider(
+        &ip_infos,
+        args.provider,
+        args.interactive,
+        args.non_interactive,
+    )?;
 
     let spin = spinner();
     spin.start("Fetching wallet proxy metadata...");
@@ -124,7 +156,7 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     if let Err(err) = open::that(&browser_url) {
         cliclack::log::warning(format!("failed to open browser automatically: {err}"))?;
     }
-    let code_uri = callback_session.receive(&browser_url).await?;
+    let code_uri = receive_callback(callback_session, &browser_url).await?;
 
     let record_id = identities::insert_pending(
         conn,
@@ -134,12 +166,12 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
             seed_id: &unlocked_seed.record.id,
             ip_identity: ip_info.ip_identity.0,
             identity_index,
-            label: &args.label,
+            label: &label,
             code_uri: &code_uri,
         },
     )?;
 
-    poll_identity(conn, record_id, &unlocked_seed.dek, &code_uri, &args.label).await
+    poll_identity(conn, record_id, &unlocked_seed.dek, &code_uri, &label).await
 }
 
 async fn fetch_identity_providers(
@@ -185,6 +217,7 @@ fn select_provider(
     providers: &[IpInfo<concordium_rust_sdk::id::constants::IpPairing>],
     provider: Option<u32>,
     interactive: bool,
+    non_interactive: bool,
 ) -> Result<&IpInfo<concordium_rust_sdk::id::constants::IpPairing>> {
     match (provider, interactive) {
         (Some(id), false) => providers
@@ -193,23 +226,12 @@ fn select_provider(
             .with_context(|| {
                 format!("identity provider {id} is not registered on the selected network")
             }),
-        (None, true) => {
-            let mut prompt = select("Select identity provider");
-            for ip in providers {
-                prompt = prompt.item(
-                    ip.ip_identity.0,
-                    ip.ip_description.name.clone(),
-                    format!("provider id: {}", ip.ip_identity.0),
-                );
-            }
-            let selected_id = prompt.interact()?;
-            providers
-                .iter()
-                .find(|ip| ip.ip_identity.0 == selected_id)
-                .context("selected identity provider was not found")
-        }
+        (None, true) => select_provider_interactively(providers),
         (Some(_), true) => bail!("--provider and --interactive are mutually exclusive"),
-        (None, false) => bail!("specify either --provider <ID> or --interactive"),
+        (None, false) if non_interactive => {
+            bail!("specify either --provider <ID> or --interactive in --non-interactive mode")
+        }
+        (None, false) => select_provider_interactively(providers),
     }
 }
 
@@ -225,15 +247,72 @@ fn select_wallet_proxy_entry(
         })
 }
 
-fn resolve_seed_label(conn: &Connection, explicit: Option<&str>) -> Result<String> {
+fn resolve_identity_label(explicit: Option<String>, non_interactive: bool) -> Result<String> {
+    match explicit {
+        Some(label) => Ok(label),
+        None if non_interactive => {
+            bail!("identity label must be provided in --non-interactive mode")
+        }
+        None => Ok(input("Identity label:")
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Identity label is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?),
+    }
+}
+
+fn resolve_seed_label(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(String, ResolutionSource)> {
     match explicit {
         Some(label) => seeds::find_by_label(conn, label)?
-            .map(|s| s.label)
+            .map(|s| (s.label, ResolutionSource::Explicit))
             .with_context(|| format!("seed '{}' is not configured", label)),
-        None => wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.with_context(
-            || "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`.",
-        ),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+            if no_defaults {
+                return Ok((
+                    prompt_for_seed_label(conn, active.as_deref())?,
+                    ResolutionSource::Prompted,
+                ));
+            }
+            match active {
+                Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
+                None if non_interactive => bail!(
+                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
+                ),
+                None => Ok((
+                    prompt_for_seed_label(conn, None)?,
+                    ResolutionSource::Prompted,
+                )),
+            }
+        }
     }
+}
+
+fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<String> {
+    let seeds = seeds::list(conn)?;
+    if seeds.is_empty() {
+        bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
+    }
+
+    let items = seeds
+        .iter()
+        .map(|seed| SelectItem {
+            value: seed.label.clone(),
+            label: seed.label.clone(),
+            hint: String::new(),
+        })
+        .collect::<Vec<_>>();
+    let initial = active.map(str::to_owned);
+    select_or_single("Select seed", &items, initial.as_ref())
 }
 
 fn unlock_seed(conn: &Connection, seed_label: &str) -> Result<seeds::UnlockedSeed> {
@@ -251,6 +330,64 @@ async fn prepare_callback_session(manual_callback: bool) -> Result<CallbackSessi
     ))
 }
 
+async fn receive_callback(callback_session: CallbackSession, browser_url: &str) -> Result<String> {
+    match callback_session {
+        CallbackSession::Manual(_) => receive_manual_callback(browser_url),
+        CallbackSession::Loopback(session) => session.receive().await,
+    }
+}
+
+fn receive_manual_callback(browser_url: &str) -> Result<String> {
+    cliclack::log::info(format!("Open this URL in your browser:\n\n{browser_url}\n"))?;
+    let callback_url: String = input("Paste the final redirect URL:")
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Err("Redirect URL is required.")
+            } else {
+                Ok(())
+            }
+        })
+        .interact()?;
+    parse_callback_url(callback_url.trim())
+}
+
+fn prompt_for_matching_network_name(
+    matches: &[(String, NetworkEntry)],
+    active: Option<&str>,
+) -> Result<String> {
+    let items = matches
+        .iter()
+        .map(|(name, entry)| SelectItem {
+            value: name.clone(),
+            label: name.clone(),
+            hint: entry.node_endpoint.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let initial = active.map(str::to_owned);
+    select_or_single("Select network", &items, initial.as_ref())
+}
+
+fn prompt_for_network_name(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    active: Option<&str>,
+) -> Result<String> {
+    if app_config.networks.is_empty() {
+        bail!("no networks are configured; run `ccd-wallet network add` first")
+    }
+
+    let items = app_config
+        .networks
+        .iter()
+        .map(|(name, entry)| SelectItem {
+            value: name.clone(),
+            label: name.clone(),
+            hint: entry.node_endpoint.to_string(),
+        })
+        .collect::<Vec<_>>();
+    let initial = active.map(str::to_owned);
+    select_or_single("Select network", &items, initial.as_ref())
+}
+
 fn infer_net(network_name: &str, wallet_proxy: &str, endpoint_label: &str) -> Net {
     let haystack = format!("{network_name} {wallet_proxy} {endpoint_label}").to_ascii_lowercase();
     if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
@@ -264,7 +401,9 @@ async fn resolve_identity_network_context(
     conn: &Connection,
     network: Option<&str>,
     node_override: Option<v2::Endpoint>,
-) -> Result<(String, NetworkEntry, v2::Endpoint, String)> {
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(String, NetworkEntry, v2::Endpoint, String, ResolutionSource)> {
     let app_config = load()?;
 
     if let Some(endpoint) = node_override {
@@ -297,11 +436,18 @@ async fn resolve_identity_network_context(
                 bail!("network '{}' has no wallet_proxy configured", network_name);
             }
 
-            return Ok((network_name.to_owned(), entry, endpoint, endpoint_label));
+            return Ok((
+                network_name.to_owned(),
+                entry,
+                endpoint,
+                endpoint_label,
+                ResolutionSource::Explicit,
+            ));
         }
 
         let active_network = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-        if let Some(active_network) = active_network
+        if !no_defaults
+            && let Some(active_network) = active_network.clone()
             && let Some(entry) = app_config.networks.get(&active_network)
             && entry.genesis_hash == node_genesis_hash
         {
@@ -312,38 +458,78 @@ async fn resolve_identity_network_context(
                     active_network
                 );
             }
-            return Ok((active_network, entry, endpoint, endpoint_label));
+            return Ok((
+                active_network,
+                entry,
+                endpoint,
+                endpoint_label,
+                ResolutionSource::ActiveDefault,
+            ));
         }
 
-        let (matched_name, matched_entry) = app_config
+        let matches = app_config
             .networks
             .iter()
-            .find(|(_, entry)| entry.genesis_hash == node_genesis_hash)
-            .with_context(|| {
-                format!(
-                    "no configured network matches the supplied node at {} (genesis hash: {})",
-                    endpoint_label, node_genesis_hash
-                )
-            })?;
+            .filter(|(_, entry)| entry.genesis_hash == node_genesis_hash)
+            .map(|(name, entry)| (name.clone(), entry.clone()))
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            bail!(
+                "no configured network matches the supplied node at {} (genesis hash: {})",
+                endpoint_label,
+                node_genesis_hash
+            );
+        }
 
-        let matched_entry = matched_entry.clone();
+        let (matched_name, matched_entry, resolution_source) = if no_defaults && matches.len() > 1 {
+            let selected_name =
+                prompt_for_matching_network_name(&matches, active_network.as_deref())?;
+            let entry = matches
+                .iter()
+                .find(|(name, _)| *name == selected_name)
+                .map(|(_, entry)| entry.clone())
+                .context("selected network was not found")?;
+            (selected_name, entry, ResolutionSource::Prompted)
+        } else {
+            let (matched_name, matched_entry) = matches[0].clone();
+            (matched_name, matched_entry, ResolutionSource::Inferred)
+        };
+
         if matched_entry.wallet_proxy.trim().is_empty() {
             bail!("network '{}' has no wallet_proxy configured", matched_name);
         }
 
         return Ok((
-            matched_name.clone(),
+            matched_name,
             matched_entry,
             endpoint,
             endpoint_label,
+            resolution_source,
         ));
     }
 
-    let selected_network = match network {
-        Some(name) => name.to_owned(),
-        None => wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(
-            || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
-        )?,
+    let (selected_network, resolution_source) = match network {
+        Some(name) => (name.to_owned(), ResolutionSource::Explicit),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+            if no_defaults {
+                (
+                    prompt_for_network_name(&app_config, active.as_deref())?,
+                    ResolutionSource::Prompted,
+                )
+            } else {
+                match active {
+                    Some(name) => (name, ResolutionSource::ActiveDefault),
+                    None if non_interactive => bail!(
+                        "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
+                    ),
+                    None => (
+                        prompt_for_network_name(&app_config, None)?,
+                        ResolutionSource::Prompted,
+                    ),
+                }
+            }
+        }
     };
 
     let entry = app_config
@@ -385,7 +571,31 @@ async fn resolve_identity_network_context(
         );
     }
 
-    Ok((selected_network, entry, endpoint, endpoint_label))
+    Ok((
+        selected_network,
+        entry,
+        endpoint,
+        endpoint_label,
+        resolution_source,
+    ))
+}
+
+fn select_provider_interactively(
+    providers: &[IpInfo<concordium_rust_sdk::id::constants::IpPairing>],
+) -> Result<&IpInfo<concordium_rust_sdk::id::constants::IpPairing>> {
+    let items = providers
+        .iter()
+        .map(|ip| SelectItem {
+            value: ip.ip_identity.0,
+            label: ip.ip_description.name.clone(),
+            hint: format!("provider id: {}", ip.ip_identity.0),
+        })
+        .collect::<Vec<_>>();
+    let selected_id = select_or_single("Select identity provider", &items, None)?;
+    providers
+        .iter()
+        .find(|ip| ip.ip_identity.0 == selected_id)
+        .context("selected identity provider was not found")
 }
 
 async fn fetch_node_genesis_hash(endpoint: v2::Endpoint, endpoint_label: &str) -> Result<String> {

@@ -48,18 +48,26 @@ pub enum SeedSubcommand {
 pub struct SeedAddArgs {
     /// Local label for the seed. Use letters, digits, dash, or underscore only.
     #[arg(value_name = "LABEL")]
-    pub label: String,
+    pub label: Option<String>,
 
     /// Generate a new random 24-word seed phrase instead of prompting for one.
     #[arg(long)]
     pub random: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SeedUseArgs {
     /// Label of the seed to make active.
     #[arg(value_name = "LABEL")]
-    pub label: String,
+    pub label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -67,13 +75,21 @@ pub struct SeedShowArgs {
     /// Label of the seed to show. If omitted, the active seed is used.
     #[arg(value_name = "LABEL")]
     pub label: Option<String>,
+
+    /// Disable silent use of active defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct SeedRemoveArgs {
     /// Label of the seed to remove.
     #[arg(value_name = "LABEL")]
-    pub label: String,
+    pub label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -92,7 +108,7 @@ pub enum IdentitySubcommand {
 pub struct IdentityNewArgs {
     /// Local label for the identity. Use letters, digits, dash, or underscore only.
     #[arg(value_name = "LABEL")]
-    pub label: String,
+    pub label: Option<String>,
 
     /// Identity provider id to use directly.
     #[arg(long, value_name = "ID", conflicts_with = "interactive")]
@@ -117,6 +133,14 @@ pub struct IdentityNewArgs {
     /// Use manual callback paste instead of the default local browser callback.
     #[arg(long = "manual-callback")]
     pub manual_callback: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive", conflicts_with = "interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active seed/network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -145,4 +169,8 @@ pub struct NodeInfoArgs {
         value_name = "ENDPOINT"
     )]
     pub node: Option<v2::Endpoint>,
+
+    /// Disable silent use of the active network and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }

@@ -76,7 +76,10 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
 ```bash
 cargo run -p ccd-wallet -- network add --name testnet --node https://grpc.testnet.concordium.com:20000 --wallet-proxy https://wallet-proxy.testnet.concordium.com
 cargo run -p ccd-wallet -- network use testnet
+cargo run -p ccd-wallet -- network use
 ```
+
+Most user-facing setup flows can now prompt for missing non-secret values interactively. Use `--non-interactive` to disable prompt fallback and require values on the command line. Use `--no-defaults` on flows that would otherwise silently use the active seed or active network to force an explicit picker selection instead. When a picker has only one valid option, the CLI selects it automatically instead of showing a one-item selector. Existing-entity selection flows such as `seed use` and `network use` use selectors instead of asking you to retype a known label.
 
 ### Example: manage seed phrases
 
@@ -84,16 +87,17 @@ cargo run -p ccd-wallet -- network use testnet
 cargo run -p ccd-wallet -- seed add main_seed
 cargo run -p ccd-wallet -- seed add generated_seed --random
 cargo run -p ccd-wallet -- seed use main_seed
+cargo run -p ccd-wallet -- seed use
 cargo run -p ccd-wallet -- seed show
 cargo run -p ccd-wallet -- seed show main_seed
 cargo run -p ccd-wallet -- seed remove main_seed
 ```
 
-`seed add` requests the seed phrase and password through hidden interactive prompts. Do not pass seed phrases or seed passwords as command-line arguments. Use `seed add <LABEL> --random` to generate a new 24-word seed phrase; the generated phrase is temporarily revealed after it is encrypted and stored, and can later be shown again with `seed show <LABEL>`.
+`seed add` requests the seed phrase and password through hidden interactive prompts. If the seed label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. Do not pass seed phrases or seed passwords as command-line arguments. Use `seed add <LABEL> --random` to generate a new 24-word seed phrase; the generated phrase is temporarily revealed after it is encrypted and stored, and can later be shown again with `seed show <LABEL>`.
 
-`seed use <LABEL>` sets the active seed. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed.
+`seed use [LABEL]` sets the active seed. If the label is omitted, the CLI opens a seed selector instead of asking you to type the label, unless `--non-interactive` is supplied. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed by default, or forces an explicit picker when `--no-defaults` is supplied.
 
-`seed remove <LABEL>` removes a seed after asking you to type the label as confirmation. If the removed seed is active, the active seed selection is cleared.
+`seed remove [LABEL]` removes a seed after asking you to type the label as confirmation. If the label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. If the removed seed is active, the active seed selection is cleared.
 
 For safety, `seed show` displays the seed phrase in a temporary terminal view and hides it when you press any key or after 30 seconds, whichever happens first. This reduces terminal scrollback exposure, but it cannot protect against screenshots, terminal/session logging, tmux/screen behavior, or clipboard history if you copy the phrase.
 
@@ -108,15 +112,15 @@ cargo run -p ccd-wallet -- identity new my_identity --provider 1 --seed main_see
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --node https://grpc.testnet.concordium.com:20000
 ```
 
-`identity new <LABEL>` uses the active seed by default, unless `--seed <LABEL>` is supplied. `--provider <ID>` selects an identity provider directly; `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries.
+`identity new [LABEL]` uses the active seed by default, unless `--seed <LABEL>` is supplied. If the label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. `--provider <ID>` selects an identity provider directly; if no provider is supplied, the CLI can prompt you to choose one interactively. `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries. Use `--no-defaults` to force explicit selection instead of silently using the active seed or active network.
 
 Identity labels follow the same format as seed labels and must be unique within a network.
 
-The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. After verification, the browser returns to the local callback page and the CLI continues automatically.
+The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. Before continuing, it shows the effective context as `seed: <label>` and `network: <label> @ <node-endpoint>`. After verification, the browser returns to the local callback page and the CLI continues automatically.
 
 Identity private payloads, including the issuance `code_uri` and issued identity object, are encrypted in SQLite under the owning seed's password domain. Identity labels and public metadata such as network, provider id, status, and timestamps remain plaintext.
 
-If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal.
+If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal using the same interactive prompt framework.
 
 Development note: this version consolidates the SQLite schema into a new initial migration. Existing development `wallet.db` files from earlier schema versions should be deleted and recreated.
 
