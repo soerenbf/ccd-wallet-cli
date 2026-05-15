@@ -24,6 +24,13 @@ pub struct SeedRecord {
 }
 
 #[derive(Debug)]
+pub struct UnlockedSeed {
+    pub record: SeedRecord,
+    pub secret: Zeroizing<Vec<u8>>,
+    pub dek: Zeroizing<[u8; KEY_LEN]>,
+}
+
+#[derive(Debug)]
 struct SeedVault {
     kdf_algorithm: String,
     kdf_params: Argon2Params,
@@ -129,17 +136,27 @@ pub fn remove(conn: &Connection, label: &str) -> Result<()> {
 }
 
 pub fn unlock(conn: &Connection, label: &str, password: &str) -> Result<Zeroizing<Vec<u8>>> {
+    Ok(unlock_context(conn, label, password)?.secret)
+}
+
+pub fn unlock_context(conn: &Connection, label: &str, password: &str) -> Result<UnlockedSeed> {
     let (record, vault) = load_seed_and_vault(conn, label)?;
     let dek = unlock_dek(&record.id, password, &vault)?;
     let payload_aad = object_aad(&record.id, SEED_KIND, vault.cipher_version);
 
-    aead_decrypt(
+    let secret = aead_decrypt(
         &dek,
         &vault.payload_nonce,
         &vault.payload_ciphertext,
         &payload_aad,
     )
-    .with_context(|| format!("failed to unlock seed '{label}'"))
+    .with_context(|| format!("failed to unlock seed '{label}'"))?;
+
+    Ok(UnlockedSeed {
+        record,
+        secret,
+        dek,
+    })
 }
 
 pub fn change_password(
@@ -285,6 +302,19 @@ mod tests {
         assert_eq!(&**unlocked, b"seed secret");
 
         assert!(unlock(&conn, "main_seed", "wrong").is_err());
+    }
+
+    #[test]
+    fn unlock_context_exposes_secret_and_dek_after_password_verification() {
+        let conn = conn();
+        let seed = add(&conn, "main_seed", b"seed secret", "password").unwrap();
+
+        let unlocked = unlock_context(&conn, "main_seed", "password").unwrap();
+        assert_eq!(unlocked.record, seed);
+        assert_eq!(&*unlocked.secret, b"seed secret");
+        assert_ne!(&*unlocked.dek, &[0u8; KEY_LEN]);
+
+        assert!(unlock_context(&conn, "main_seed", "wrong").is_err());
     }
 
     #[test]

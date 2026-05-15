@@ -114,7 +114,11 @@ Identity labels follow the same format as seed labels and must be unique within 
 
 The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. After verification, the browser returns to the local callback page and the CLI continues automatically.
 
+Identity private payloads, including the issuance `code_uri` and issued identity object, are encrypted in SQLite under the owning seed's password domain. Identity labels and public metadata such as network, provider id, status, and timestamps remain plaintext.
+
 If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal.
+
+Development note: this version consolidates the SQLite schema into a new initial migration. Existing development `wallet.db` files from earlier schema versions should be deleted and recreated.
 
 ## Logging
 

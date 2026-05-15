@@ -1,26 +1,37 @@
+use crate::store::crypto::{
+    KEY_LEN, aead_decrypt, aead_encrypt, object_aad, zeroizing_array_from_slice,
+};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
+
+const CIPHER_VERSION: u32 = 1;
+const IDENTITY_PRIVATE_PAYLOAD_KIND: &str = "identity_private_payload";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityRecord {
     pub id: i64,
+    pub seed_id: String,
     pub network_genesis_hash: String,
-    pub seed_label: String,
     pub ip_identity: u32,
     pub identity_index: u32,
     pub label: String,
     pub status: IdentityStatus,
-    pub code_uri: Option<String>,
-    pub identity_object: Option<String>,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityPrivatePayload {
+    pub code_uri: String,
+    pub identity_object: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityStatus {
     Pending,
     Done,
-    Error,
 }
 
 impl IdentityStatus {
@@ -28,7 +39,6 @@ impl IdentityStatus {
         match self {
             IdentityStatus::Pending => "pending",
             IdentityStatus::Done => "done",
-            IdentityStatus::Error => "error",
         }
     }
 
@@ -36,7 +46,6 @@ impl IdentityStatus {
         match value {
             "pending" => Ok(Self::Pending),
             "done" => Ok(Self::Done),
-            "error" => Ok(Self::Error),
             other => bail!("unsupported identity status '{other}'"),
         }
     }
@@ -45,13 +54,13 @@ impl IdentityStatus {
 pub fn next_index(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_label: &str,
+    seed_id: &str,
     ip_identity: u32,
 ) -> Result<u32> {
     let max_index: Option<u32> = conn
         .query_row(
-            "SELECT MAX(identity_index) FROM identities WHERE network_genesis_hash = ?1 AND seed_label = ?2 AND ip_identity = ?3",
-            params![network_genesis_hash, seed_label, ip_identity],
+            "SELECT MAX(identity_index) FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3",
+            params![network_genesis_hash, seed_id, ip_identity],
             |row| row.get(0),
         )
         .context("failed to query next identity index")?;
@@ -59,59 +68,105 @@ pub fn next_index(
     Ok(max_index.map(|idx| idx + 1).unwrap_or(0))
 }
 
+pub struct PendingIdentity<'a> {
+    pub network_genesis_hash: &'a str,
+    pub seed_id: &'a str,
+    pub ip_identity: u32,
+    pub identity_index: u32,
+    pub label: &'a str,
+    pub code_uri: &'a str,
+}
+
 pub fn insert_pending(
-    conn: &Connection,
-    network_genesis_hash: &str,
-    seed_label: &str,
-    ip_identity: u32,
-    identity_index: u32,
-    label: &str,
-    code_uri: &str,
+    conn: &mut Connection,
+    seed_dek: &[u8; KEY_LEN],
+    pending: PendingIdentity<'_>,
 ) -> Result<i64> {
-    if find_by_network_and_label(conn, network_genesis_hash, label)?.is_some() {
-        bail!("identity label '{label}' already exists for network '{network_genesis_hash}'");
+    if find_by_network_and_label(conn, pending.network_genesis_hash, pending.label)?.is_some() {
+        bail!(
+            "identity label '{}' already exists for network '{}'",
+            pending.label,
+            pending.network_genesis_hash
+        );
     }
 
     if find_by_network_seed_ip_and_index(
         conn,
-        network_genesis_hash,
-        seed_label,
-        ip_identity,
-        identity_index,
+        pending.network_genesis_hash,
+        pending.seed_id,
+        pending.ip_identity,
+        pending.identity_index,
     )?
     .is_some()
     {
         bail!(
-            "identity index {identity_index} for provider {ip_identity} already exists for seed '{seed_label}' on network '{network_genesis_hash}'"
+            "identity index {} for provider {} already exists for seed '{}' on network '{}'",
+            pending.identity_index,
+            pending.ip_identity,
+            pending.seed_id,
+            pending.network_genesis_hash
         );
     }
 
+    let tx = conn
+        .transaction()
+        .context("failed to start identity insert transaction")?;
     let created_at = now_unix_seconds()?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO identities (
-            network_genesis_hash, seed_label, ip_identity, identity_index, label, status, code_uri, identity_object, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8)",
+            seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            network_genesis_hash,
-            seed_label,
-            ip_identity,
-            identity_index,
-            label,
+            pending.seed_id,
+            pending.network_genesis_hash,
+            pending.ip_identity,
+            pending.identity_index,
+            pending.label,
             IdentityStatus::Pending.as_str(),
-            code_uri,
             created_at,
         ],
     )
-    .with_context(|| format!("failed to insert identity '{label}'"))?;
+    .with_context(|| format!("failed to insert identity '{}'", pending.label))?;
+    let id = tx.last_insert_rowid();
 
-    Ok(conn.last_insert_rowid())
+    let record = IdentityRecord {
+        id,
+        seed_id: pending.seed_id.to_owned(),
+        network_genesis_hash: pending.network_genesis_hash.to_owned(),
+        ip_identity: pending.ip_identity,
+        identity_index: pending.identity_index,
+        label: pending.label.to_owned(),
+        status: IdentityStatus::Pending,
+        created_at,
+    };
+    let payload = IdentityPrivatePayload {
+        code_uri: pending.code_uri.to_owned(),
+        identity_object: None,
+    };
+    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    tx.commit()
+        .context("failed to commit identity insert transaction")?;
+
+    Ok(id)
 }
 
-pub fn set_done(conn: &Connection, id: i64, identity_object_json: &str) -> Result<()> {
-    let affected = conn
+pub fn set_done(
+    conn: &mut Connection,
+    id: i64,
+    seed_dek: &[u8; KEY_LEN],
+    identity_object: serde_json::Value,
+) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .context("failed to start identity update transaction")?;
+    let mut record = find_by_id_in_tx(&tx, id)?;
+    let mut payload = decrypt_private_payload_in_tx(&tx, &record, seed_dek)?;
+    payload.identity_object = Some(identity_object);
+
+    let affected = tx
         .execute(
-            "UPDATE identities SET status = ?1, identity_object = ?2 WHERE id = ?3",
-            params![IdentityStatus::Done.as_str(), identity_object_json, id],
+            "UPDATE identities SET status = ?1 WHERE id = ?2",
+            params![IdentityStatus::Done.as_str(), id],
         )
         .with_context(|| format!("failed to mark identity {id} done"))?;
 
@@ -119,21 +174,10 @@ pub fn set_done(conn: &Connection, id: i64, identity_object_json: &str) -> Resul
         bail!("identity {id} is not configured");
     }
 
-    Ok(())
-}
-
-pub fn set_error(conn: &Connection, id: i64) -> Result<()> {
-    let affected = conn
-        .execute(
-            "UPDATE identities SET status = ?1 WHERE id = ?2",
-            params![IdentityStatus::Error.as_str(), id],
-        )
-        .with_context(|| format!("failed to mark identity {id} error"))?;
-
-    if affected == 0 {
-        bail!("identity {id} is not configured");
-    }
-
+    record.status = IdentityStatus::Done;
+    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    tx.commit()
+        .context("failed to commit identity done transaction")?;
     Ok(())
 }
 
@@ -155,7 +199,7 @@ pub fn find_by_network_and_label(
     label: &str,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, network_genesis_hash, seed_label, ip_identity, identity_index, label, status, code_uri, identity_object, created_at
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
          FROM identities WHERE network_genesis_hash = ?1 AND label = ?2",
         params![network_genesis_hash, label],
         map_identity_row,
@@ -171,30 +215,178 @@ pub fn find_by_network_and_label(
 pub fn find_by_network_seed_ip_and_index(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_label: &str,
+    seed_id: &str,
     ip_identity: u32,
     identity_index: u32,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, network_genesis_hash, seed_label, ip_identity, identity_index, label, status, code_uri, identity_object, created_at
-         FROM identities WHERE network_genesis_hash = ?1 AND seed_label = ?2 AND ip_identity = ?3 AND identity_index = ?4",
-        params![network_genesis_hash, seed_label, ip_identity, identity_index],
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+         FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3 AND identity_index = ?4",
+        params![network_genesis_hash, seed_id, ip_identity, identity_index],
         map_identity_row,
     )
     .optional()
     .with_context(|| {
         format!(
-            "failed to query identity index {identity_index} for seed '{seed_label}', provider {ip_identity}, network '{network_genesis_hash}'"
+            "failed to query identity index {identity_index} for seed '{seed_id}', provider {ip_identity}, network '{network_genesis_hash}'"
         )
     })
+}
+
+pub fn decrypt_private_payload(
+    conn: &Connection,
+    id: i64,
+    seed_dek: &[u8; KEY_LEN],
+) -> Result<IdentityPrivatePayload> {
+    let record = find_by_id(conn, id)?;
+    decrypt_private_payload_for_record(conn, &record, seed_dek)
+}
+
+fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
+    conn.query_row(
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+         FROM identities WHERE id = ?1",
+        params![id],
+        map_identity_row,
+    )
+    .optional()
+    .with_context(|| format!("failed to query identity {id}"))?
+    .with_context(|| format!("identity {id} is not configured"))
+}
+
+fn find_by_id_in_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<IdentityRecord> {
+    tx.query_row(
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+         FROM identities WHERE id = ?1",
+        params![id],
+        map_identity_row,
+    )
+    .optional()
+    .with_context(|| format!("failed to query identity {id}"))?
+    .with_context(|| format!("identity {id} is not configured"))
+}
+
+fn decrypt_private_payload_for_record(
+    conn: &Connection,
+    record: &IdentityRecord,
+    seed_dek: &[u8; KEY_LEN],
+) -> Result<IdentityPrivatePayload> {
+    conn.query_row(
+        "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
+        params![record.id],
+        |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .with_context(|| format!("failed to query private payload for identity {}", record.id))?
+    .with_context(|| format!("identity {} has no private payload", record.id))
+    .and_then(|(cipher_version, ciphertext, nonce)| {
+        decrypt_payload_bytes(record, seed_dek, cipher_version, &ciphertext, &nonce)
+    })
+}
+
+fn decrypt_private_payload_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    record: &IdentityRecord,
+    seed_dek: &[u8; KEY_LEN],
+) -> Result<IdentityPrivatePayload> {
+    tx.query_row(
+        "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
+        params![record.id],
+        |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    )
+    .optional()
+    .with_context(|| format!("failed to query private payload for identity {}", record.id))?
+    .with_context(|| format!("identity {} has no private payload", record.id))
+    .and_then(|(cipher_version, ciphertext, nonce)| {
+        decrypt_payload_bytes(record, seed_dek, cipher_version, &ciphertext, &nonce)
+    })
+}
+
+fn decrypt_payload_bytes(
+    record: &IdentityRecord,
+    seed_dek: &[u8; KEY_LEN],
+    cipher_version: u32,
+    ciphertext: &[u8],
+    nonce: &[u8],
+) -> Result<IdentityPrivatePayload> {
+    let aad = identity_payload_aad(record, cipher_version);
+    let plaintext = aead_decrypt(seed_dek, nonce, ciphertext, &aad).with_context(|| {
+        format!(
+            "failed to decrypt private payload for identity {}",
+            record.id
+        )
+    })?;
+    serde_json::from_slice(&plaintext)
+        .with_context(|| format!("failed to parse private payload for identity {}", record.id))
+}
+
+fn upsert_private_payload_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    record: &IdentityRecord,
+    seed_dek: &[u8; KEY_LEN],
+    payload: &IdentityPrivatePayload,
+) -> Result<()> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(payload).with_context(|| {
+        format!(
+            "failed to serialise private payload for identity {}",
+            record.id
+        )
+    })?);
+    let aad = identity_payload_aad(record, CIPHER_VERSION);
+    let (ciphertext, nonce) = aead_encrypt(seed_dek, &plaintext, &aad).with_context(|| {
+        format!(
+            "failed to encrypt private payload for identity {}",
+            record.id
+        )
+    })?;
+
+    tx.execute(
+        "INSERT INTO identity_private_payloads (identity_id, cipher_version, ciphertext, nonce)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(identity_id) DO UPDATE SET
+            cipher_version = excluded.cipher_version,
+            ciphertext = excluded.ciphertext,
+            nonce = excluded.nonce",
+        params![record.id, CIPHER_VERSION, ciphertext, nonce.as_slice()],
+    )
+    .with_context(|| format!("failed to store private payload for identity {}", record.id))?;
+
+    Ok(())
+}
+
+fn identity_payload_aad(record: &IdentityRecord, cipher_version: u32) -> Vec<u8> {
+    object_aad(
+        &format!(
+            "{}:{}:{}:{}:{}",
+            record.id,
+            record.network_genesis_hash,
+            record.seed_id,
+            record.ip_identity,
+            record.identity_index
+        ),
+        IDENTITY_PRIVATE_PAYLOAD_KIND,
+        cipher_version,
+    )
 }
 
 fn map_identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRecord> {
     let status: String = row.get(6)?;
     Ok(IdentityRecord {
         id: row.get(0)?,
-        network_genesis_hash: row.get(1)?,
-        seed_label: row.get(2)?,
+        seed_id: row.get(1)?,
+        network_genesis_hash: row.get(2)?,
         ip_identity: row.get(3)?,
         identity_index: row.get(4)?,
         label: row.get(5)?,
@@ -208,9 +400,7 @@ fn map_identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRecord>
                 )),
             )
         })?,
-        code_uri: row.get(7)?,
-        identity_object: row.get(8)?,
-        created_at: row.get(9)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -221,52 +411,133 @@ fn now_unix_seconds() -> Result<i64> {
     Ok(duration.as_secs() as i64)
 }
 
+pub fn test_key(byte: u8) -> Zeroizing<[u8; KEY_LEN]> {
+    zeroizing_array_from_slice::<KEY_LEN>(&[byte; KEY_LEN], "test key").unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::migrations;
+    use crate::store::{migrations, seeds};
 
     const MAINNET: &str = "mainnet-hash";
     const TESTNET: &str = "testnet-hash";
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON").unwrap();
         migrations::run(&conn).unwrap();
         conn
     }
 
+    fn seed(conn: &Connection, label: &str) -> (String, Zeroizing<[u8; KEY_LEN]>) {
+        let record = seeds::add(conn, label, b"seed secret", "password").unwrap();
+        let unlocked = seeds::unlock_context(conn, label, "password").unwrap();
+        (record.id, unlocked.dek)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_pending(
+        conn: &mut Connection,
+        seed_dek: &[u8; KEY_LEN],
+        network_genesis_hash: &str,
+        seed_id: &str,
+        ip_identity: u32,
+        identity_index: u32,
+        label: &str,
+        code_uri: &str,
+    ) -> Result<i64> {
+        super::insert_pending(
+            conn,
+            seed_dek,
+            PendingIdentity {
+                network_genesis_hash,
+                seed_id,
+                ip_identity,
+                identity_index,
+                label,
+                code_uri,
+            },
+        )
+    }
+
     #[test]
     fn next_index_starts_at_zero_and_increments_per_network_seed_and_provider() {
-        let conn = conn();
-        assert_eq!(next_index(&conn, MAINNET, "seed_a", 7).unwrap(), 0);
+        let mut conn = conn();
+        let (seed_a, key_a) = seed(&conn, "seed_a");
+        let (seed_b, _) = seed(&conn, "seed_b");
+        assert_eq!(next_index(&conn, MAINNET, &seed_a, 7).unwrap(), 0);
 
-        let id = insert_pending(&conn, MAINNET, "seed_a", 7, 0, "id-1", "https://code").unwrap();
+        let id = insert_pending(
+            &mut conn,
+            &key_a,
+            MAINNET,
+            &seed_a,
+            7,
+            0,
+            "id-1",
+            "https://code",
+        )
+        .unwrap();
         assert!(id > 0);
-        assert_eq!(next_index(&conn, MAINNET, "seed_a", 7).unwrap(), 1);
-        assert_eq!(next_index(&conn, MAINNET, "seed_a", 8).unwrap(), 0);
-        assert_eq!(next_index(&conn, MAINNET, "seed_b", 7).unwrap(), 0);
-        assert_eq!(next_index(&conn, TESTNET, "seed_a", 7).unwrap(), 0);
+        assert_eq!(next_index(&conn, MAINNET, &seed_a, 7).unwrap(), 1);
+        assert_eq!(next_index(&conn, MAINNET, &seed_a, 8).unwrap(), 0);
+        assert_eq!(next_index(&conn, MAINNET, &seed_b, 7).unwrap(), 0);
+        assert_eq!(next_index(&conn, TESTNET, &seed_a, 7).unwrap(), 0);
     }
 
     #[test]
     fn duplicate_network_label_pair_is_rejected() {
-        let conn = conn();
-        insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code-1").unwrap();
+        let mut conn = conn();
+        let (seed_a, key_a) = seed(&conn, "seed_a");
+        let (seed_b, key_b) = seed(&conn, "seed_b");
+        insert_pending(
+            &mut conn,
+            &key_a,
+            MAINNET,
+            &seed_a,
+            7,
+            0,
+            "identity",
+            "https://code-1",
+        )
+        .unwrap();
 
-        let err = insert_pending(&conn, MAINNET, "seed_b", 8, 0, "identity", "https://code-2")
-            .unwrap_err();
+        let err = insert_pending(
+            &mut conn,
+            &key_b,
+            MAINNET,
+            &seed_b,
+            8,
+            0,
+            "identity",
+            "https://code-2",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("already exists"));
 
-        insert_pending(&conn, TESTNET, "seed_b", 8, 0, "identity", "https://code-3").unwrap();
+        insert_pending(
+            &mut conn,
+            &key_b,
+            TESTNET,
+            &seed_b,
+            8,
+            0,
+            "identity",
+            "https://code-3",
+        )
+        .unwrap();
     }
 
     #[test]
     fn duplicate_network_seed_ip_index_tuple_is_rejected() {
-        let conn = conn();
+        let mut conn = conn();
+        let (seed_a, key_a) = seed(&conn, "seed_a");
         insert_pending(
-            &conn,
+            &mut conn,
+            &key_a,
             MAINNET,
-            "seed_a",
+            &seed_a,
             7,
             0,
             "identity-1",
@@ -275,66 +546,178 @@ mod tests {
         .unwrap();
 
         let err = insert_pending(
-            &conn,
+            &mut conn,
+            &key_a,
             MAINNET,
-            "seed_a",
+            &seed_a,
             7,
             0,
             "identity-2",
             "https://code-2",
         )
         .unwrap_err();
-        assert!(err.to_string().contains("already exists"));
-
-        insert_pending(
-            &conn,
-            TESTNET,
-            "seed_a",
-            7,
-            0,
-            "identity-3",
-            "https://code-3",
-        )
-        .unwrap();
+        assert!(err.to_string().contains("identity index 0"));
     }
 
     #[test]
-    fn status_transitions_to_done_and_error() {
-        let conn = conn();
-        let id =
-            insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code").unwrap();
+    fn private_payload_is_encrypted_and_decrypts_with_correct_key() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let id = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity",
+            "https://code",
+        )
+        .unwrap();
 
-        set_done(&conn, id, r#"{"identityObject":{}}"#).unwrap();
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT ciphertext FROM identity_private_payloads WHERE identity_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("https://code"));
+
+        let payload = decrypt_private_payload(&conn, id, &key).unwrap();
+        assert_eq!(payload.code_uri, "https://code");
+        assert!(payload.identity_object.is_none());
+
+        let wrong_key = test_key(9);
+        assert!(decrypt_private_payload(&conn, id, &wrong_key).is_err());
+    }
+
+    #[test]
+    fn aad_mismatch_fails_for_transplanted_payload() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let id_1 = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity-1",
+            "https://code-1",
+        )
+        .unwrap();
+        let id_2 = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            1,
+            "identity-2",
+            "https://code-2",
+        )
+        .unwrap();
+
+        let (ciphertext, nonce): (Vec<u8>, Vec<u8>) = conn
+            .query_row(
+                "SELECT ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
+                params![id_1],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE identity_private_payloads SET ciphertext = ?1, nonce = ?2 WHERE identity_id = ?3",
+            params![ciphertext, nonce, id_2],
+        )
+        .unwrap();
+
+        assert!(decrypt_private_payload(&conn, id_2, &key).is_err());
+    }
+
+    #[test]
+    fn status_transitions_to_done_and_provider_error_deletes_identity() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let id = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity",
+            "https://code",
+        )
+        .unwrap();
+
+        set_done(
+            &mut conn,
+            id,
+            &key,
+            serde_json::json!({"identityObject": {"name": "Alice"}}),
+        )
+        .unwrap();
         let record = find_by_network_and_label(&conn, MAINNET, "identity")
             .unwrap()
             .unwrap();
         assert_eq!(record.status, IdentityStatus::Done);
+        let payload = decrypt_private_payload(&conn, id, &key).unwrap();
+        assert_eq!(payload.code_uri, "https://code");
         assert_eq!(
-            record.identity_object.as_deref(),
-            Some(r#"{"identityObject":{}}"#)
+            payload.identity_object,
+            Some(serde_json::json!({"identityObject": {"name": "Alice"}}))
         );
 
-        set_error(&conn, id).unwrap();
-        let record = find_by_network_and_label(&conn, MAINNET, "identity")
-            .unwrap()
-            .unwrap();
-        assert_eq!(record.status, IdentityStatus::Error);
-    }
-
-    #[test]
-    fn delete_removes_identity_and_frees_label_and_index() {
-        let conn = conn();
-        let id =
-            insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code").unwrap();
-
         delete(&conn, id).unwrap();
-
         assert!(
             find_by_network_and_label(&conn, MAINNET, "identity")
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(next_index(&conn, MAINNET, "seed_a", 7).unwrap(), 0);
-        insert_pending(&conn, MAINNET, "seed_a", 7, 0, "identity", "https://code-2").unwrap();
+        let payload_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identity_private_payloads WHERE identity_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_count, 0);
+    }
+
+    #[test]
+    fn removing_seed_cascades_identity_and_private_payload() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let id = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity",
+            "https://code",
+        )
+        .unwrap();
+
+        seeds::remove(&conn, "seed_a").unwrap();
+
+        let identity_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identities WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identity_private_payloads WHERE identity_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identity_count, 0);
+        assert_eq!(payload_count, 0);
     }
 }

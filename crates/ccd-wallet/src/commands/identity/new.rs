@@ -28,11 +28,11 @@ const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub async fn run(conn: &Connection, args: IdentityNewArgs) -> Result<()> {
+pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
     run_with_callback_session(conn, args).await
 }
 
-async fn run_with_callback_session(conn: &Connection, args: IdentityNewArgs) -> Result<()> {
+async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
     validate_identity_label(&args.label)?;
 
     let seed_label = resolve_seed_label(conn, args.seed.as_deref())?;
@@ -50,7 +50,10 @@ async fn run_with_callback_session(conn: &Connection, args: IdentityNewArgs) -> 
     }
 
     cliclack::log::info(format!("Using seed: {seed_label}"))?;
-    let seed_phrase = unlock_seed_phrase(conn, &seed_label)?;
+    let unlocked_seed = unlock_seed(conn, &seed_label)?;
+    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
+        .context("stored seed phrase is not UTF-8")?
+        .to_owned();
 
     let spin = spinner();
     spin.start(format!("Connecting to node: {endpoint_label}"));
@@ -92,7 +95,7 @@ async fn run_with_callback_session(conn: &Connection, args: IdentityNewArgs) -> 
     let identity_index = identities::next_index(
         conn,
         &network_entry.genesis_hash,
-        &seed_label,
+        &unlocked_seed.record.id,
         ip_info.ip_identity.0,
     )?;
     let spin = spinner();
@@ -125,15 +128,18 @@ async fn run_with_callback_session(conn: &Connection, args: IdentityNewArgs) -> 
 
     let record_id = identities::insert_pending(
         conn,
-        &network_entry.genesis_hash,
-        &seed_label,
-        ip_info.ip_identity.0,
-        identity_index,
-        &args.label,
-        &code_uri,
+        &unlocked_seed.dek,
+        identities::PendingIdentity {
+            network_genesis_hash: &network_entry.genesis_hash,
+            seed_id: &unlocked_seed.record.id,
+            ip_identity: ip_info.ip_identity.0,
+            identity_index,
+            label: &args.label,
+            code_uri: &code_uri,
+        },
     )?;
 
-    poll_identity(conn, record_id, &code_uri, &args.label).await
+    poll_identity(conn, record_id, &unlocked_seed.dek, &code_uri, &args.label).await
 }
 
 async fn fetch_identity_providers(
@@ -230,12 +236,9 @@ fn resolve_seed_label(conn: &Connection, explicit: Option<&str>) -> Result<Strin
     }
 }
 
-fn unlock_seed_phrase(conn: &Connection, seed_label: &str) -> Result<String> {
+fn unlock_seed(conn: &Connection, seed_label: &str) -> Result<seeds::UnlockedSeed> {
     let password: String = password(format!("Password for seed '{seed_label}': ")).interact()?;
-    let seed = seeds::unlock(conn, seed_label, &password)?;
-    Ok(std::str::from_utf8(&seed)
-        .context("stored seed phrase is not UTF-8")?
-        .to_owned())
+    seeds::unlock_context(conn, seed_label, &password)
 }
 
 async fn prepare_callback_session(manual_callback: bool) -> Result<CallbackSession> {
@@ -410,8 +413,9 @@ fn validate_identity_label(label: &str) -> Result<()> {
 }
 
 async fn poll_identity(
-    conn: &Connection,
+    conn: &mut Connection,
     record_id: i64,
+    seed_dek: &[u8; ccd_wallet_core::store::crypto::KEY_LEN],
     code_uri: &str,
     label: &str,
 ) -> Result<()> {
@@ -438,7 +442,7 @@ async fn poll_identity(
             }
             PollResult::Done(token) => {
                 spin.clear();
-                identities::set_done(conn, record_id, &token.to_string())?;
+                identities::set_done(conn, record_id, seed_dek, token)?;
                 cliclack::log::success(format!("Identity '{label}' issued successfully."))?;
                 return Ok(());
             }

@@ -12,14 +12,14 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    let conn = store::db::open()?;
+    let mut conn = store::db::open()?;
 
     match cli.command {
         Command::Node(command) => commands::node::run(&conn, command.command).await,
         Command::Network(command) => commands::config::run(&conn, command).await,
         Command::Seed(command) => commands::seed::run(&conn, command.command).await,
         Command::Identity(command) => match command.command {
-            cli::IdentitySubcommand::New(args) => commands::identity::run(&conn, args).await,
+            cli::IdentitySubcommand::New(args) => commands::identity::run(&mut conn, args).await,
         },
     }
 }
