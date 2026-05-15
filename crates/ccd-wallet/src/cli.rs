@@ -24,6 +24,8 @@ pub enum Command {
     Seed(SeedCommand),
     /// Identity issuance commands.
     Identity(Box<IdentityCommand>),
+    /// Account creation and management commands.
+    Account(Box<AccountCommand>),
 }
 
 #[derive(Debug, Args)]
@@ -134,8 +136,59 @@ pub struct IdentityNewArgs {
     #[arg(long = "manual-callback")]
     pub manual_callback: bool,
 
+    /// Return after receiving the callback code URI without waiting for identity completion.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive", conflicts_with = "interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active seed/network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AccountCommand {
+    #[command(subcommand)]
+    pub command: AccountSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountSubcommand {
+    /// Create a new account from a stored identity.
+    New(AccountNewArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AccountNewArgs {
+    /// Local label for the account. Use letters, digits, dash, or underscore only.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Identity label to use. Defaults to an interactive identity selector.
+    #[arg(long, value_name = "LABEL")]
+    pub identity: Option<String>,
+
+    /// Seed label to use. Defaults to the active seed.
+    #[arg(long, value_name = "LABEL")]
+    pub seed: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
     pub non_interactive: bool,
 
     /// Disable silent use of active seed/network defaults and force explicit selection.

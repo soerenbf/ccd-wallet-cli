@@ -586,6 +586,8 @@ dependencies = [
  "chacha20poly1305",
  "concordium-rust-sdk",
  "dirs",
+ "ed25519-dalek",
+ "either",
  "hex",
  "hkdf",
  "hmac",

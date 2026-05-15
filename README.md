@@ -110,15 +110,28 @@ cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testn
 cargo run -p ccd-wallet -- identity new my_identity --interactive --network testnet
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --seed main_seed --network testnet
 cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --node https://grpc.testnet.concordium.com:20000
+cargo run -p ccd-wallet -- identity new my_identity --provider 1 --network testnet --no-wait
 ```
 
 `identity new [LABEL]` uses the active seed by default, unless `--seed <LABEL>` is supplied. If the label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. `--provider <ID>` selects an identity provider directly; if no provider is supplied, the CLI can prompt you to choose one interactively. `--interactive` queries the selected node for available identity providers and opens an arrow-key selector showing both provider names and provider ids. `--network <NAME>` selects the network configuration, including its `wallet_proxy`; `--node <ENDPOINT>` optionally overrides only the node endpoint used for chain queries. Use `--no-defaults` to force explicit selection instead of silently using the active seed or active network.
 
 Identity labels follow the same format as seed labels and must be unique within a network.
 
-The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. Before continuing, it shows the effective context as `seed: <label>` and `network: <label> @ <node-endpoint>`. After verification, the browser returns to the local callback page and the CLI continues automatically.
+The identity issuance flow is browser-assisted: the CLI resolves wallet-facing provider metadata from the selected network's `wallet_proxy`, constructs the request, starts a temporary callback receiver on `127.0.0.1`, and opens the identity provider URL in your browser. Before continuing, it shows the effective context as `seed: <label>` and `network: <label> @ <node-endpoint>`. After verification, the browser returns to the local callback page and the CLI continues automatically. By default the CLI waits for the provider to finish issuing the identity. Use `--no-wait` to return after the callback `code_uri` is stored; the identity remains pending locally and can be checked lazily when it is later used for account creation.
 
-Identity private payloads, including the issuance `code_uri` and issued identity object, are encrypted in SQLite under the owning seed's password domain. Identity labels and public metadata such as network, provider id, status, and timestamps remain plaintext.
+Identity private payloads, including the issuance `code_uri` and issued identity object, are encrypted in SQLite under the owning seed's password domain. Identity labels and public metadata such as network, provider id, status, timestamps, and identity expiry remain plaintext. Expiry metadata is used to avoid account creation attempts with expired identities.
+
+### Example: create an account
+
+```bash
+cargo run -p ccd-wallet -- account new my_account --identity my_identity --network testnet
+cargo run -p ccd-wallet -- account new my_account --identity my_identity --network testnet --no-wait
+cargo run -p ccd-wallet -- account new my_account --identity my_identity --seed main_seed --network testnet
+```
+
+`account new [LABEL]` creates a normal Concordium account by deriving credential material from the selected seed and issued identity, submitting a credential deployment to the resolved node, and storing the local account record. If `--identity <LABEL>` is omitted, the CLI prompts you to choose a usable identity unless `--non-interactive` is supplied. Usable identities must belong to the selected seed and network and must not be expired. If a selected identity is still pending, the wallet checks the stored encrypted `code_uri` with the identity provider before account creation proceeds.
+
+By default, `account new` waits until the credential deployment finalizes and then stores the new account address encrypted under the owning seed's password domain in a structured account private payload. Use `--no-wait` to return after successful submission; the account remains pending locally for future lazy finalization checks.
 
 If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal using the same interactive prompt framework.
 

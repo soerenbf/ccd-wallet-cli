@@ -5,9 +5,14 @@ use sha2::{Digest, Sha256, Sha512};
 use concordium_rust_sdk::base::{
     curve_arithmetic::{Curve, Field, PrimeField},
     dodis_yampolskiy_prf,
-    id::constants::{ArCurve, BaseField, IpPairing},
+    id::{
+        constants::{ArCurve, BaseField, IpPairing},
+        pedersen_commitment::Randomness as CommitmentRandomness,
+        types::AttributeTag,
+    },
     ps_sig::SigRetrievalRandomness,
 };
+use ed25519_dalek::SigningKey;
 
 const HARDENED_OFFSET: u32 = 1 << 31;
 const ED25519_CURVE: &[u8] = b"ed25519 seed";
@@ -49,17 +54,47 @@ impl ConcordiumHdWallet {
         Ok(Self { seed, net })
     }
 
+    pub fn get_account_signing_key(
+        &self,
+        identity_provider_index: u32,
+        identity_index: u32,
+        credential_counter: u32,
+    ) -> Result<[u8; 32]> {
+        self.derive_identity_key(
+            identity_provider_index,
+            identity_index,
+            0,
+            [credential_counter],
+        )
+    }
+
+    pub fn get_account_public_key(
+        &self,
+        identity_provider_index: u32,
+        identity_index: u32,
+        credential_counter: u32,
+    ) -> Result<[u8; 32]> {
+        let signing_key = self.get_account_signing_key(
+            identity_provider_index,
+            identity_index,
+            credential_counter,
+        )?;
+        Ok(SigningKey::from_bytes(&signing_key)
+            .verifying_key()
+            .to_bytes())
+    }
+
     pub fn get_id_cred_sec(
         &self,
         identity_provider_index: u32,
         identity_index: u32,
     ) -> Result<CredId> {
-        let key_seed = self.derive_identity_key(identity_provider_index, identity_index, 2)?;
+        let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 2)?;
         keygen_bls(&key_seed)
     }
 
     pub fn get_prf_key(&self, identity_provider_index: u32, identity_index: u32) -> Result<PrfKey> {
-        let key_seed = self.derive_identity_key(identity_provider_index, identity_index, 3)?;
+        let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 3)?;
         Ok(PrfKey::new(keygen_bls(&key_seed)?))
     }
 
@@ -68,8 +103,33 @@ impl ConcordiumHdWallet {
         identity_provider_index: u32,
         identity_index: u32,
     ) -> Result<SigRetrievalRandomness<IpPairing>> {
-        let key_seed = self.derive_identity_key(identity_provider_index, identity_index, 4)?;
+        let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 4)?;
         Ok(SigRetrievalRandomness::new(keygen_bls(&key_seed)?))
+    }
+
+    pub fn get_attribute_commitment_randomness(
+        &self,
+        identity_provider_index: u32,
+        identity_index: u32,
+        credential_counter: u32,
+        attribute_tag: AttributeTag,
+    ) -> Result<CommitmentRandomness<ArCurve>> {
+        let key_seed = self.derive_identity_key(
+            identity_provider_index,
+            identity_index,
+            5,
+            [credential_counter, u32::from(attribute_tag.0)],
+        )?;
+        Ok(CommitmentRandomness::new(keygen_bls(&key_seed)?))
+    }
+
+    fn derive_identity_key_leaf(
+        &self,
+        identity_provider_index: u32,
+        identity_index: u32,
+        leaf: u32,
+    ) -> Result<[u8; 32]> {
+        self.derive_identity_key(identity_provider_index, identity_index, leaf, [])
     }
 
     fn derive_identity_key(
@@ -77,14 +137,18 @@ impl ConcordiumHdWallet {
         identity_provider_index: u32,
         identity_index: u32,
         leaf: u32,
+        suffix: impl IntoIterator<Item = u32>,
     ) -> Result<[u8; 32]> {
-        let path = [
+        let mut path = vec![
             harden(44)?,
             harden(self.net.net_code())?,
             harden(identity_provider_index)?,
             harden(identity_index)?,
             harden(leaf)?,
         ];
+        for index in suffix {
+            path.push(harden(index)?);
+        }
         Ok(slip10_derive(&self.seed, &path))
     }
 }
@@ -179,6 +243,72 @@ mod tests {
         let decoded = hex::decode(TEST_SEED_1).unwrap();
         let seed: [u8; 64] = decoded.try_into().unwrap();
         ConcordiumHdWallet { seed, net }
+    }
+
+    #[test]
+    fn derives_mainnet_account_key_material_from_key_derivation_vectors() {
+        assert_eq!(
+            hex::encode(
+                wallet(Net::Mainnet)
+                    .get_account_signing_key(0, 55, 7)
+                    .unwrap()
+            ),
+            "e4d1693c86eb9438feb9cbc3d561fbd9299e3a8b3a676eb2483b135f8dbf6eb1"
+        );
+        assert_eq!(
+            hex::encode(
+                wallet(Net::Mainnet)
+                    .get_account_public_key(1, 341, 9)
+                    .unwrap()
+            ),
+            "d54aab7218fc683cbd4d822f7c2b4e7406c41ae08913012fab0fa992fa008e98"
+        );
+        assert_eq!(
+            base16_encode_string(
+                &wallet(Net::Mainnet)
+                    .get_attribute_commitment_randomness(
+                        5,
+                        0,
+                        4,
+                        concordium_rust_sdk::id::types::AttributeTag(0),
+                    )
+                    .unwrap()
+            ),
+            "6ef6ba6490fa37cd517d2b89a12b77edf756f89df5e6f5597440630cd4580b8f"
+        );
+    }
+
+    #[test]
+    fn derives_testnet_account_key_material_from_key_derivation_vectors() {
+        assert_eq!(
+            hex::encode(
+                wallet(Net::Testnet)
+                    .get_account_signing_key(0, 55, 7)
+                    .unwrap()
+            ),
+            "aff97882c6df085e91ae2695a32d39dccb8f4b8d68d2f0db9637c3a95f845e3c"
+        );
+        assert_eq!(
+            hex::encode(
+                wallet(Net::Testnet)
+                    .get_account_public_key(1, 341, 9)
+                    .unwrap()
+            ),
+            "ef6fd561ca0291a57cdfee896245db9803a86da74c9a6c1bf0252b18f8033003"
+        );
+        assert_eq!(
+            base16_encode_string(
+                &wallet(Net::Testnet)
+                    .get_attribute_commitment_randomness(
+                        5,
+                        0,
+                        4,
+                        concordium_rust_sdk::id::types::AttributeTag(0),
+                    )
+                    .unwrap()
+            ),
+            "409fa90314ec8fb4a2ae812fd77fe58bfac81765cad3990478ff7a73ba6d88ae"
+        );
     }
 
     #[test]

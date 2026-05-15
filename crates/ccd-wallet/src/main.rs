@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
         Command::Identity(command) => match command.command {
             cli::IdentitySubcommand::New(args) => commands::identity::run(&mut conn, args).await,
         },
+        Command::Account(command) => commands::account::run(&mut conn, command.command).await,
     }
 }
 

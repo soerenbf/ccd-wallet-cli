@@ -20,6 +20,7 @@ pub struct IdentityRecord {
     pub label: String,
     pub status: IdentityStatus,
     pub created_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +139,7 @@ pub fn insert_pending(
         label: pending.label.to_owned(),
         status: IdentityStatus::Pending,
         created_at,
+        expires_at: None,
     };
     let payload = IdentityPrivatePayload {
         code_uri: pending.code_uri.to_owned(),
@@ -160,13 +162,14 @@ pub fn set_done(
         .transaction()
         .context("failed to start identity update transaction")?;
     let mut record = find_by_id_in_tx(&tx, id)?;
+    let expires_at = extract_identity_expires_at(&identity_object);
     let mut payload = decrypt_private_payload_in_tx(&tx, &record, seed_dek)?;
     payload.identity_object = Some(identity_object);
 
     let affected = tx
         .execute(
-            "UPDATE identities SET status = ?1 WHERE id = ?2",
-            params![IdentityStatus::Done.as_str(), id],
+            "UPDATE identities SET status = ?1, expires_at = ?2 WHERE id = ?3",
+            params![IdentityStatus::Done.as_str(), expires_at, id],
         )
         .with_context(|| format!("failed to mark identity {id} done"))?;
 
@@ -175,6 +178,7 @@ pub fn set_done(
     }
 
     record.status = IdentityStatus::Done;
+    record.expires_at = expires_at;
     upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
     tx.commit()
         .context("failed to commit identity done transaction")?;
@@ -193,13 +197,61 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn list_by_network_and_seed(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    seed_id: &str,
+) -> Result<Vec<IdentityRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+             FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 ORDER BY label",
+        )
+        .with_context(|| {
+            format!(
+                "failed to prepare identity list query for seed '{seed_id}' on network '{network_genesis_hash}'"
+            )
+        })?;
+
+    let rows = stmt
+        .query_map(params![network_genesis_hash, seed_id], map_identity_row)
+        .with_context(|| {
+            format!(
+                "failed to query identities for seed '{seed_id}' on network '{network_genesis_hash}'"
+            )
+        })?;
+
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read identity rows")
+}
+
+pub fn find_by_network_seed_and_label(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    seed_id: &str,
+    label: &str,
+) -> Result<Option<IdentityRecord>> {
+    conn.query_row(
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+         FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND label = ?3",
+        params![network_genesis_hash, seed_id, label],
+        map_identity_row,
+    )
+    .optional()
+    .with_context(|| {
+        format!(
+            "failed to query identity '{label}' for seed '{seed_id}' on network '{network_genesis_hash}'"
+        )
+    })
+}
+
 pub fn find_by_network_and_label(
     conn: &Connection,
     network_genesis_hash: &str,
     label: &str,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE network_genesis_hash = ?1 AND label = ?2",
         params![network_genesis_hash, label],
         map_identity_row,
@@ -220,7 +272,7 @@ pub fn find_by_network_seed_ip_and_index(
     identity_index: u32,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3 AND identity_index = ?4",
         params![network_genesis_hash, seed_id, ip_identity, identity_index],
         map_identity_row,
@@ -244,7 +296,7 @@ pub fn decrypt_private_payload(
 
 fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE id = ?1",
         params![id],
         map_identity_row,
@@ -256,7 +308,7 @@ fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
 
 fn find_by_id_in_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<IdentityRecord> {
     tx.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE id = ?1",
         params![id],
         map_identity_row,
@@ -401,7 +453,54 @@ fn map_identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRecord>
             )
         })?,
         created_at: row.get(7)?,
+        expires_at: row.get(8)?,
     })
+}
+
+pub fn extract_identity_expires_at(identity_token: &serde_json::Value) -> Option<i64> {
+    find_valid_to(identity_token).and_then(valid_to_to_unix_expiry)
+}
+
+fn find_valid_to(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(value) = map.get("validTo").and_then(serde_json::Value::as_str) {
+                return Some(value);
+            }
+            map.values().find_map(find_valid_to)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(find_valid_to),
+        _ => None,
+    }
+}
+
+fn valid_to_to_unix_expiry(valid_to: &str) -> Option<i64> {
+    if valid_to.len() != 6 || !valid_to.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let year = valid_to[..4].parse::<i32>().ok()?;
+    let month = valid_to[4..].parse::<u32>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    Some(days_from_civil(next_year, next_month, 1) * 86_400)
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let day = day as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i64::from(era * 146_097 + doe - 719_468)
 }
 
 fn now_unix_seconds() -> Result<i64> {

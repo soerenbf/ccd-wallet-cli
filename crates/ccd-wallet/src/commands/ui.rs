@@ -71,22 +71,35 @@ where
         return Ok(items[0].value.clone());
     }
 
+    let ordered = order_items(items, initial);
     let mut picker = select(prompt);
-    for item in items {
-        picker = picker.item(item.value.clone(), item.label.clone(), item.hint.clone());
-    }
-    if let Some(initial) =
-        initial.filter(|initial| items.iter().any(|item| item.value == **initial))
-    {
-        picker = picker.initial_value(initial.clone());
+    for item in ordered {
+        picker = picker.item(item.value, item.label, item.hint);
     }
     Ok(picker.interact()?)
+}
+
+fn order_items<T>(items: &[SelectItem<T>], initial: Option<&T>) -> Vec<SelectItem<T>>
+where
+    T: Clone + Eq,
+{
+    let Some(initial) = initial else {
+        return items.to_vec();
+    };
+
+    let mut ordered = items.to_vec();
+    if let Some(index) = ordered.iter().position(|item| item.value == *initial) {
+        let initial_item = ordered.remove(index);
+        ordered.insert(0, initial_item);
+    }
+    ordered
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextLine, ResolutionSource, SelectItem, format_resolved_context, select_or_single,
+        ContextLine, ResolutionSource, SelectItem, format_resolved_context, order_items,
+        select_or_single,
     };
 
     #[test]
@@ -143,5 +156,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, "testnet");
+    }
+
+    #[test]
+    fn order_items_moves_initial_to_front() {
+        let ordered = order_items(
+            &[
+                SelectItem {
+                    value: "mainnet".to_owned(),
+                    label: "mainnet".to_owned(),
+                    hint: String::new(),
+                },
+                SelectItem {
+                    value: "testnet".to_owned(),
+                    label: "testnet".to_owned(),
+                    hint: String::new(),
+                },
+            ],
+            Some(&"testnet".to_owned()),
+        );
+
+        assert_eq!(ordered[0].value, "testnet");
+        assert_eq!(ordered[1].value, "mainnet");
     }
 }

@@ -38,9 +38,6 @@ pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
 }
 
 async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
-    let label = resolve_identity_label(args.label, args.non_interactive)?;
-    validate_identity_label(&label)?;
-
     let (seed_label, seed_source) = resolve_seed_label(
         conn,
         args.seed.as_deref(),
@@ -57,14 +54,6 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
         )
         .await?;
 
-    if identities::find_by_network_and_label(conn, &network_entry.genesis_hash, &label)?.is_some() {
-        bail!(
-            "identity label '{}' already exists on network '{}'",
-            label,
-            network_name
-        );
-    }
-
     log_resolved_context(&[
         ContextLine {
             label: "seed:",
@@ -77,6 +66,17 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
             source: network_source,
         },
     ])?;
+
+    let label = resolve_identity_label(args.label, args.non_interactive)?;
+    validate_identity_label(&label)?;
+    if identities::find_by_network_and_label(conn, &network_entry.genesis_hash, &label)?.is_some() {
+        bail!(
+            "identity label '{}' already exists on network '{}'",
+            label,
+            network_name
+        );
+    }
+
     let unlocked_seed = unlock_seed(conn, &seed_label)?;
     let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
         .context("stored seed phrase is not UTF-8")?
@@ -170,6 +170,13 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
             code_uri: &code_uri,
         },
     )?;
+
+    if args.no_wait {
+        cliclack::log::success(format!(
+            "Identity '{label}' is pending. It will be checked again when used for account creation."
+        ))?;
+        return Ok(());
+    }
 
     poll_identity(conn, record_id, &unlocked_seed.dek, &code_uri, &label).await
 }
