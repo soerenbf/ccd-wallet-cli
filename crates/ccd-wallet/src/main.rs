@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Node(command) => commands::node::run(&conn, command.command).await,
-        Command::Network(command) => commands::config::run(&conn, command).await,
+        Command::Network(command) => commands::config::run(&conn, *command).await,
         Command::Seed(command) => commands::seed::run(&mut conn, command.command).await,
         Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,

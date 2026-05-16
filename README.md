@@ -76,6 +76,10 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
 ```bash
 cargo run -p ccd-wallet -- network add --name testnet --node https://grpc.testnet.concordium.com:20000 --wallet-proxy https://wallet-proxy.testnet.concordium.com
 cargo run -p ccd-wallet -- network list
+cargo run -p ccd-wallet -- network show
+cargo run -p ccd-wallet -- network show testnet
+cargo run -p ccd-wallet -- network show --node https://grpc.testnet.concordium.com:20000
+cargo run -p ccd-wallet -- network show testnet --node https://grpc.testnet.concordium.com:20000
 cargo run -p ccd-wallet -- network rename testnet staging
 cargo run -p ccd-wallet -- network reset staging
 cargo run -p ccd-wallet -- network reset --genesis-hash <GENESIS_HASH>
@@ -86,6 +90,8 @@ cargo run -p ccd-wallet -- network use
 ```
 
 Most user-facing setup flows can now prompt for missing non-secret values interactively. Use `--non-interactive` to disable prompt fallback and require values on the command line. Use `--no-defaults` on flows that would otherwise silently use the active seed or active network to force an explicit picker selection instead. When a picker has only one valid option, the CLI selects it automatically instead of showing a one-item selector. Existing-entity selection flows such as `seed use` and `network use` use selectors instead of asking you to retype a known label.
+
+`network show [NAME]` inspects a configured network and prints `Network configuration` followed by `Consensus (<node endpoint>)`. Bare `network show` uses the active network by default unless `--no-defaults` is supplied. `network show --node <ENDPOINT>` switches into node-only mode: it queries the explicit endpoint, derives the observed genesis hash, prints `Network match(es) (<genesis hash>)` with any matching configured aliases, and then prints consensus details. `network show [NAME] --node <ENDPOINT>` keeps config mode but uses the explicit node as a diagnostic override, warning if the observed genesis hash does not match the configured network.
 
 ### Example: manage seed phrases
 

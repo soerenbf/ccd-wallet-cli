@@ -19,7 +19,7 @@ pub enum Command {
     /// Node-related commands.
     Node(Box<NodeCommand>),
     /// Network configuration commands.
-    Network(NetworkCommand),
+    Network(Box<NetworkCommand>),
     /// Seed phrase commands.
     Seed(SeedCommand),
     /// Identity issuance commands.

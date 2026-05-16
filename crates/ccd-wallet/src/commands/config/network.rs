@@ -12,7 +12,7 @@ use clap::{Args, Subcommand};
 use cliclack::{input, multiselect};
 use concordium_rust_sdk::v2;
 use rusqlite::Connection;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, str::FromStr};
 
 // ---------------------------------------------------------------------------
 // CLI types
@@ -37,6 +37,8 @@ pub enum NetworkSubcommand {
     Rename(NetworkRenameArgs),
     /// Reset wallet-local data for a network.
     Reset(NetworkResetArgs),
+    /// Show configured network details or matches for a node endpoint.
+    Show(Box<NetworkShowArgs>),
     /// Set the active network by name.
     Use(NetworkUseArgs),
 }
@@ -91,6 +93,25 @@ pub struct NetworkResetArgs {
     /// Explicit network genesis hash to reset.
     #[arg(long = "genesis-hash", value_name = "HASH")]
     pub genesis_hash: Option<String>,
+
+    /// Disable prompt fallback and require values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkShowArgs {
+    /// Configured network name to show.
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Explicit Concordium node gRPC endpoint to query.
+    #[arg(long = "node", value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Disable silent use of active defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 
     /// Disable prompt fallback and require values on the command line.
     #[arg(long = "non-interactive")]
@@ -219,6 +240,25 @@ fn resolve_required_input(
     }
 }
 
+pub async fn show(conn: &Connection, args: NetworkShowArgs) -> Result<()> {
+    let target = resolve_show_target(conn, &args)?;
+    let summary = query_consensus_summary(target.endpoint.clone(), &target.endpoint_label).await?;
+
+    match &target.mode {
+        NetworkShowMode::Config(config_view) => {
+            render_network_configuration(config_view);
+            maybe_warn_genesis_mismatch(config_view, &summary)?;
+        }
+        NetworkShowMode::NodeOnly => {
+            let app_config = load()?;
+            render_network_matches(&app_config, &summary.genesis_hash);
+        }
+    }
+    println!();
+    render_consensus(&summary, &target.endpoint_label);
+    Ok(())
+}
+
 pub async fn list(conn: &Connection) -> Result<()> {
     let app_config = load()?;
     let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
@@ -246,6 +286,35 @@ pub async fn list(conn: &Connection) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct NetworkConfigView {
+    name: String,
+    entry: NetworkEntry,
+}
+
+#[derive(Clone, Debug)]
+enum NetworkShowMode {
+    Config(NetworkConfigView),
+    NodeOnly,
+}
+
+#[derive(Clone, Debug)]
+struct NetworkShowTarget {
+    endpoint: v2::Endpoint,
+    endpoint_label: String,
+    mode: NetworkShowMode,
+}
+
+#[derive(Clone, Debug)]
+struct ConsensusSummary {
+    genesis_hash: String,
+    protocol_version: String,
+    best_block: String,
+    best_block_height: String,
+    last_finalized_block: String,
+    last_finalized_block_height: String,
 }
 
 fn render_network_list_text(
@@ -290,6 +359,185 @@ fn render_network_text(
 fn format_count(count: usize, singular: &str, plural: &str) -> String {
     let noun = if count == 1 { singular } else { plural };
     format!("{count} {noun}")
+}
+
+fn network_config_view(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    name: &str,
+) -> Result<NetworkConfigView> {
+    let entry = app_config
+        .networks
+        .get(name)
+        .cloned()
+        .with_context(|| format!("network '{name}' is not registered"))?;
+    Ok(NetworkConfigView {
+        name: name.to_owned(),
+        entry,
+    })
+}
+
+fn endpoint_from_string(endpoint: &str) -> Result<v2::Endpoint> {
+    v2::Endpoint::from_str(&config::normalize_url_string(endpoint))
+        .with_context(|| format!("invalid stored node endpoint: {endpoint}"))
+}
+
+fn resolve_show_target_with_config(
+    conn: &Connection,
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    args: &NetworkShowArgs,
+) -> Result<NetworkShowTarget> {
+    match (args.name.as_deref(), args.node.clone()) {
+        (Some(name), Some(node)) => Ok(NetworkShowTarget {
+            endpoint_label: config::endpoint_label(&node),
+            endpoint: node,
+            mode: NetworkShowMode::Config(network_config_view(app_config, name)?),
+        }),
+        (Some(name), None) => {
+            let config_view = network_config_view(app_config, name)?;
+            let endpoint = endpoint_from_string(&config_view.entry.node_endpoint)?;
+            Ok(NetworkShowTarget {
+                endpoint,
+                endpoint_label: config_view.entry.node_endpoint.clone(),
+                mode: NetworkShowMode::Config(config_view),
+            })
+        }
+        (None, Some(node)) => Ok(NetworkShowTarget {
+            endpoint_label: config::endpoint_label(&node),
+            endpoint: node,
+            mode: NetworkShowMode::NodeOnly,
+        }),
+        (None, None) if args.no_defaults && args.non_interactive => {
+            bail!("network name or --node must be provided in --non-interactive mode")
+        }
+        (None, None) if args.no_defaults => {
+            let name = select_network_name(conn, app_config)?;
+            let config_view = network_config_view(app_config, &name)?;
+            let endpoint = endpoint_from_string(&config_view.entry.node_endpoint)?;
+            Ok(NetworkShowTarget {
+                endpoint,
+                endpoint_label: config_view.entry.node_endpoint.clone(),
+                mode: NetworkShowMode::Config(config_view),
+            })
+        }
+        (None, None) => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(
+                || {
+                    "no active network is set; provide a network label, use `--node`, or run `ccd-wallet network use <NAME>`"
+                },
+            )?;
+            let config_view = network_config_view(app_config, &active).with_context(|| {
+                format!(
+                    "active network '{}' is no longer registered; update it with `ccd-wallet network use <NAME>` or provide a network label / `--node` explicitly",
+                    active
+                )
+            })?;
+            let endpoint = endpoint_from_string(&config_view.entry.node_endpoint)?;
+            Ok(NetworkShowTarget {
+                endpoint,
+                endpoint_label: config_view.entry.node_endpoint.clone(),
+                mode: NetworkShowMode::Config(config_view),
+            })
+        }
+    }
+}
+
+fn resolve_show_target(conn: &Connection, args: &NetworkShowArgs) -> Result<NetworkShowTarget> {
+    let app_config = load()?;
+    resolve_show_target_with_config(conn, &app_config, args)
+}
+
+async fn query_consensus_summary(
+    endpoint: v2::Endpoint,
+    endpoint_label: &str,
+) -> Result<ConsensusSummary> {
+    let mut client = config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+    let consensus_info = client
+        .get_consensus_info()
+        .await
+        .with_context(|| format!("failed to query consensus info from node at {endpoint_label}"))?;
+    Ok(ConsensusSummary {
+        genesis_hash: format!("{}", consensus_info.genesis_block),
+        protocol_version: format!("{}", consensus_info.protocol_version),
+        best_block: format!("{}", consensus_info.best_block),
+        best_block_height: consensus_info.best_block_height.height.to_string(),
+        last_finalized_block: format!("{}", consensus_info.last_finalized_block),
+        last_finalized_block_height: consensus_info
+            .last_finalized_block_height
+            .height
+            .to_string(),
+    })
+}
+
+fn render_consensus(summary: &ConsensusSummary, endpoint_label: &str) {
+    println!("Consensus ({endpoint_label})");
+    println!("- observed genesis hash: {}", summary.genesis_hash);
+    println!("- protocol version: {}", summary.protocol_version);
+    println!("- best block: {}", summary.best_block);
+    println!("- best block height: {}", summary.best_block_height);
+    println!("- last finalized block: {}", summary.last_finalized_block);
+    println!(
+        "- last finalized block height: {}",
+        summary.last_finalized_block_height
+    );
+}
+
+fn render_network_configuration(config_view: &NetworkConfigView) {
+    println!("Network configuration");
+    println!("- name: {}", config_view.name);
+    println!("- node: {}", config_view.entry.node_endpoint);
+    println!("- wallet proxy: {}", config_view.entry.wallet_proxy);
+    println!("- genesis hash: {}", config_view.entry.genesis_hash);
+}
+
+fn network_match_lines(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    genesis_hash: &str,
+) -> (String, Vec<String>) {
+    let matches = app_config
+        .networks
+        .iter()
+        .filter(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .collect::<Vec<_>>();
+    let heading = if matches.len() == 1 {
+        format!("Network match ({genesis_hash})")
+    } else {
+        format!("Network matches ({genesis_hash})")
+    };
+    let lines = if matches.is_empty() {
+        vec!["- none".to_owned()]
+    } else {
+        matches
+            .into_iter()
+            .map(|(name, entry)| format!("- {} ({})", name, entry.node_endpoint))
+            .collect()
+    };
+    (heading, lines)
+}
+
+fn render_network_matches(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    genesis_hash: &str,
+) {
+    let (heading, lines) = network_match_lines(app_config, genesis_hash);
+    println!("{heading}");
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+fn maybe_warn_genesis_mismatch(
+    config_view: &NetworkConfigView,
+    summary: &ConsensusSummary,
+) -> Result<()> {
+    if config_view.entry.genesis_hash != summary.genesis_hash {
+        cliclack::log::warning(format!(
+            "configured network '{}' expects genesis hash {}, but the queried node reported {}",
+            config_view.name, config_view.entry.genesis_hash, summary.genesis_hash
+        ))?;
+    }
+    Ok(())
 }
 
 fn abbreviate_hash(hash: &str) -> String {
@@ -766,6 +1014,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_show_target_uses_active_network_in_config_mode() {
+        let conn = conn();
+        wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "testnet").unwrap();
+        let app_config = app_config_with_networks(&["testnet"]);
+
+        let target = resolve_show_target_with_config(
+            &conn,
+            &app_config,
+            &NetworkShowArgs {
+                name: None,
+                node: None,
+                no_defaults: false,
+                non_interactive: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target.endpoint_label, "https://testnet.example.com:20000");
+        assert!(matches!(
+            target.mode,
+            NetworkShowMode::Config(NetworkConfigView { name, .. }) if name == "testnet"
+        ));
+    }
+
+    #[test]
+    fn resolve_show_target_node_only_does_not_use_active_network() {
+        let conn = conn();
+        wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "testnet").unwrap();
+        let app_config = app_config_with_networks(&["testnet"]);
+        let endpoint = "https://override.example.com:20000".parse().unwrap();
+
+        let target = resolve_show_target_with_config(
+            &conn,
+            &app_config,
+            &NetworkShowArgs {
+                name: None,
+                node: Some(endpoint),
+                no_defaults: false,
+                non_interactive: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(target.endpoint_label, "https://override.example.com:20000");
+        assert!(matches!(target.mode, NetworkShowMode::NodeOnly));
+    }
+
+    #[test]
     fn render_reset_partition_label_uses_hash_and_aliases() {
         assert_eq!(
             render_reset_partition_label("1234567890abcdef", &["testnet".to_owned()]),
@@ -851,6 +1147,29 @@ mod tests {
             known_network_hashes(&conn).unwrap(),
             vec!["hash-mainnet".to_owned()]
         );
+    }
+
+    #[test]
+    fn network_match_lines_render_multiple_and_no_match_cases() {
+        let mut app_config = app_config_with_networks(&["testnet"]);
+        app_config.networks.insert(
+            "other_testnet".to_owned(),
+            NetworkEntry {
+                node_endpoint: "https://other.example.com:20000".to_owned(),
+                genesis_hash: "hash-testnet".to_owned(),
+                wallet_proxy: "https://wallet-proxy.other.example.com".to_owned(),
+            },
+        );
+
+        let (heading, lines) = network_match_lines(&app_config, "hash-testnet");
+        assert_eq!(heading, "Network matches (hash-testnet)");
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().any(|line| line.contains("testnet (")));
+        assert!(lines.iter().any(|line| line.contains("other_testnet")));
+
+        let (heading, lines) = network_match_lines(&app_config, "missing-hash");
+        assert_eq!(heading, "Network matches (missing-hash)");
+        assert_eq!(lines, vec!["- none".to_owned()]);
     }
 
     #[test]

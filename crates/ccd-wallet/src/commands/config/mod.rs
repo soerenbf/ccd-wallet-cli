@@ -11,6 +11,7 @@ pub async fn run(conn: &Connection, command: NetworkCommand) -> Result<()> {
         NetworkSubcommand::List => network::list(conn).await,
         NetworkSubcommand::Rename(args) => network::rename(conn, args).await,
         NetworkSubcommand::Reset(args) => network::reset(conn, args).await,
+        NetworkSubcommand::Show(args) => network::show(conn, *args).await,
         NetworkSubcommand::Use(args) => network::use_network(conn, args).await,
     }
 }

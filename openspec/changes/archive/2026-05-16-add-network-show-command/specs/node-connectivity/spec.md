@@ -1,8 +1,5 @@
-# node-connectivity Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change setup-rust-wallet-cli. Update Purpose after archive.
-## Requirements
 ### Requirement: Configurable Concordium node endpoint
 The CLI SHALL allow the user to specify the target Concordium node for node commands using either a named network registered in the config store (`--network <NAME>`) or an explicit gRPC endpoint (`--node <ENDPOINT>`). If neither option is supplied, the CLI SHALL fall back to the active network from the wallet-state store unless `--no-defaults` is supplied. Supplying both `--network` and `--node` SHALL be an error.
 
@@ -66,18 +63,3 @@ The CLI SHALL also allow `network show` to resolve its query node from either a 
 - **AND** an active network is configured
 - **THEN** the CLI queries the explicit endpoint directly
 - **AND** does not implicitly render the active network's configuration unless a label was explicitly supplied
-
-### Requirement: Read-only node connectivity command
-The CLI SHALL provide at least one read-only command that connects to a Concordium node through the Concordium Rust SDK and returns node information to the user.
-
-#### Scenario: Query a reachable node successfully
-- **WHEN** the user runs the read-only node command against a reachable Concordium node endpoint
-- **THEN** the CLI establishes a connection through the Concordium Rust SDK
-- **AND** the command exits successfully
-- **AND** the CLI prints returned node information in a human-readable form
-
-#### Scenario: Surface a useful connection failure
-- **WHEN** the user runs the read-only node command against an unreachable or invalid endpoint
-- **THEN** the command exits with a non-zero status
-- **AND** the CLI prints an actionable error message indicating that node connectivity failed
-
