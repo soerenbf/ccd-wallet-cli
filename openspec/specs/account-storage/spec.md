@@ -64,6 +64,11 @@ The encrypted account private payload table SHALL reference the account metadata
 - **THEN** account rows owned by that seed are deleted automatically
 - **AND** encrypted private payload rows for those accounts are deleted automatically
 
+#### Scenario: Pruning a network partition deletes accounts and payloads
+- **WHEN** the storage layer deletes all account rows whose `network_genesis_hash = abc`
+- **THEN** all matching account rows are removed
+- **AND** their encrypted private payload rows are deleted automatically by SQLite foreign-key cascade
+
 ### Requirement: Account rows are listable and searchable by plaintext metadata with optional address reveal
 The system SHALL support listing accounts by network scope, seed scope, and relevant plaintext filters such as status using plaintext metadata. Account addresses remain encrypted by default and SHALL only be revealed when the CLI explicitly requests address display. Listing and interactive search for accounts SHALL use plaintext metadata unless address reveal has been explicitly requested.
 

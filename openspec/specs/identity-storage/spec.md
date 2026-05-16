@@ -87,6 +87,11 @@ The `identity_private_payloads.identity_id` foreign key SHALL reference `identit
 - **THEN** identities owned by the seed are deleted automatically
 - **AND** encrypted private payload rows for those identities are deleted automatically
 
+#### Scenario: Pruning a network partition deletes identities and payloads
+- **WHEN** the storage layer deletes all identity rows whose `network_genesis_hash = abc`
+- **THEN** all matching identity rows are removed
+- **AND** their encrypted private payload rows are deleted automatically by SQLite foreign-key cascade
+
 ### Requirement: Identity usability metadata supports account creation prevalidation
 The system SHALL persist enough plaintext identity usability metadata to let account creation determine whether an identity is eligible for use without decrypting all stored identity payloads. For this change, the only plaintext usability metadata promoted for account creation is identity expiry. This metadata MUST allow the wallet to reject expired identities during identity selection and again immediately before credential deployment submission.
 

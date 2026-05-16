@@ -38,6 +38,8 @@ pub struct SeedCommand {
 pub enum SeedSubcommand {
     /// Add a password-protected seed phrase.
     Add(SeedAddArgs),
+    /// Delete a seed phrase.
+    Delete(SeedDeleteArgs),
     /// List configured seeds.
     List,
     /// Rename a configured seed.
@@ -48,8 +50,6 @@ pub enum SeedSubcommand {
     Use(SeedUseArgs),
     /// Show a seed phrase after password authentication.
     Show(SeedShowArgs),
-    /// Remove a seed phrase.
-    Remove(SeedRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -117,8 +117,8 @@ pub struct SeedShowArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct SeedRemoveArgs {
-    /// Label of the seed to remove.
+pub struct SeedDeleteArgs {
+    /// Label of the seed to delete.
     #[arg(value_name = "LABEL")]
     pub label: Option<String>,
 

@@ -70,7 +70,12 @@ pub trait SeedPrompts {
     fn prompt_password(&mut self) -> Result<String>;
     fn prompt_password_confirmation(&mut self) -> Result<String>;
     fn prompt_unlock_password(&mut self, label: &str) -> Result<String>;
-    fn prompt_remove_confirmation(&mut self, label: &str) -> Result<String>;
+    fn prompt_delete_confirmation(
+        &mut self,
+        label: &str,
+        identity_count: usize,
+        account_count: usize,
+    ) -> Result<String>;
 }
 
 pub trait SeedPhraseRevealer {
@@ -157,9 +162,16 @@ impl SeedPrompts for TerminalSeedPrompts {
             .interact()?)
     }
 
-    fn prompt_remove_confirmation(&mut self, label: &str) -> Result<String> {
+    fn prompt_delete_confirmation(
+        &mut self,
+        label: &str,
+        identity_count: usize,
+        account_count: usize,
+    ) -> Result<String> {
         cliclack::log::warning(format!(
-            "This will remove seed '{label}' and all seed-owned data."
+            "This will delete seed '{label}' and remove {} and {} owned by it.",
+            format_count(identity_count, "identity", "identities"),
+            format_count(account_count, "account", "accounts"),
         ))?;
         Ok(input(format!("Type '{label}' to confirm:"))
             .validate(|value: &String| {
@@ -206,6 +218,9 @@ async fn run_with_io(
             )
             .await
         }
+        SeedSubcommand::Delete(args) => {
+            delete_seed(conn, args.label, args.non_interactive, prompts).await
+        }
         SeedSubcommand::List => list_seeds(conn).await,
         SeedSubcommand::Rename(args) => {
             rename_seed(
@@ -223,9 +238,6 @@ async fn run_with_io(
         }
         SeedSubcommand::Show(args) => {
             show(conn, args.label, args.no_defaults, prompts, revealer).await
-        }
-        SeedSubcommand::Remove(args) => {
-            remove_seed(conn, args.label, args.non_interactive, prompts).await
         }
     }
 }
@@ -278,7 +290,11 @@ async fn add(
         revealer.reveal(&label, &seed_phrase)?;
     }
 
-    println!("Seed '{label}' added successfully.");
+    if restore_target.is_some() {
+        cliclack::log::success(format!("Seed '{label}' added successfully."))?;
+    } else {
+        println!("Seed '{label}' added successfully.");
+    }
 
     if let Some((resolved_network_name, network_entry, endpoint, endpoint_label, _)) =
         restore_target
@@ -428,7 +444,7 @@ async fn use_seed(
     Ok(())
 }
 
-async fn remove_seed(
+async fn delete_seed(
     conn: &Connection,
     label: Option<String>,
     non_interactive: bool,
@@ -441,10 +457,18 @@ async fn remove_seed(
         "Seed label:",
         "seed label must be provided in --non-interactive mode",
     )?;
-    ensure_seed_exists(conn, &label)?;
-    let confirmation = prompts.prompt_remove_confirmation(&label)?;
+    let seed = ensure_seed_exists(conn, &label)?;
+    let identity_count = identities::list(conn)?
+        .into_iter()
+        .filter(|record| record.seed_id == seed.id)
+        .count();
+    let account_count = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.seed_id == seed.id)
+        .count();
+    let confirmation = prompts.prompt_delete_confirmation(&label, identity_count, account_count)?;
     if confirmation != label {
-        bail!("seed removal aborted: confirmation did not match '{label}'");
+        bail!("seed deletion aborted: confirmation did not match '{label}'");
     }
 
     seeds::remove(conn, &label)?;
@@ -452,7 +476,7 @@ async fn remove_seed(
         wallet_state::remove(conn, wallet_state::ACTIVE_SEED_KEY)?;
     }
 
-    println!("Seed '{label}' removed successfully.");
+    println!("Seed '{label}' deleted successfully.");
 
     Ok(())
 }
@@ -1711,7 +1735,7 @@ mod tests {
         password: String,
         password_confirmation: String,
         unlock_password: String,
-        remove_confirmation: String,
+        delete_confirmation: String,
     }
 
     impl SeedPrompts for TestPrompts {
@@ -1767,8 +1791,13 @@ mod tests {
             Ok(self.unlock_password.clone())
         }
 
-        fn prompt_remove_confirmation(&mut self, _label: &str) -> Result<String> {
-            Ok(self.remove_confirmation.clone())
+        fn prompt_delete_confirmation(
+            &mut self,
+            _label: &str,
+            _identity_count: usize,
+            _account_count: usize,
+        ) -> Result<String> {
+            Ok(self.delete_confirmation.clone())
         }
     }
 
@@ -1833,7 +1862,7 @@ mod tests {
             password: "one".to_owned(),
             password_confirmation: "two".to_owned(),
             unlock_password: String::new(),
-            remove_confirmation: String::new(),
+            delete_confirmation: String::new(),
             ..Default::default()
         };
         let mut revealer = TestRevealer::default();
@@ -1864,7 +1893,7 @@ mod tests {
             password: "password".to_owned(),
             password_confirmation: "password".to_owned(),
             unlock_password: String::new(),
-            remove_confirmation: String::new(),
+            delete_confirmation: String::new(),
             ..Default::default()
         };
         let mut revealer = TestRevealer::default();
@@ -2295,16 +2324,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_remove_deletes_seed_and_clears_active_seed() {
+    async fn seed_delete_deletes_seed_and_clears_active_seed() {
         let conn = conn();
         add_test_seed(&conn);
         wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
         let mut prompts = TestPrompts {
-            remove_confirmation: "main_seed".to_owned(),
+            delete_confirmation: "main_seed".to_owned(),
             ..Default::default()
         };
 
-        remove_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
+        delete_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
             .await
             .unwrap();
 
@@ -2316,16 +2345,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_remove_confirmation_mismatch_keeps_seed_and_vault() {
+    async fn seed_delete_confirmation_mismatch_keeps_seed_and_vault() {
         let conn = conn();
         add_test_seed(&conn);
         let mut prompts = TestPrompts {
-            remove_confirmation: "wrong".to_owned(),
+            delete_confirmation: "wrong".to_owned(),
             ..Default::default()
         };
 
         assert!(
-            remove_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
+            delete_seed(&conn, Some("main_seed".to_owned()), false, &mut prompts)
                 .await
                 .is_err()
         );
@@ -2338,17 +2367,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_remove_inactive_seed_leaves_active_seed_unchanged() {
+    async fn seed_delete_inactive_seed_leaves_active_seed_unchanged() {
         let conn = conn();
         add_test_seed(&conn);
         seeds::add(&conn, "old_seed", VALID_MNEMONIC.as_bytes(), "password").unwrap();
         wallet_state::set(&conn, wallet_state::ACTIVE_SEED_KEY, "main_seed").unwrap();
         let mut prompts = TestPrompts {
-            remove_confirmation: "old_seed".to_owned(),
+            delete_confirmation: "old_seed".to_owned(),
             ..Default::default()
         };
 
-        remove_seed(&conn, Some("old_seed".to_owned()), false, &mut prompts)
+        delete_seed(&conn, Some("old_seed".to_owned()), false, &mut prompts)
             .await
             .unwrap();
 

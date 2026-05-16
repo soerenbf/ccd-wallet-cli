@@ -300,6 +300,25 @@ pub fn next_generated_label(
     unreachable!("u32 label space exhausted")
 }
 
+pub fn prune_by_network(conn: &Connection, network_genesis_hash: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM accounts WHERE network_genesis_hash = ?1",
+        params![network_genesis_hash],
+    )
+    .with_context(|| format!("failed to prune accounts for network '{network_genesis_hash}'"))
+}
+
+pub fn distinct_network_genesis_hashes(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT network_genesis_hash FROM accounts ORDER BY network_genesis_hash")
+        .context("failed to prepare distinct account network hash query")?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .context("failed to query distinct account network hashes")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read distinct account network hashes")
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<AccountRecord>> {
     let mut stmt = conn
         .prepare(
@@ -841,6 +860,38 @@ mod tests {
             })
             .unwrap();
         assert_eq!(account_count, 0);
+        assert_eq!(payload_count, 0);
+    }
+
+    #[test]
+    fn pruning_network_cascades_account_payloads() {
+        let mut conn = conn();
+        let (seed_id, dek) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
+        set_finalized(&mut conn, id, &dek, None, "account-address").unwrap();
+        insert_pending(
+            &conn,
+            PendingAccount {
+                network_genesis_hash: TESTNET,
+                seed_id: &seed_id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 1,
+                label: "account-2",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(prune_by_network(&conn, MAINNET).unwrap(), 1);
+        assert_eq!(
+            distinct_network_genesis_hashes(&conn).unwrap(),
+            vec![TESTNET.to_owned()]
+        );
+        let payload_count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM account_private_payloads", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(payload_count, 0);
     }
 }

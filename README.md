@@ -77,6 +77,10 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
 cargo run -p ccd-wallet -- network add --name testnet --node https://grpc.testnet.concordium.com:20000 --wallet-proxy https://wallet-proxy.testnet.concordium.com
 cargo run -p ccd-wallet -- network list
 cargo run -p ccd-wallet -- network rename testnet staging
+cargo run -p ccd-wallet -- network reset staging
+cargo run -p ccd-wallet -- network reset --genesis-hash <GENESIS_HASH>
+cargo run -p ccd-wallet -- network delete staging
+cargo run -p ccd-wallet -- network delete staging other-alias
 cargo run -p ccd-wallet -- network use staging
 cargo run -p ccd-wallet -- network use
 ```
@@ -94,7 +98,7 @@ cargo run -p ccd-wallet -- seed use daily_seed
 cargo run -p ccd-wallet -- seed use
 cargo run -p ccd-wallet -- seed show
 cargo run -p ccd-wallet -- seed show daily_seed
-cargo run -p ccd-wallet -- seed remove daily_seed
+cargo run -p ccd-wallet -- seed delete daily_seed
 ```
 
 `seed add` requests the seed phrase and password through hidden interactive prompts. If the seed label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. Do not pass seed phrases or seed passwords as command-line arguments. Use `seed add <LABEL> --random` to generate a new 24-word seed phrase; the generated phrase is temporarily revealed after it is encrypted and stored, and can later be shown again with `seed show <LABEL>`.
@@ -103,7 +107,11 @@ cargo run -p ccd-wallet -- seed remove daily_seed
 
 `seed use [LABEL]` sets the active seed. If the label is omitted, the CLI opens a seed selector instead of asking you to type the label, unless `--non-interactive` is supplied. `seed show [LABEL]` reveals the decrypted seed phrase after a password prompt. If no label is supplied, `seed show` uses the active seed by default, or forces an explicit picker when `--no-defaults` is supplied.
 
-`seed remove [LABEL]` removes a seed after asking you to type the label as confirmation. If the label is omitted, the CLI prompts for it unless `--non-interactive` is supplied. If the removed seed is active, the active seed selection is cleared.
+`seed delete [LABEL]` deletes a seed after asking you to type the label as confirmation. If the label is omitted, the CLI opens a selector unless `--non-interactive` is supplied. Deleting a seed also removes all identities and accounts owned by that seed. If the deleted seed is active, the active seed selection is cleared.
+
+`network reset [NAME]` prunes wallet-local identities and accounts for a network partition while keeping configured aliases intact. It accepts either a configured network name or `--genesis-hash <HASH>`. In interactive mode, omitted targets open a partition-oriented selector that shows rows like `6f8c…ab12 - testnet, staging-testnet` or `6f8c…ab12 (orphan)` together with identity/account counts.
+
+`network delete [NAME]...` removes one or more configured network aliases only; it does not prune identities or accounts. If labels are omitted in interactive mode, the CLI opens an alias multiselect. When deleting aliases would orphan remaining local network data, the CLI warns and points you to `network reset` for cleanup.
 
 For safety, `seed show` displays the seed phrase in a temporary terminal view and hides it when you press any key or after 30 seconds, whichever happens first. This reduces terminal scrollback exposure, but it cannot protect against screenshots, terminal/session logging, tmux/screen behavior, or clipboard history if you copy the phrase.
 

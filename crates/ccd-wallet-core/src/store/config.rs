@@ -51,6 +51,30 @@ pub fn rename_network(config: &mut AppConfig, old_name: &str, new_name: &str) ->
     Ok(())
 }
 
+pub fn delete_networks(
+    config: &mut AppConfig,
+    names: &[String],
+) -> Result<Vec<(String, NetworkEntry)>> {
+    let mut removed = Vec::new();
+    for name in names {
+        let entry = config
+            .networks
+            .remove(name)
+            .with_context(|| format!("network '{name}' is not registered"))?;
+        removed.push((name.clone(), entry));
+    }
+    Ok(removed)
+}
+
+pub fn aliases_by_genesis_hash(config: &AppConfig, genesis_hash: &str) -> Vec<String> {
+    config
+        .networks
+        .iter()
+        .filter(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
@@ -153,5 +177,52 @@ mod tests {
 
         let err = rename_network(&mut config, "testnet", "mainnet").unwrap_err();
         assert!(err.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn delete_networks_removes_requested_aliases() {
+        let mut config = AppConfig::default();
+        config
+            .networks
+            .insert("testnet-a".to_owned(), entry("testnet"));
+        config.networks.insert(
+            "testnet-b".to_owned(),
+            NetworkEntry {
+                genesis_hash: "hash-testnet".to_owned(),
+                ..entry("staging")
+            },
+        );
+
+        let removed = delete_networks(
+            &mut config,
+            &["testnet-a".to_owned(), "testnet-b".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(removed.len(), 2);
+        assert!(config.networks.is_empty());
+    }
+
+    #[test]
+    fn aliases_by_genesis_hash_lists_matching_aliases() {
+        let mut config = AppConfig::default();
+        config
+            .networks
+            .insert("testnet-a".to_owned(), entry("testnet"));
+        config.networks.insert(
+            "testnet-b".to_owned(),
+            NetworkEntry {
+                genesis_hash: "hash-testnet".to_owned(),
+                ..entry("staging")
+            },
+        );
+        config
+            .networks
+            .insert("mainnet".to_owned(), entry("mainnet"));
+
+        assert_eq!(
+            aliases_by_genesis_hash(&config, "hash-testnet"),
+            vec!["testnet-a".to_owned(), "testnet-b".to_owned()]
+        );
     }
 }

@@ -312,6 +312,27 @@ pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn prune_by_network(conn: &Connection, network_genesis_hash: &str) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM identities WHERE network_genesis_hash = ?1",
+        params![network_genesis_hash],
+    )
+    .with_context(|| format!("failed to prune identities for network '{network_genesis_hash}'"))
+}
+
+pub fn distinct_network_genesis_hashes(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT network_genesis_hash FROM identities ORDER BY network_genesis_hash",
+        )
+        .context("failed to prepare distinct identity network hash query")?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .context("failed to query distinct identity network hashes")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to read distinct identity network hashes")
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<IdentityRecord>> {
     let mut stmt = conn
         .prepare(
@@ -1134,5 +1155,55 @@ mod tests {
             .unwrap();
         assert_eq!(identity_count, 0);
         assert_eq!(payload_count, 0);
+    }
+
+    #[test]
+    fn pruning_network_cascades_private_payloads() {
+        let mut conn = conn();
+        let (seed_id, key) = seed(&conn, "seed_a");
+        let id = insert_pending(
+            &mut conn,
+            &key,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity",
+            "https://code",
+        )
+        .unwrap();
+        insert_pending(
+            &mut conn,
+            &key,
+            TESTNET,
+            &seed_id,
+            7,
+            1,
+            "identity-testnet",
+            "https://code-2",
+        )
+        .unwrap();
+
+        assert_eq!(prune_by_network(&conn, MAINNET).unwrap(), 1);
+        let identity_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identities WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identity_count, 0);
+        assert_eq!(
+            distinct_network_genesis_hashes(&conn).unwrap(),
+            vec![TESTNET.to_owned()]
+        );
+        let payload_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identity_private_payloads",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload_count, 1);
     }
 }

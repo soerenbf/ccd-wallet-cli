@@ -9,9 +9,10 @@ use ccd_wallet_core::{
     },
 };
 use clap::{Args, Subcommand};
-use cliclack::input;
+use cliclack::{input, multiselect};
 use concordium_rust_sdk::v2;
 use rusqlite::Connection;
+use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // CLI types
@@ -28,10 +29,14 @@ pub enum NetworkSubcommand {
     /// Register a named Concordium network by connecting to a node and
     /// deriving its genesis hash.
     Add(Box<NetworkAddArgs>),
+    /// Delete one or more configured networks.
+    Delete(NetworkDeleteArgs),
     /// List configured networks.
     List,
     /// Rename a configured network.
     Rename(NetworkRenameArgs),
+    /// Reset wallet-local data for a network.
+    Reset(NetworkResetArgs),
     /// Set the active network by name.
     Use(NetworkUseArgs),
 }
@@ -60,6 +65,32 @@ pub struct NetworkUseArgs {
     /// Name of a registered network to set as active.
     #[arg(value_name = "NAME")]
     pub name: Option<String>,
+
+    /// Disable prompt fallback and require values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkDeleteArgs {
+    /// One or more configured network names to delete.
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
+
+    /// Disable prompt fallback and require values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct NetworkResetArgs {
+    /// Configured network name to reset.
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Explicit network genesis hash to reset.
+    #[arg(long = "genesis-hash", value_name = "HASH")]
+    pub genesis_hash: Option<String>,
 
     /// Disable prompt fallback and require values on the command line.
     #[arg(long = "non-interactive")]
@@ -261,6 +292,280 @@ fn format_count(count: usize, singular: &str, plural: &str) -> String {
     format!("{count} {noun}")
 }
 
+fn abbreviate_hash(hash: &str) -> String {
+    if hash.chars().count() <= 12 {
+        return hash.to_owned();
+    }
+    let prefix = hash.chars().take(4).collect::<String>();
+    let suffix = hash
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}…{suffix}")
+}
+
+fn render_reset_partition_label(genesis_hash: &str, aliases: &[String]) -> String {
+    let abbreviated = abbreviate_hash(genesis_hash);
+    if aliases.is_empty() {
+        format!("{abbreviated} (orphan)")
+    } else {
+        format!("{abbreviated} - {}", aliases.join(", "))
+    }
+}
+
+fn render_partition_hint(identity_count: usize, account_count: usize) -> String {
+    format!(
+        "{} • {}",
+        format_count(identity_count, "identity", "identities"),
+        format_count(account_count, "account", "accounts")
+    )
+}
+
+fn network_partition_counts(conn: &Connection, genesis_hash: &str) -> Result<(usize, usize)> {
+    let identity_count = identities::list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == genesis_hash)
+        .count();
+    let account_count = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == genesis_hash)
+        .count();
+    Ok((identity_count, account_count))
+}
+
+fn known_network_hashes(conn: &Connection) -> Result<Vec<String>> {
+    let mut hashes = BTreeSet::new();
+    hashes.extend(identities::distinct_network_genesis_hashes(conn)?);
+    hashes.extend(accounts::distinct_network_genesis_hashes(conn)?);
+    Ok(hashes.into_iter().collect())
+}
+
+fn resolve_reset_genesis_hash(
+    conn: &Connection,
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    name: Option<String>,
+    genesis_hash: Option<String>,
+    non_interactive: bool,
+) -> Result<String> {
+    match (name, genesis_hash) {
+        (Some(_), Some(_)) => bail!("network name and --genesis-hash cannot be combined"),
+        (Some(name), None) => app_config
+            .networks
+            .get(&name)
+            .map(|entry| entry.genesis_hash.clone())
+            .with_context(|| format!("network '{name}' is not registered")),
+        (None, Some(genesis_hash)) => Ok(genesis_hash),
+        (None, None) if non_interactive => {
+            bail!("network name or --genesis-hash must be provided in --non-interactive mode")
+        }
+        (None, None) => select_reset_genesis_hash(conn, app_config),
+    }
+}
+
+fn select_reset_genesis_hash(
+    conn: &Connection,
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+) -> Result<String> {
+    let hashes = known_network_hashes(conn)?;
+    if hashes.is_empty() {
+        bail!("no network data is stored; nothing to reset")
+    }
+
+    let items = hashes
+        .iter()
+        .map(|hash| {
+            let aliases = ccd_wallet_core::store::config::aliases_by_genesis_hash(app_config, hash);
+            let (identity_count, account_count) = network_partition_counts(conn, hash)?;
+            Ok(SelectItem {
+                value: hash.clone(),
+                label: render_reset_partition_label(hash, &aliases),
+                hint: render_partition_hint(identity_count, account_count),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    select_or_single("Select network to reset", &items, None)
+}
+
+fn prune_network_partition(conn: &Connection, genesis_hash: &str) -> Result<(usize, usize)> {
+    let identity_count = identities::prune_by_network(conn, genesis_hash)?;
+    let account_count = accounts::prune_by_network(conn, genesis_hash)?;
+    Ok((identity_count, account_count))
+}
+
+pub async fn reset(conn: &Connection, args: NetworkResetArgs) -> Result<()> {
+    let app_config = load()?;
+    let genesis_hash = resolve_reset_genesis_hash(
+        conn,
+        &app_config,
+        args.name,
+        args.genesis_hash,
+        args.non_interactive,
+    )?;
+    let aliases =
+        ccd_wallet_core::store::config::aliases_by_genesis_hash(&app_config, &genesis_hash);
+    let (identity_count, account_count) = network_partition_counts(conn, &genesis_hash)?;
+    cliclack::log::warning(format!(
+        "This will reset network data for '{}' and remove {} and {}.",
+        render_reset_partition_label(&genesis_hash, &aliases),
+        format_count(identity_count, "identity", "identities"),
+        format_count(account_count, "account", "accounts"),
+    ))?;
+    let confirmation: String = input(format!("Type '{}' to confirm:", genesis_hash))
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Err("Confirmation is required.")
+            } else {
+                Ok(())
+            }
+        })
+        .interact()?;
+    if confirmation != genesis_hash {
+        bail!("network reset aborted: confirmation did not match '{genesis_hash}'");
+    }
+
+    prune_network_partition(conn, &genesis_hash)?;
+    println!("Network data for '{genesis_hash}' reset successfully.");
+    Ok(())
+}
+
+fn resolve_delete_names(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    names: Vec<String>,
+    non_interactive: bool,
+) -> Result<Vec<String>> {
+    if !names.is_empty() {
+        let mut seen = BTreeSet::new();
+        for name in &names {
+            if !app_config.networks.contains_key(name) {
+                bail!("network '{name}' is not registered");
+            }
+            if !seen.insert(name.clone()) {
+                bail!("network '{name}' was provided more than once");
+            }
+        }
+        return Ok(names);
+    }
+    if non_interactive {
+        bail!("at least one network name must be provided in --non-interactive mode");
+    }
+    select_delete_names(app_config)
+}
+
+fn select_delete_names(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+) -> Result<Vec<String>> {
+    if app_config.networks.is_empty() {
+        bail!("no networks are configured; run `ccd-wallet network add` first")
+    }
+    let mut picker = multiselect("Select networks to delete").filter_mode();
+    for (name, entry) in &app_config.networks {
+        picker = picker.item(
+            name.clone(),
+            name.clone(),
+            abbreviate_hash(&entry.genesis_hash),
+        );
+    }
+    Ok(picker.interact()?)
+}
+
+fn network_delete_orphan_warnings(
+    conn: &Connection,
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    names: &[String],
+) -> Result<Vec<String>> {
+    let selected = names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut warnings = Vec::new();
+    let mut seen_hashes = BTreeSet::new();
+    for name in names {
+        let entry = app_config
+            .networks
+            .get(name)
+            .with_context(|| format!("network '{name}' is not registered"))?;
+        if !seen_hashes.insert(entry.genesis_hash.clone()) {
+            continue;
+        }
+        let remaining_aliases = ccd_wallet_core::store::config::aliases_by_genesis_hash(
+            app_config,
+            &entry.genesis_hash,
+        )
+        .into_iter()
+        .filter(|alias| !selected.contains(alias))
+        .collect::<Vec<_>>();
+        if remaining_aliases.is_empty() {
+            let (identity_count, account_count) =
+                network_partition_counts(conn, &entry.genesis_hash)?;
+            if identity_count > 0 || account_count > 0 {
+                warnings.push(format!(
+                    "{} will become orphaned with {} and {} remaining local data",
+                    entry.genesis_hash,
+                    format_count(identity_count, "identity", "identities"),
+                    format_count(account_count, "account", "accounts")
+                ));
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+fn cleanup_deleted_active_network_alias(conn: &Connection, names: &[String]) -> Result<()> {
+    if let Some(active) = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?
+        && names.contains(&active)
+    {
+        wallet_state::remove(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+    }
+    Ok(())
+}
+
+fn apply_network_delete(
+    conn: &Connection,
+    app_config: &mut ccd_wallet_core::store::config::AppConfig,
+    names: &[String],
+) -> Result<()> {
+    ccd_wallet_core::store::config::delete_networks(app_config, names)?;
+    save(app_config)?;
+    cleanup_deleted_active_network_alias(conn, names)?;
+    Ok(())
+}
+
+pub async fn delete(conn: &Connection, args: NetworkDeleteArgs) -> Result<()> {
+    let mut app_config = load()?;
+    let names = resolve_delete_names(&app_config, args.names, args.non_interactive)?;
+    let joined = names.join(" ");
+
+    let orphan_warnings = network_delete_orphan_warnings(conn, &app_config, &names)?;
+    let mut warning = format!(
+        "This will delete {} network alias(es): {}.",
+        names.len(),
+        joined
+    );
+    if !orphan_warnings.is_empty() {
+        warning.push_str(" Local wallet data will not be removed. ");
+        warning.push_str(&orphan_warnings.join("; "));
+        warning.push_str(". Use `ccd-wallet network reset` to prune orphaned data.");
+    }
+    cliclack::log::warning(warning)?;
+    let confirmation: String = input(format!("Type '{}' to confirm:", joined))
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Err("Confirmation is required.")
+            } else {
+                Ok(())
+            }
+        })
+        .interact()?;
+    if confirmation != joined {
+        bail!("network deletion aborted: confirmation did not match '{joined}'");
+    }
+
+    apply_network_delete(conn, &mut app_config, &names)?;
+    println!("Deleted network aliases: {joined}.");
+    Ok(())
+}
+
 pub async fn rename(conn: &Connection, args: NetworkRenameArgs) -> Result<()> {
     let mut app_config = load()?;
     let old_name = match args.old_name {
@@ -369,7 +674,7 @@ fn select_network_name(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ccd_wallet_core::store::{config::AppConfig, migrations};
+    use ccd_wallet_core::store::{config::AppConfig, migrations, seeds};
     use std::collections::BTreeMap;
 
     fn conn() -> Connection {
@@ -457,6 +762,135 @@ mod tests {
         assert_eq!(
             render_network_selector_text("testnet", &entry, 2, 3),
             "testnet — https://grpc.testnet.concordium.com:20000 • 2 identities • 3 accounts"
+        );
+    }
+
+    #[test]
+    fn render_reset_partition_label_uses_hash_and_aliases() {
+        assert_eq!(
+            render_reset_partition_label("1234567890abcdef", &["testnet".to_owned()]),
+            "1234…cdef - testnet"
+        );
+        assert_eq!(
+            render_reset_partition_label(
+                "1234567890abcdef",
+                &["testnet".to_owned(), "staging-testnet".to_owned()]
+            ),
+            "1234…cdef - testnet, staging-testnet"
+        );
+        assert_eq!(
+            render_reset_partition_label("1234567890abcdef", &[]),
+            "1234…cdef (orphan)"
+        );
+    }
+
+    #[test]
+    fn resolve_reset_genesis_hash_rejects_ambiguous_inputs() {
+        let conn = conn();
+        let app_config = app_config_with_networks(&["testnet"]);
+        let err = resolve_reset_genesis_hash(
+            &conn,
+            &app_config,
+            Some("testnet".to_owned()),
+            Some("abc".to_owned()),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn prune_network_partition_deletes_only_matching_rows() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "main_seed", b"seed secret", "password").unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "hash-testnet",
+                seed_id: &seed.id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "account-a",
+            },
+        )
+        .unwrap();
+        let unlocked = seeds::unlock_context(&conn, "main_seed", "password").unwrap();
+        identities::insert_pending(
+            &mut conn,
+            &unlocked.dek,
+            identities::PendingIdentity {
+                network_genesis_hash: "hash-testnet",
+                seed_id: &seed.id,
+                ip_identity: 1,
+                identity_index: 0,
+                label: "identity-a",
+                code_uri: "code",
+            },
+        )
+        .unwrap();
+        identities::insert_pending(
+            &mut conn,
+            &unlocked.dek,
+            identities::PendingIdentity {
+                network_genesis_hash: "hash-mainnet",
+                seed_id: &seed.id,
+                ip_identity: 1,
+                identity_index: 1,
+                label: "identity-b",
+                code_uri: "code-2",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            prune_network_partition(&conn, "hash-testnet").unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            known_network_hashes(&conn).unwrap(),
+            vec!["hash-mainnet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn orphan_warning_detects_last_alias_with_data() {
+        let conn = conn();
+        let seed = seeds::add(&conn, "main_seed", b"seed secret", "password").unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "hash-testnet",
+                seed_id: &seed.id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "account-a",
+            },
+        )
+        .unwrap();
+        let app_config = app_config_with_networks(&["testnet"]);
+        let warnings =
+            network_delete_orphan_warnings(&conn, &app_config, &["testnet".to_owned()]).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("hash-testnet"));
+    }
+
+    #[test]
+    fn cleanup_deleted_active_network_alias_clears_only_matching_active() {
+        let conn = conn();
+        wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "testnet").unwrap();
+        cleanup_deleted_active_network_alias(&conn, &["testnet".to_owned()]).unwrap();
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_NETWORK_KEY).unwrap(),
+            None
+        );
+
+        wallet_state::set(&conn, wallet_state::ACTIVE_NETWORK_KEY, "testnet").unwrap();
+        cleanup_deleted_active_network_alias(&conn, &["mainnet".to_owned()]).unwrap();
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_NETWORK_KEY).unwrap(),
+            Some("testnet".to_owned())
         );
     }
 

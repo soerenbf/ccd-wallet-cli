@@ -108,30 +108,31 @@ The seed storage layer SHALL delete seed-owned vault rows when a seed is deleted
 - **THEN** the corresponding row in `seed_vaults` is deleted automatically by SQLite foreign-key cascade
 
 ### Requirement: Seed removal by label
-The seed storage layer SHALL provide a remove-by-label operation that deletes the seed row for a configured seed and reports an error for an unknown seed label.
+The seed storage layer SHALL continue to support remove-by-label deletion semantics for a configured seed, and the user-facing CLI contract for this operation SHALL now be exposed as `seed delete`.
 
-#### Scenario: Remove configured seed by label
-- **WHEN** the storage layer removes seed label `main_seed`
+#### Scenario: Delete configured seed by label
+- **WHEN** the storage layer deletes seed label `main_seed`
 - **AND** `main_seed` exists
 - **THEN** the seed row is deleted
 - **AND** the operation succeeds
 
-#### Scenario: Remove unknown seed by label
-- **WHEN** the storage layer removes seed label `missing_seed`
+#### Scenario: Delete unknown seed by label
+- **WHEN** the storage layer deletes seed label `missing_seed`
 - **AND** no such seed exists
 - **THEN** the operation returns an error indicating that the seed is not configured
 
 ### Requirement: Future seed-owned rows cascade on delete
-Future DB tables that store objects owned by a seed SHALL reference `seeds(id)` with `ON DELETE CASCADE` unless explicitly justified otherwise. Identity rows SHALL be treated as seed-owned rows and cascade when the owning seed is deleted.
+Future DB tables that store objects owned by a seed SHALL reference `seeds(id)` with `ON DELETE CASCADE` unless explicitly justified otherwise. Identity rows and account rows SHALL be treated as seed-owned rows and cascade when the owning seed is deleted.
 
 #### Scenario: Add future seed-owned table
 - **WHEN** a future migration adds a seed-owned table such as accounts, identities, or credentials
 - **THEN** its seed foreign key uses `REFERENCES seeds(id) ON DELETE CASCADE`
 
-#### Scenario: Deleting seed deletes owned identities
+#### Scenario: Deleting seed deletes owned identities and accounts
 - **WHEN** a seed row is deleted
 - **THEN** identity rows owned by that seed are deleted automatically by SQLite foreign-key cascade
-- **AND** encrypted private payload rows for those identities are also deleted automatically
+- **AND** account rows owned by that seed are deleted automatically by SQLite foreign-key cascade
+- **AND** encrypted private payload rows for those identities and accounts are also deleted automatically
 
 ### Requirement: Seed labels are queryable and listable without a password
 The CLI SHALL be able to list configured seed labels and their plaintext metadata without prompting for a password, and it SHALL be able to resolve a seed by label for rename operations without decrypting the seed payload.
