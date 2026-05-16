@@ -16,6 +16,8 @@ pub enum PollResult {
 pub struct WalletProxyMetadata {
     #[serde(rename = "issuanceStart")]
     pub issuance_start: String,
+    #[serde(rename = "recoveryStart")]
+    pub recovery_start: Option<String>,
     pub support: Option<String>,
     pub icon: Option<String>,
 }
@@ -42,7 +44,7 @@ pub async fn fetch_wallet_proxy_ip_info(wallet_proxy: &str) -> Result<Vec<Wallet
 
     let url = Url::parse(wallet_proxy)
         .with_context(|| format!("invalid wallet proxy URL: {wallet_proxy}"))?
-        .join("/v1/ip_info")
+        .join("/v2/ip_info")
         .context("failed to build wallet proxy ip_info URL")?;
 
     let response = client
@@ -142,6 +144,52 @@ fn percent_encode_uri_component(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecoveryResult {
+    Missing,
+    Recovered(Value),
+}
+
+pub fn build_recovery_url(base_url: &str, id_recovery_request_json: &str) -> Result<Url> {
+    let mut url =
+        Url::parse(base_url).with_context(|| format!("invalid recovery URL: {base_url}"))?;
+    url.query_pairs_mut()
+        .append_pair("state", id_recovery_request_json);
+    Ok(url)
+}
+
+pub async fn recover_identity(
+    base_url: &str,
+    id_recovery_request_json: &str,
+) -> Result<RecoveryResult> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build identity recovery HTTP client")?;
+
+    let url = build_recovery_url(base_url, id_recovery_request_json)?;
+    let response =
+        client.get(url.clone()).send().await.with_context(|| {
+            format!("failed to reach identity provider recovery endpoint at {url}")
+        })?;
+
+    match response.status() {
+        StatusCode::OK => {
+            let value = response
+                .json()
+                .await
+                .with_context(|| format!("failed to parse recovery response from {url}"))?;
+            Ok(RecoveryResult::Recovered(value))
+        }
+        StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST => Ok(RecoveryResult::Missing),
+        status => bail!(
+            "identity provider recovery endpoint returned unexpected status {} for {}",
+            status,
+            url
+        ),
+    }
 }
 
 pub async fn poll_code_uri(code_uri: &str) -> Result<PollResult> {
@@ -255,6 +303,38 @@ mod tests {
         assert!(browser_url.contains("scope=identity"));
         assert!(browser_url.contains("response_type=code"));
         assert!(browser_url.contains("redirect_uri=ConcordiumRedirectToken"));
+    }
+
+    #[test]
+    fn build_recovery_url_adds_state_query() {
+        let url = build_recovery_url(
+            "https://issuer.example/recover",
+            "{\"idRecoveryRequest\":{}}",
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://issuer.example/recover?state=%7B%22idRecoveryRequest%22%3A%7B%7D%7D"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_identity_returns_recovered_or_missing() {
+        let found_url = serve_once(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"identity\":{}}",
+        );
+        match recover_identity(&found_url, "{}").await.unwrap() {
+            RecoveryResult::Recovered(value) => {
+                assert_eq!(value, serde_json::json!({"identity": {}}));
+            }
+            other => panic!("expected recovered result, got {other:?}"),
+        }
+
+        let missing_url = serve_once("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            recover_identity(&missing_url, "{}").await.unwrap(),
+            RecoveryResult::Missing
+        );
     }
 
     #[tokio::test]

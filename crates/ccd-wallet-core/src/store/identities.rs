@@ -185,6 +185,121 @@ pub fn set_done(
     Ok(())
 }
 
+pub struct RecoveredIdentity<'a> {
+    pub network_genesis_hash: &'a str,
+    pub seed_id: &'a str,
+    pub ip_identity: u32,
+    pub identity_index: u32,
+    pub label: &'a str,
+    pub identity_object: &'a serde_json::Value,
+}
+
+pub fn import_recovered(
+    conn: &mut Connection,
+    seed_dek: &[u8; KEY_LEN],
+    recovered: RecoveredIdentity<'_>,
+) -> Result<(IdentityRecord, bool)> {
+    let tx = conn
+        .transaction()
+        .context("failed to start recovered identity import transaction")?;
+
+    if let Some(existing) = find_by_network_seed_ip_and_index(
+        &tx,
+        recovered.network_genesis_hash,
+        recovered.seed_id,
+        recovered.ip_identity,
+        recovered.identity_index,
+    )? {
+        let mut payload = decrypt_private_payload_in_tx(&tx, &existing, seed_dek)?;
+        payload.identity_object = Some(recovered.identity_object.clone());
+        let expires_at = extract_identity_expires_at(recovered.identity_object);
+
+        tx.execute(
+            "UPDATE identities SET status = ?1, expires_at = ?2 WHERE id = ?3",
+            params![IdentityStatus::Done.as_str(), expires_at, existing.id],
+        )
+        .with_context(|| format!("failed to update recovered identity {}", existing.id))?;
+
+        let updated = IdentityRecord {
+            status: IdentityStatus::Done,
+            expires_at,
+            ..existing
+        };
+        upsert_private_payload_in_tx(&tx, &updated, seed_dek, &payload)?;
+        tx.commit()
+            .context("failed to commit recovered identity update transaction")?;
+        return Ok((updated, false));
+    }
+
+    if find_by_network_and_label(&tx, recovered.network_genesis_hash, recovered.label)?.is_some() {
+        bail!(
+            "identity label '{}' already exists for network '{}'",
+            recovered.label,
+            recovered.network_genesis_hash
+        );
+    }
+
+    let created_at = now_unix_seconds()?;
+    let expires_at = extract_identity_expires_at(recovered.identity_object);
+    tx.execute(
+        "INSERT INTO identities (
+            seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            recovered.seed_id,
+            recovered.network_genesis_hash,
+            recovered.ip_identity,
+            recovered.identity_index,
+            recovered.label,
+            IdentityStatus::Done.as_str(),
+            created_at,
+            expires_at,
+        ],
+    )
+    .with_context(|| format!("failed to insert recovered identity '{}'", recovered.label))?;
+
+    let record = IdentityRecord {
+        id: tx.last_insert_rowid(),
+        seed_id: recovered.seed_id.to_owned(),
+        network_genesis_hash: recovered.network_genesis_hash.to_owned(),
+        ip_identity: recovered.ip_identity,
+        identity_index: recovered.identity_index,
+        label: recovered.label.to_owned(),
+        status: IdentityStatus::Done,
+        created_at,
+        expires_at,
+    };
+    let payload = IdentityPrivatePayload {
+        code_uri: String::new(),
+        identity_object: Some(recovered.identity_object.clone()),
+    };
+    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    tx.commit()
+        .context("failed to commit recovered identity insert transaction")?;
+    Ok((record, true))
+}
+
+pub fn next_generated_label(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    prefix: &str,
+) -> Result<String> {
+    let existing = list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == network_genesis_hash)
+        .map(|record| record.label)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for index in 1u32.. {
+        let candidate = format!("{prefix}_{index}");
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("u32 label space exhausted")
+}
+
 pub fn delete(conn: &Connection, id: i64) -> Result<()> {
     let affected = conn
         .execute("DELETE FROM identities WHERE id = ?1", params![id])
@@ -681,6 +796,82 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("identity index 0"));
+    }
+
+    #[test]
+    fn import_recovered_inserts_and_reuses_tuple() {
+        let mut conn = conn();
+        let (seed_id, dek) = seed(&conn, "seed_a");
+        let identity_object = serde_json::json!({"value": {"validTo": "2026-05-15T00:00:00Z"}});
+
+        let (record, inserted) = import_recovered(
+            &mut conn,
+            &dek,
+            RecoveredIdentity {
+                network_genesis_hash: MAINNET,
+                seed_id: &seed_id,
+                ip_identity: 7,
+                identity_index: 0,
+                label: "identity_1",
+                identity_object: &identity_object,
+            },
+        )
+        .unwrap();
+        assert!(inserted);
+        assert_eq!(record.status, IdentityStatus::Done);
+
+        let (updated, inserted_again) = import_recovered(
+            &mut conn,
+            &dek,
+            RecoveredIdentity {
+                network_genesis_hash: MAINNET,
+                seed_id: &seed_id,
+                ip_identity: 7,
+                identity_index: 0,
+                label: "identity_other",
+                identity_object: &identity_object,
+            },
+        )
+        .unwrap();
+        assert!(!inserted_again);
+        assert_eq!(updated.id, record.id);
+        assert_eq!(updated.label, "identity_1");
+
+        let payload = decrypt_private_payload(&conn, record.id, &dek).unwrap();
+        assert_eq!(payload.identity_object, Some(identity_object));
+    }
+
+    #[test]
+    fn next_generated_label_skips_existing_suffixes() {
+        let mut conn = conn();
+        let (seed_id, dek) = seed(&conn, "seed_a");
+        insert_pending(
+            &mut conn,
+            &dek,
+            MAINNET,
+            &seed_id,
+            7,
+            0,
+            "identity_1",
+            "https://code",
+        )
+        .unwrap();
+        insert_pending(
+            &mut conn,
+            &dek,
+            MAINNET,
+            &seed_id,
+            7,
+            1,
+            "identity_2",
+            "https://code-2",
+        )
+        .unwrap();
+
+        assert_eq!(
+            next_generated_label(&conn, MAINNET, "identity").unwrap(),
+            "identity_3"
+        );
     }
 
     #[test]

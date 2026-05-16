@@ -173,6 +173,133 @@ pub fn set_finalized(
     Ok(())
 }
 
+pub struct RecoveredAccount<'a> {
+    pub network_genesis_hash: &'a str,
+    pub seed_id: &'a str,
+    pub ip_identity: u32,
+    pub identity_index: u32,
+    pub credential_counter: u32,
+    pub label: &'a str,
+    pub account_address: &'a str,
+}
+
+pub fn import_recovered(
+    conn: &mut Connection,
+    seed_dek: &[u8; KEY_LEN],
+    recovered: RecoveredAccount<'_>,
+) -> Result<(AccountRecord, bool)> {
+    let tx = conn
+        .transaction()
+        .context("failed to start recovered account import transaction")?;
+
+    if let Some(existing) = find_by_derivation(
+        &tx,
+        recovered.network_genesis_hash,
+        recovered.seed_id,
+        recovered.ip_identity,
+        recovered.identity_index,
+        recovered.credential_counter,
+    )? {
+        let now = now_unix_seconds()?;
+        tx.execute(
+            "UPDATE accounts SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![AccountStatus::Finalized.as_str(), now, existing.id],
+        )
+        .with_context(|| format!("failed to update recovered account {}", existing.id))?;
+
+        let updated = AccountRecord {
+            status: AccountStatus::Finalized,
+            updated_at: now,
+            ..existing
+        };
+        upsert_private_payload_in_tx(
+            &tx,
+            &updated,
+            seed_dek,
+            &AccountPrivatePayload {
+                account_address: recovered.account_address.to_owned(),
+            },
+        )?;
+        tx.commit()
+            .context("failed to commit recovered account update transaction")?;
+        return Ok((updated, false));
+    }
+
+    if find_by_network_and_label(&tx, recovered.network_genesis_hash, recovered.label)?.is_some() {
+        bail!(
+            "account label '{}' already exists for network '{}'",
+            recovered.label,
+            recovered.network_genesis_hash
+        );
+    }
+
+    let now = now_unix_seconds()?;
+    tx.execute(
+        "INSERT INTO accounts (
+            seed_id, network_genesis_hash, ip_identity, identity_index, credential_counter,
+            label, status, created_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            recovered.seed_id,
+            recovered.network_genesis_hash,
+            recovered.ip_identity,
+            recovered.identity_index,
+            recovered.credential_counter,
+            recovered.label,
+            AccountStatus::Finalized.as_str(),
+            now,
+            now,
+        ],
+    )
+    .with_context(|| format!("failed to insert recovered account '{}'", recovered.label))?;
+
+    let record = AccountRecord {
+        id: tx.last_insert_rowid(),
+        seed_id: recovered.seed_id.to_owned(),
+        network_genesis_hash: recovered.network_genesis_hash.to_owned(),
+        ip_identity: recovered.ip_identity,
+        identity_index: recovered.identity_index,
+        credential_counter: recovered.credential_counter,
+        label: recovered.label.to_owned(),
+        status: AccountStatus::Finalized,
+        transaction_hash: None,
+        created_at: now,
+        updated_at: now,
+    };
+    upsert_private_payload_in_tx(
+        &tx,
+        &record,
+        seed_dek,
+        &AccountPrivatePayload {
+            account_address: recovered.account_address.to_owned(),
+        },
+    )?;
+    tx.commit()
+        .context("failed to commit recovered account insert transaction")?;
+    Ok((record, true))
+}
+
+pub fn next_generated_label(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    prefix: &str,
+) -> Result<String> {
+    let existing = list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == network_genesis_hash)
+        .map(|record| record.label)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for index in 1u32.. {
+        let candidate = format!("{prefix}_{index}");
+        if !existing.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    unreachable!("u32 label space exhausted")
+}
+
 pub fn list(conn: &Connection) -> Result<Vec<AccountRecord>> {
     let mut stmt = conn
         .prepare(
@@ -500,6 +627,63 @@ mod tests {
         assert_eq!(
             next_credential_counter(&conn, MAINNET, &record.seed_id, 1, 0).unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn import_recovered_inserts_and_reuses_tuple() {
+        let mut conn = conn();
+        let (seed_id, dek) = seed(&conn, "seed_a");
+
+        let (record, inserted) = import_recovered(
+            &mut conn,
+            &dek,
+            RecoveredAccount {
+                network_genesis_hash: MAINNET,
+                seed_id: &seed_id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "account_1",
+                account_address: "addr-1",
+            },
+        )
+        .unwrap();
+        assert!(inserted);
+        assert_eq!(record.status, AccountStatus::Finalized);
+
+        let (updated, inserted_again) = import_recovered(
+            &mut conn,
+            &dek,
+            RecoveredAccount {
+                network_genesis_hash: MAINNET,
+                seed_id: &seed_id,
+                ip_identity: 1,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "account_other",
+                account_address: "addr-1b",
+            },
+        )
+        .unwrap();
+        assert!(!inserted_again);
+        assert_eq!(updated.id, record.id);
+        assert_eq!(updated.label, "account_1");
+
+        let payload = decrypt_private_payload(&conn, record.id, &dek).unwrap();
+        assert_eq!(payload.account_address, "addr-1b");
+    }
+
+    #[test]
+    fn next_generated_label_skips_existing_suffixes() {
+        let conn = conn();
+        let (seed_id, _) = seed(&conn, "seed_a");
+        insert_pending(&conn, pending(&seed_id, "account_1", 0)).unwrap();
+        insert_pending(&conn, pending(&seed_id, "account_2", 1)).unwrap();
+
+        assert_eq!(
+            next_generated_label(&conn, MAINNET, "account").unwrap(),
+            "account_3"
         );
     }
 

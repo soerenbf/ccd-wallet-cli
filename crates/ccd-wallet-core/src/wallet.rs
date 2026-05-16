@@ -3,12 +3,13 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
 
 use concordium_rust_sdk::base::{
+    base::CredentialRegistrationID,
     curve_arithmetic::{Curve, Field, PrimeField},
     dodis_yampolskiy_prf,
     id::{
         constants::{ArCurve, BaseField, IpPairing},
         pedersen_commitment::Randomness as CommitmentRandomness,
-        types::AttributeTag,
+        types::{AttributeTag, GlobalContext},
     },
     ps_sig::SigRetrievalRandomness,
 };
@@ -105,6 +106,23 @@ impl ConcordiumHdWallet {
     ) -> Result<SigRetrievalRandomness<IpPairing>> {
         let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 4)?;
         Ok(SigRetrievalRandomness::new(keygen_bls(&key_seed)?))
+    }
+
+    pub fn get_credential_registration_id(
+        &self,
+        identity_provider_index: u32,
+        identity_index: u32,
+        credential_counter: u8,
+        global_context: &GlobalContext<ArCurve>,
+    ) -> Result<CredentialRegistrationID> {
+        let prf_key = self.get_prf_key(identity_provider_index, identity_index)?;
+        let cred_id_exponent = prf_key
+            .prf_exponent(credential_counter)
+            .context("failed to derive credential registration id exponent")?;
+        Ok(CredentialRegistrationID::from_exponent(
+            global_context,
+            cred_id_exponent,
+        ))
     }
 
     pub fn get_attribute_commitment_randomness(

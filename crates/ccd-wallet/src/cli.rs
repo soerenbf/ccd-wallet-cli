@@ -42,6 +42,8 @@ pub enum SeedSubcommand {
     List,
     /// Rename a configured seed.
     Rename(SeedRenameArgs),
+    /// Recover identities and accounts for a stored seed.
+    Sync(SeedSyncArgs),
     /// Set the active seed by label.
     Use(SeedUseArgs),
     /// Show a seed phrase after password authentication.
@@ -60,9 +62,36 @@ pub struct SeedAddArgs {
     #[arg(long)]
     pub random: bool,
 
+    /// Immediately run recovery on the named network after storing the seed.
+    #[arg(long, value_name = "NETWORK")]
+    pub restore: Option<String>,
+
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SeedSyncArgs {
+    /// Label of the seed to sync. Defaults to the active seed.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Identity provider selection. Repeat for multiple providers, or use `all`.
+    #[arg(long = "provider", value_name = "VALUE")]
+    pub providers: Vec<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active seed/network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]

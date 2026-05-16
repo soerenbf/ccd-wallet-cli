@@ -1,16 +1,46 @@
 use crate::{
-    cli::SeedSubcommand,
-    commands::ui::{SelectItem, select_or_single},
+    cli::{SeedSubcommand, SeedSyncArgs},
+    commands::ui::{
+        ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single,
+    },
 };
 use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
-use ccd_wallet_core::store::{accounts, identities, seeds, wallet_state};
-use cliclack::{input, password};
+use ccd_wallet_core::{
+    config,
+    store::{accounts, config::NetworkEntry, identities, seeds, wallet_state},
+    wallet::{ConcordiumHdWallet, Net},
+};
+use ccd_wallet_identity_provider::{
+    build_recovery_request,
+    client::{self, RecoveryResult, WalletProxyIpEntry},
+};
+use cliclack::{input, multi_progress, multiselect, password, progress_bar, spinner};
+use concordium_rust_sdk::{
+    endpoints::QueryError,
+    id::{constants::IpPairing, types::GlobalContext},
+    v2::{self, AccountIdentifier},
+};
 use console::Term;
+use futures_util::{StreamExt, stream};
 use rusqlite::Connection;
-use std::{sync::mpsc, thread, time::Duration};
+use serde_json::Value;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 const SEED_REVEAL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_EMPTY_IDENTITIES: u32 = 20;
+const MAX_EMPTY_CREDENTIALS: u32 = 20;
+const PROVIDER_CONCURRENCY: usize = 4;
+const ACCOUNT_CONCURRENCY: usize = 4;
 
 /// Enter the terminal alternate screen buffer (saves normal screen, shows blank buffer).
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h";
@@ -30,6 +60,12 @@ pub trait SeedPrompts {
         items: &[SelectItem<String>],
         active: Option<&str>,
     ) -> Result<String>;
+    fn select_provider_ids(
+        &mut self,
+        prompt: &str,
+        items: &[SelectItem<u32>],
+        initial: &[u32],
+    ) -> Result<Vec<u32>>;
     fn prompt_seed_phrase(&mut self) -> Result<String>;
     fn prompt_password(&mut self) -> Result<String>;
     fn prompt_password_confirmation(&mut self) -> Result<String>;
@@ -83,6 +119,26 @@ impl SeedPrompts for TerminalSeedPrompts {
         select_or_single(prompt, items, initial.as_ref())
     }
 
+    fn select_provider_ids(
+        &mut self,
+        prompt: &str,
+        items: &[SelectItem<u32>],
+        initial: &[u32],
+    ) -> Result<Vec<u32>> {
+        if items.len() == 1 {
+            return Ok(vec![items[0].value]);
+        }
+
+        let mut picker = multiselect(prompt).filter_mode();
+        if !initial.is_empty() {
+            picker = picker.initial_values(initial.to_vec());
+        }
+        for item in items {
+            picker = picker.item(item.value, item.label.clone(), item.hint.clone());
+        }
+        Ok(picker.interact()?)
+    }
+
     fn prompt_seed_phrase(&mut self) -> Result<String> {
         Ok(password("Enter seed phrase:").mask('▪').interact()?)
     }
@@ -125,14 +181,14 @@ impl SeedPhraseRevealer for TerminalSeedPhraseRevealer {
     }
 }
 
-pub async fn run(conn: &Connection, command: SeedSubcommand) -> Result<()> {
+pub async fn run(conn: &mut Connection, command: SeedSubcommand) -> Result<()> {
     let mut prompts = TerminalSeedPrompts;
     let mut revealer = TerminalSeedPhraseRevealer;
     run_with_io(conn, command, &mut prompts, &mut revealer).await
 }
 
 async fn run_with_io(
-    conn: &Connection,
+    conn: &mut Connection,
     command: SeedSubcommand,
     prompts: &mut impl SeedPrompts,
     revealer: &mut impl SeedPhraseRevealer,
@@ -143,6 +199,7 @@ async fn run_with_io(
                 conn,
                 args.label,
                 args.random,
+                args.restore,
                 args.non_interactive,
                 prompts,
                 revealer,
@@ -160,6 +217,7 @@ async fn run_with_io(
             )
             .await
         }
+        SeedSubcommand::Sync(args) => sync_seed(conn, args, prompts).await,
         SeedSubcommand::Use(args) => {
             use_seed(conn, args.label, args.non_interactive, prompts).await
         }
@@ -173,9 +231,10 @@ async fn run_with_io(
 }
 
 async fn add(
-    conn: &Connection,
+    conn: &mut Connection,
     label: Option<String>,
     random: bool,
+    restore: Option<String>,
     non_interactive: bool,
     prompts: &mut impl SeedPrompts,
     revealer: &mut impl SeedPhraseRevealer,
@@ -192,6 +251,12 @@ async fn add(
     if seeds::find_by_label(conn, &label)?.is_some() {
         bail!("seed label '{label}' already exists");
     }
+
+    let restore_target = if let Some(network_name) = restore.as_deref() {
+        Some(resolve_sync_network_context(conn, Some(network_name), non_interactive, false).await?)
+    } else {
+        None
+    };
 
     let seed_phrase = if random {
         generate_seed_phrase()?
@@ -214,6 +279,36 @@ async fn add(
     }
 
     println!("Seed '{label}' added successfully.");
+
+    if let Some((resolved_network_name, network_entry, endpoint, endpoint_label, _)) =
+        restore_target
+    {
+        let unlocked_seed = seeds::unlock_context(conn, &label, &password)?;
+        log_resolved_context(&[
+            ContextLine {
+                label: "seed:",
+                value: label.clone(),
+                source: ResolutionSource::Explicit,
+            },
+            ContextLine {
+                label: "network:",
+                value: format!("{resolved_network_name} @ {endpoint_label}"),
+                source: ResolutionSource::Explicit,
+            },
+        ])?;
+        run_seed_recovery(
+            conn,
+            &label,
+            &unlocked_seed,
+            &resolved_network_name,
+            &network_entry,
+            endpoint,
+            &[],
+            non_interactive,
+            prompts,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -521,6 +616,1084 @@ fn wait_for_key_or_timeout(timeout: Duration) {
     let _ = rx.recv_timeout(timeout);
 }
 
+#[derive(Clone, Debug)]
+struct RecoveryProvider {
+    provider_id: u32,
+    name: String,
+    recovery_start: String,
+    ip_info: concordium_rust_sdk::id::types::IpInfo<IpPairing>,
+}
+
+#[derive(Clone, Debug)]
+struct DiscoveredIdentity {
+    provider_id: u32,
+    identity_index: u32,
+    identity_object: Value,
+}
+
+#[derive(Clone, Debug)]
+struct DiscoveredAccount {
+    provider_id: u32,
+    identity_index: u32,
+    credential_counter: u32,
+    account_address: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RecoveryAggregate {
+    total_providers: u64,
+    queued_providers: u64,
+    running_providers: u64,
+    completed_providers: u64,
+    failed_providers: u64,
+    skipped_providers: u64,
+    identity_probes: u64,
+    account_probes: u64,
+    discovered_identities: u64,
+    discovered_accounts: u64,
+    active: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default)]
+struct RecoverySummary {
+    inserted_identities: usize,
+    inserted_accounts: usize,
+    updated_identities: usize,
+    updated_accounts: usize,
+    skipped_providers: Vec<String>,
+    failed_providers: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ProviderRecoveryOutput {
+    provider_id: u32,
+    provider_name: String,
+    identities: Vec<DiscoveredIdentity>,
+    accounts: Vec<DiscoveredAccount>,
+}
+
+#[derive(Clone)]
+struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            bail!("recovery cancelled");
+        }
+        Ok(())
+    }
+}
+
+struct TerminalRecoveryReporter {
+    multi: cliclack::MultiProgress,
+    provider_bar: cliclack::ProgressBar,
+    detail: cliclack::ProgressBar,
+}
+
+impl TerminalRecoveryReporter {
+    fn start(seed_label: &str, network_name: &str, total_providers: usize) -> Self {
+        let multi = multi_progress(format!("Restoring seed '{seed_label}' on '{network_name}'"));
+        let provider_bar = multi.add(progress_bar(total_providers as u64));
+        provider_bar.start(format!("Providers complete: 0/{total_providers}"));
+        let detail = multi.add(spinner());
+        detail.start("Preparing recovery...");
+        Self {
+            multi,
+            provider_bar,
+            detail,
+        }
+    }
+
+    fn update(&self, aggregate: &RecoveryAggregate) {
+        let finished = aggregate.completed_providers
+            + aggregate.failed_providers
+            + aggregate.skipped_providers;
+        self.provider_bar.set_position(finished);
+        self.provider_bar.set_message(format!(
+            "Providers complete: {finished}/{}",
+            aggregate.total_providers
+        ));
+
+        let active = aggregate
+            .active
+            .values()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut message = format!(
+            "Providers: {} queued • {} running • {} complete • {} failed\nRecovered: {} identities • {} accounts\nProbes: {} identities • {} accounts\nSkipped: {} provider{}",
+            aggregate.queued_providers,
+            aggregate.running_providers,
+            aggregate.completed_providers,
+            aggregate.failed_providers,
+            aggregate.discovered_identities,
+            aggregate.discovered_accounts,
+            aggregate.identity_probes,
+            aggregate.account_probes,
+            aggregate.skipped_providers,
+            if aggregate.skipped_providers == 1 {
+                ""
+            } else {
+                "s"
+            },
+        );
+        if !active.is_empty() {
+            message.push_str("\nActive:\n");
+            message.push_str(&active.join("\n"));
+        }
+        self.detail.set_message(message);
+    }
+
+    fn finish(&self) {
+        self.multi.stop();
+    }
+}
+
+async fn sync_seed(
+    conn: &mut Connection,
+    args: SeedSyncArgs,
+    prompts: &mut impl SeedPrompts,
+) -> Result<()> {
+    let (seed_label, seed_source) = resolve_sync_seed_label(
+        conn,
+        args.label.as_deref(),
+        args.non_interactive,
+        args.no_defaults,
+        prompts,
+    )?;
+    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
+        resolve_sync_network_context(
+            conn,
+            args.network.as_deref(),
+            args.non_interactive,
+            args.no_defaults,
+        )
+        .await?;
+
+    log_resolved_context(&[
+        ContextLine {
+            label: "seed:",
+            value: seed_label.clone(),
+            source: seed_source,
+        },
+        ContextLine {
+            label: "network:",
+            value: format!("{network_name} @ {endpoint_label}"),
+            source: network_source,
+        },
+    ])?;
+
+    let password = prompts.prompt_unlock_password(&seed_label)?;
+    let unlocked_seed = seeds::unlock_context(conn, &seed_label, &password)?;
+
+    run_seed_recovery(
+        conn,
+        &seed_label,
+        &unlocked_seed,
+        &network_name,
+        &network_entry,
+        endpoint,
+        &args.providers,
+        args.non_interactive,
+        prompts,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_seed_recovery(
+    conn: &mut Connection,
+    seed_label: &str,
+    unlocked_seed: &seeds::UnlockedSeed,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    endpoint: v2::Endpoint,
+    explicit_provider_filters: &[String],
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<()> {
+    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
+        .context("stored seed phrase is not UTF-8")?
+        .to_owned();
+    let net = infer_net(
+        network_name,
+        &network_entry.wallet_proxy,
+        &network_entry.node_endpoint,
+    );
+    let wallet = Arc::new(ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?);
+
+    let spin = spinner();
+    spin.start(format!(
+        "Connecting to node: {}",
+        network_entry.node_endpoint
+    ));
+    let mut client = config::connect_v2_client(endpoint.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to Concordium node at {}",
+                network_entry.node_endpoint
+            )
+        })?;
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Fetching chain cryptographic parameters...");
+    let global_context = Arc::new(
+        client
+            .get_cryptographic_parameters(v2::BlockIdentifier::LastFinal)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load cryptographic parameters from {}",
+                    network_entry.node_endpoint
+                )
+            })?
+            .response,
+    );
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Fetching identity providers...");
+    let wallet_proxy_entries =
+        client::fetch_wallet_proxy_ip_info(&network_entry.wallet_proxy).await?;
+    spin.clear();
+
+    let (available_providers, skipped_providers) =
+        extract_recovery_providers(&wallet_proxy_entries);
+    let selected_providers = resolve_recovery_providers(
+        &available_providers,
+        explicit_provider_filters,
+        non_interactive,
+        prompts,
+    )?;
+    if selected_providers.is_empty() {
+        bail!("no recovery-capable identity providers are available on the selected network");
+    }
+
+    let existing_identities = identities::list_by_network_and_seed(
+        conn,
+        &network_entry.genesis_hash,
+        &unlocked_seed.record.id,
+    )?;
+    let existing_accounts = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| {
+            record.network_genesis_hash == network_entry.genesis_hash
+                && record.seed_id == unlocked_seed.record.id
+        })
+        .collect::<Vec<_>>();
+
+    let identity_statuses = existing_identities.iter().fold(
+        BTreeMap::<u32, BTreeMap<u32, identities::IdentityStatus>>::new(),
+        |mut acc, record| {
+            acc.entry(record.ip_identity)
+                .or_default()
+                .insert(record.identity_index, record.status);
+            acc
+        },
+    );
+    let used_accounts = existing_accounts.iter().fold(
+        BTreeMap::<(u32, u32), BTreeSet<u32>>::new(),
+        |mut acc, record| {
+            acc.entry((record.ip_identity, record.identity_index))
+                .or_default()
+                .insert(record.credential_counter);
+            acc
+        },
+    );
+
+    let cancellation = CancellationToken::new();
+    let ctrl_c_cancellation = cancellation.clone();
+    let ctrl_c_task = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        ctrl_c_cancellation.cancel();
+    });
+
+    let aggregate = Arc::new(Mutex::new(RecoveryAggregate {
+        total_providers: selected_providers.len() as u64,
+        queued_providers: selected_providers.len() as u64,
+        skipped_providers: skipped_providers.len() as u64,
+        ..Default::default()
+    }));
+    let reporter =
+        TerminalRecoveryReporter::start(seed_label, network_name, selected_providers.len());
+    reporter.update(&aggregate.lock().unwrap());
+
+    let mut provider_stream = std::pin::pin!(
+        stream::iter(selected_providers.into_iter().map(|provider| {
+            let wallet = wallet.clone();
+            let global_context = global_context.clone();
+            let endpoint = endpoint.clone();
+            let aggregate = aggregate.clone();
+            let statuses = identity_statuses
+                .get(&provider.provider_id)
+                .cloned()
+                .unwrap_or_default();
+            let used_accounts = used_accounts.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                recover_provider(
+                    provider,
+                    wallet,
+                    global_context,
+                    endpoint,
+                    statuses,
+                    used_accounts,
+                    aggregate,
+                    cancellation,
+                )
+                .await
+            }
+        }))
+        .buffer_unordered(PROVIDER_CONCURRENCY)
+    );
+
+    let mut outputs = Vec::new();
+    let mut failed_providers = Vec::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(100));
+
+    let run_result: Result<()> = loop {
+        tokio::select! {
+            maybe = provider_stream.next() => {
+                match maybe {
+                    Some(Ok(output)) => outputs.push(output),
+                    Some(Err((provider_name, error))) => failed_providers.push(format!("{provider_name}: {error}")),
+                    None => break Ok(()),
+                }
+            }
+            _ = ticker.tick() => {
+                if cancellation.is_cancelled() {
+                    break Err(anyhow::anyhow!("recovery cancelled"));
+                }
+                reporter.update(&aggregate.lock().unwrap());
+            }
+        }
+    };
+    ctrl_c_task.abort();
+    reporter.finish();
+    run_result?;
+
+    let mut summary = RecoverySummary {
+        skipped_providers,
+        failed_providers,
+        ..Default::default()
+    };
+
+    for output in outputs {
+        let _ = (&output.provider_id, &output.provider_name);
+        for identity in output.identities {
+            let label = recovered_identity_label(
+                conn,
+                &network_entry.genesis_hash,
+                &unlocked_seed.record.id,
+                identity.provider_id,
+                identity.identity_index,
+            )?;
+            let (_, inserted) = identities::import_recovered(
+                conn,
+                &unlocked_seed.dek,
+                identities::RecoveredIdentity {
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    seed_id: &unlocked_seed.record.id,
+                    ip_identity: identity.provider_id,
+                    identity_index: identity.identity_index,
+                    label: &label,
+                    identity_object: &identity.identity_object,
+                },
+            )?;
+            if inserted {
+                summary.inserted_identities += 1;
+            } else {
+                summary.updated_identities += 1;
+            }
+        }
+        for account in output.accounts {
+            let label = recovered_account_label(
+                conn,
+                &network_entry.genesis_hash,
+                &unlocked_seed.record.id,
+                account.provider_id,
+                account.identity_index,
+                account.credential_counter,
+            )?;
+            let (_, inserted) = accounts::import_recovered(
+                conn,
+                &unlocked_seed.dek,
+                accounts::RecoveredAccount {
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    seed_id: &unlocked_seed.record.id,
+                    ip_identity: account.provider_id,
+                    identity_index: account.identity_index,
+                    credential_counter: account.credential_counter,
+                    label: &label,
+                    account_address: &account.account_address,
+                },
+            )?;
+            if inserted {
+                summary.inserted_accounts += 1;
+            } else {
+                summary.updated_accounts += 1;
+            }
+        }
+    }
+
+    print_recovery_summary(seed_label, network_name, &summary);
+
+    if summary.inserted_identities == 0
+        && summary.updated_identities == 0
+        && summary.inserted_accounts == 0
+        && summary.updated_accounts == 0
+        && !summary.failed_providers.is_empty()
+    {
+        bail!("recovery failed for all selected providers");
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_provider(
+    provider: RecoveryProvider,
+    wallet: Arc<ConcordiumHdWallet>,
+    global_context: Arc<GlobalContext<concordium_rust_sdk::id::constants::ArCurve>>,
+    endpoint: v2::Endpoint,
+    existing_statuses: BTreeMap<u32, identities::IdentityStatus>,
+    existing_accounts: BTreeMap<(u32, u32), BTreeSet<u32>>,
+    aggregate: Arc<Mutex<RecoveryAggregate>>,
+    cancellation: CancellationToken,
+) -> std::result::Result<ProviderRecoveryOutput, (String, anyhow::Error)> {
+    update_provider_start(&aggregate, provider.provider_id, &provider.name);
+
+    let run = async {
+        let mut empty_indices = 0u32;
+        let mut identity_index = 0u32;
+        let mut identities = Vec::new();
+        let mut account_identities = BTreeSet::new();
+
+        while empty_indices < MAX_EMPTY_IDENTITIES {
+            cancellation.check()?;
+            set_active(
+                &aggregate,
+                format!("provider:{}", provider.provider_id),
+                format!(
+                    "- {} (id {}): probing identity {}",
+                    provider.name, provider.provider_id, identity_index
+                ),
+            );
+            increment_identity_probes(&aggregate);
+
+            if let Some(status) = existing_statuses.get(&identity_index) {
+                empty_indices = 0;
+                if *status == identities::IdentityStatus::Done {
+                    account_identities.insert(identity_index);
+                }
+                identity_index += 1;
+                continue;
+            }
+
+            let recovery_request = build_recovery_request(
+                &wallet,
+                &provider.ip_info,
+                &global_context,
+                identity_index,
+                now_unix_timestamp()?,
+            )?;
+            match client::recover_identity(&provider.recovery_start, &recovery_request).await? {
+                RecoveryResult::Recovered(identity_object) => {
+                    increment_discovered_identities(&aggregate);
+                    account_identities.insert(identity_index);
+                    identities.push(DiscoveredIdentity {
+                        provider_id: provider.provider_id,
+                        identity_index,
+                        identity_object,
+                    });
+                    empty_indices = 0;
+                }
+                RecoveryResult::Missing => empty_indices += 1,
+            }
+            identity_index += 1;
+        }
+
+        let mut accounts_found = Vec::new();
+        let mut account_stream = std::pin::pin!(
+            stream::iter(account_identities.into_iter().map(|identity_index| {
+                let wallet = wallet.clone();
+                let global_context = global_context.clone();
+                let endpoint = endpoint.clone();
+                let aggregate = aggregate.clone();
+                let provider_name = provider.name.clone();
+                let cancellation = cancellation.clone();
+                let used = existing_accounts
+                    .get(&(provider.provider_id, identity_index))
+                    .cloned()
+                    .unwrap_or_default();
+                async move {
+                    recover_accounts_for_identity(
+                        wallet,
+                        global_context,
+                        endpoint,
+                        provider.provider_id,
+                        identity_index,
+                        provider_name,
+                        used,
+                        aggregate,
+                        cancellation,
+                    )
+                    .await
+                }
+            }))
+            .buffer_unordered(ACCOUNT_CONCURRENCY)
+        );
+        while let Some(result) = account_stream.next().await {
+            cancellation.check()?;
+            accounts_found.extend(result?);
+        }
+
+        Ok(ProviderRecoveryOutput {
+            provider_id: provider.provider_id,
+            provider_name: provider.name.clone(),
+            identities,
+            accounts: accounts_found,
+        })
+    }
+    .await;
+
+    clear_provider_active(&aggregate, provider.provider_id);
+    match run {
+        Ok(output) => {
+            update_provider_complete(&aggregate, provider.provider_id);
+            Ok(output)
+        }
+        Err(error) => {
+            update_provider_failed(&aggregate, provider.provider_id);
+            Err((provider.name, error))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_accounts_for_identity(
+    wallet: Arc<ConcordiumHdWallet>,
+    global_context: Arc<GlobalContext<concordium_rust_sdk::id::constants::ArCurve>>,
+    endpoint: v2::Endpoint,
+    provider_id: u32,
+    identity_index: u32,
+    provider_name: String,
+    mut used_counters: BTreeSet<u32>,
+    aggregate: Arc<Mutex<RecoveryAggregate>>,
+    cancellation: CancellationToken,
+) -> Result<Vec<DiscoveredAccount>> {
+    let mut client = config::connect_v2_client(endpoint.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to Concordium node at {}",
+                config::endpoint_label(&endpoint)
+            )
+        })?;
+
+    let mut accounts = Vec::new();
+    let mut empty = 0u32;
+    let mut credential_counter = next_unused_u32(&used_counters);
+
+    while empty < MAX_EMPTY_CREDENTIALS {
+        cancellation.check()?;
+        if used_counters.contains(&credential_counter) {
+            credential_counter += 1;
+            continue;
+        }
+        let credential_counter_u8 = u8::try_from(credential_counter)
+            .context("credential counter exceeded supported protocol range")?;
+        set_active(
+            &aggregate,
+            format!("account:{provider_id}:{identity_index}"),
+            format!(
+                "- {} (id {}) / identity {}: probing credential {}",
+                provider_name, provider_id, identity_index, credential_counter
+            ),
+        );
+        increment_account_probes(&aggregate);
+
+        let cred_id = wallet.get_credential_registration_id(
+            provider_id,
+            identity_index,
+            credential_counter_u8,
+            &global_context,
+        )?;
+        let identifier = AccountIdentifier::CredId(cred_id);
+        match client
+            .get_account_info(&identifier, v2::BlockIdentifier::LastFinal)
+            .await
+        {
+            Ok(info) => {
+                increment_discovered_accounts(&aggregate);
+                let address = format!("{}", info.response.account_address);
+                used_counters.insert(credential_counter);
+                accounts.push(DiscoveredAccount {
+                    provider_id,
+                    identity_index,
+                    credential_counter,
+                    account_address: address,
+                });
+                empty = 0;
+            }
+            Err(err) if is_recoverable_account_miss(&err) => empty += 1,
+            Err(err) => {
+                return Err(err).context("failed to query account information during recovery");
+            }
+        }
+        credential_counter += 1;
+    }
+
+    clear_active(
+        &aggregate,
+        &format!("account:{provider_id}:{identity_index}"),
+    );
+    Ok(accounts)
+}
+
+fn extract_recovery_providers(
+    entries: &[WalletProxyIpEntry],
+) -> (Vec<RecoveryProvider>, Vec<String>) {
+    let (_, skipped) = classify_recovery_provider_metadata(entries.iter().map(|entry| {
+        (
+            entry.ip_info.ip_identity.0,
+            entry.ip_info.ip_description.name.clone(),
+            entry.metadata.recovery_start.clone(),
+        )
+    }));
+
+    let available = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .metadata
+                .recovery_start
+                .clone()
+                .map(|recovery_start| RecoveryProvider {
+                    provider_id: entry.ip_info.ip_identity.0,
+                    name: entry.ip_info.ip_description.name.clone(),
+                    recovery_start,
+                    ip_info: entry.ip_info.clone(),
+                })
+        })
+        .collect();
+    (available, skipped)
+}
+
+fn classify_recovery_provider_metadata(
+    items: impl IntoIterator<Item = (u32, String, Option<String>)>,
+) -> (Vec<u32>, Vec<String>) {
+    let mut available = Vec::new();
+    let mut skipped = Vec::new();
+    for (provider_id, name, recovery_start) in items {
+        if recovery_start.is_some() {
+            available.push(provider_id);
+        } else {
+            skipped.push(format!("{name} (id {provider_id})"));
+        }
+    }
+    (available, skipped)
+}
+
+fn resolve_recovery_providers(
+    providers: &[RecoveryProvider],
+    explicit_filters: &[String],
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<Vec<RecoveryProvider>> {
+    if providers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let available_ids = providers
+        .iter()
+        .map(|provider| provider.provider_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(selected_ids) = resolve_explicit_provider_ids(&available_ids, explicit_filters)? {
+        return Ok(filter_providers_by_ids(providers, &selected_ids));
+    }
+
+    if non_interactive || providers.len() == 1 {
+        return Ok(providers.to_vec());
+    }
+    let items = providers
+        .iter()
+        .map(|provider| SelectItem {
+            value: provider.provider_id,
+            label: provider.name.clone(),
+            hint: format!("provider id: {}", provider.provider_id),
+        })
+        .collect::<Vec<_>>();
+    let initial = providers
+        .iter()
+        .map(|provider| provider.provider_id)
+        .collect::<Vec<_>>();
+    let selected_ids =
+        prompts.select_provider_ids("Select identity providers", &items, &initial)?;
+    Ok(filter_providers_by_ids(providers, &selected_ids))
+}
+
+fn resolve_explicit_provider_ids(
+    available_ids: &BTreeSet<u32>,
+    explicit_filters: &[String],
+) -> Result<Option<Vec<u32>>> {
+    if explicit_filters.is_empty() {
+        return Ok(None);
+    }
+
+    let all_count = explicit_filters
+        .iter()
+        .filter(|value| value.as_str() == "all")
+        .count();
+    if all_count > 0 && explicit_filters.len() > 1 {
+        bail!("`all` cannot be combined with specific providers");
+    }
+    if all_count == 1 {
+        return Ok(Some(available_ids.iter().copied().collect()));
+    }
+
+    let selected_ids = explicit_filters
+        .iter()
+        .map(|value| {
+            value.parse::<u32>().with_context(|| {
+                format!("invalid provider value '{value}'; use `all` or a numeric provider id")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    for provider_id in &selected_ids {
+        if !available_ids.contains(provider_id) {
+            bail!(
+                "identity provider {} is unavailable on the chosen network",
+                provider_id
+            );
+        }
+    }
+
+    Ok(Some(selected_ids))
+}
+
+fn filter_providers_by_ids(
+    providers: &[RecoveryProvider],
+    selected_ids: &[u32],
+) -> Vec<RecoveryProvider> {
+    let selected = selected_ids.iter().copied().collect::<BTreeSet<_>>();
+    providers
+        .iter()
+        .filter(|provider| selected.contains(&provider.provider_id))
+        .cloned()
+        .collect()
+}
+
+fn resolve_sync_seed_label(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+    prompts: &mut impl SeedPrompts,
+) -> Result<(String, ResolutionSource)> {
+    match explicit {
+        Some(label) => seeds::find_by_label(conn, label)?
+            .map(|record| (record.label, ResolutionSource::Explicit))
+            .with_context(|| format!("seed '{}' is not configured", label)),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+            if no_defaults {
+                return Ok((
+                    select_seed_label(conn, prompts)?,
+                    ResolutionSource::Prompted,
+                ));
+            }
+            match active {
+                Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
+                None if non_interactive => bail!(
+                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply a seed label explicitly."
+                ),
+                None => Ok((
+                    select_seed_label(conn, prompts)?,
+                    ResolutionSource::Prompted,
+                )),
+            }
+        }
+    }
+}
+
+async fn resolve_sync_network_context(
+    conn: &Connection,
+    network: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(String, NetworkEntry, v2::Endpoint, String, ResolutionSource)> {
+    let app_config = ccd_wallet_core::store::config::load()?;
+    let (selected_network, source) = match network {
+        Some(name) => (name.to_owned(), ResolutionSource::Explicit),
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+            if no_defaults {
+                (
+                    prompt_for_network_name(&app_config, active.as_deref())?,
+                    ResolutionSource::Prompted,
+                )
+            } else {
+                match active {
+                    Some(name) => (name, ResolutionSource::ActiveDefault),
+                    None if non_interactive => bail!(
+                        "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
+                    ),
+                    None => (
+                        prompt_for_network_name(&app_config, None)?,
+                        ResolutionSource::Prompted,
+                    ),
+                }
+            }
+        }
+    };
+
+    let entry = app_config
+        .networks
+        .get(&selected_network)
+        .cloned()
+        .with_context(|| {
+            format!(
+                "network '{}' is not registered; run `ccd-wallet network add --name {} --node <ENDPOINT> --wallet-proxy <URL>` first",
+                selected_network, selected_network
+            )
+        })?;
+    let endpoint: v2::Endpoint =
+        ccd_wallet_core::config::normalize_url_string(&entry.node_endpoint)
+            .parse()
+            .with_context(|| {
+                format!(
+                    "network '{}' has an invalid stored endpoint: {}",
+                    selected_network, entry.node_endpoint
+                )
+            })?;
+    let endpoint_label = config::endpoint_label(&endpoint);
+    let node_genesis_hash = fetch_node_genesis_hash(endpoint.clone(), &endpoint_label).await?;
+    if node_genesis_hash != entry.genesis_hash {
+        bail!(
+            "configured node for network '{}' points to genesis hash {}, which does not match the stored network genesis hash {}",
+            selected_network,
+            node_genesis_hash,
+            entry.genesis_hash
+        );
+    }
+
+    Ok((selected_network, entry, endpoint, endpoint_label, source))
+}
+
+fn prompt_for_network_name(
+    app_config: &ccd_wallet_core::store::config::AppConfig,
+    active: Option<&str>,
+) -> Result<String> {
+    if app_config.networks.is_empty() {
+        bail!("no networks are configured; run `ccd-wallet network add` first")
+    }
+    let items = app_config
+        .networks
+        .iter()
+        .map(|(name, entry)| SelectItem {
+            value: name.clone(),
+            label: name.clone(),
+            hint: entry.node_endpoint.clone(),
+        })
+        .collect::<Vec<_>>();
+    let initial = active.map(str::to_owned);
+    select_or_single("Select network", &items, initial.as_ref())
+}
+
+fn infer_net(network_name: &str, wallet_proxy: &str, endpoint_label: &str) -> Net {
+    let haystack = format!("{network_name} {wallet_proxy} {endpoint_label}").to_ascii_lowercase();
+    if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
+        Net::Testnet
+    } else {
+        Net::Mainnet
+    }
+}
+
+async fn fetch_node_genesis_hash(endpoint: v2::Endpoint, endpoint_label: &str) -> Result<String> {
+    let mut client = config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+    let consensus_info = client
+        .get_consensus_info()
+        .await
+        .with_context(|| format!("failed to query consensus info from node at {endpoint_label}"))?;
+    Ok(format!("{}", consensus_info.genesis_block))
+}
+
+fn now_unix_timestamp() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs())
+}
+
+fn next_unused_u32(used: &BTreeSet<u32>) -> u32 {
+    let mut candidate = 0u32;
+    while used.contains(&candidate) {
+        candidate += 1;
+    }
+    candidate
+}
+
+fn update_provider_start(
+    aggregate: &Arc<Mutex<RecoveryAggregate>>,
+    provider_id: u32,
+    provider_name: &str,
+) {
+    let mut aggregate = aggregate.lock().unwrap();
+    aggregate.queued_providers = aggregate.queued_providers.saturating_sub(1);
+    aggregate.running_providers += 1;
+    aggregate.active.insert(
+        format!("provider:{provider_id}"),
+        format!("- {provider_name} (id {provider_id}): starting"),
+    );
+}
+
+fn update_provider_complete(aggregate: &Arc<Mutex<RecoveryAggregate>>, provider_id: u32) {
+    let mut aggregate = aggregate.lock().unwrap();
+    aggregate.running_providers = aggregate.running_providers.saturating_sub(1);
+    aggregate.completed_providers += 1;
+    aggregate.active.remove(&format!("provider:{provider_id}"));
+}
+
+fn update_provider_failed(aggregate: &Arc<Mutex<RecoveryAggregate>>, provider_id: u32) {
+    let mut aggregate = aggregate.lock().unwrap();
+    aggregate.running_providers = aggregate.running_providers.saturating_sub(1);
+    aggregate.failed_providers += 1;
+    aggregate.active.remove(&format!("provider:{provider_id}"));
+}
+
+fn set_active(aggregate: &Arc<Mutex<RecoveryAggregate>>, key: String, value: String) {
+    aggregate.lock().unwrap().active.insert(key, value);
+}
+
+fn clear_active(aggregate: &Arc<Mutex<RecoveryAggregate>>, key: &str) {
+    aggregate.lock().unwrap().active.remove(key);
+}
+
+fn clear_provider_active(aggregate: &Arc<Mutex<RecoveryAggregate>>, provider_id: u32) {
+    let mut aggregate = aggregate.lock().unwrap();
+    aggregate.active.remove(&format!("provider:{provider_id}"));
+    aggregate
+        .active
+        .retain(|key, _| !key.starts_with(&format!("account:{provider_id}:")));
+}
+
+fn increment_identity_probes(aggregate: &Arc<Mutex<RecoveryAggregate>>) {
+    aggregate.lock().unwrap().identity_probes += 1;
+}
+
+fn increment_account_probes(aggregate: &Arc<Mutex<RecoveryAggregate>>) {
+    aggregate.lock().unwrap().account_probes += 1;
+}
+
+fn increment_discovered_identities(aggregate: &Arc<Mutex<RecoveryAggregate>>) {
+    aggregate.lock().unwrap().discovered_identities += 1;
+}
+
+fn increment_discovered_accounts(aggregate: &Arc<Mutex<RecoveryAggregate>>) {
+    aggregate.lock().unwrap().discovered_accounts += 1;
+}
+
+fn recovered_identity_label(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    seed_id: &str,
+    provider_id: u32,
+    identity_index: u32,
+) -> Result<String> {
+    if let Some(record) = identities::find_by_network_seed_ip_and_index(
+        conn,
+        network_genesis_hash,
+        seed_id,
+        provider_id,
+        identity_index,
+    )? {
+        return Ok(record.label);
+    }
+
+    let candidate = format!("id_{provider_id}-{identity_index}");
+    if identities::find_by_network_and_label(conn, network_genesis_hash, &candidate)?.is_none() {
+        return Ok(candidate);
+    }
+
+    identities::next_generated_label(conn, network_genesis_hash, &candidate)
+}
+
+fn recovered_account_label(
+    conn: &Connection,
+    network_genesis_hash: &str,
+    seed_id: &str,
+    provider_id: u32,
+    identity_index: u32,
+    credential_counter: u32,
+) -> Result<String> {
+    if let Some(record) = accounts::find_by_derivation(
+        conn,
+        network_genesis_hash,
+        seed_id,
+        provider_id,
+        identity_index,
+        credential_counter,
+    )? {
+        return Ok(record.label);
+    }
+
+    let candidate = format!("acc_{provider_id}-{identity_index}-{credential_counter}");
+    if accounts::find_by_network_and_label(conn, network_genesis_hash, &candidate)?.is_none() {
+        return Ok(candidate);
+    }
+
+    accounts::next_generated_label(conn, network_genesis_hash, &candidate)
+}
+
+fn is_recoverable_account_miss(err: &QueryError) -> bool {
+    matches!(err, QueryError::NotFound) || err.is_not_found()
+}
+
+fn print_recovery_summary(seed_label: &str, network_name: &str, summary: &RecoverySummary) {
+    println!("Recovery summary for seed '{seed_label}' on '{network_name}':");
+    println!(
+        "Recovered: {} new identities • {} updated identities • {} new accounts • {} updated accounts",
+        summary.inserted_identities,
+        summary.updated_identities,
+        summary.inserted_accounts,
+        summary.updated_accounts
+    );
+    if !summary.skipped_providers.is_empty() {
+        println!("Skipped providers:");
+        for provider in &summary.skipped_providers {
+            println!("- {provider}");
+        }
+    }
+    if !summary.failed_providers.is_empty() {
+        println!("Failed providers:");
+        for provider in &summary.failed_providers {
+            println!("- {provider}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +1706,7 @@ mod tests {
         seed_label: String,
         selected_active_seed: Option<String>,
         select_seed_calls: usize,
+        selected_provider_ids: Vec<u32>,
         seed_phrase: String,
         password: String,
         password_confirmation: String,
@@ -562,6 +1736,19 @@ mod tests {
             self.select_seed_calls += 1;
             self.selected_active_seed = active.map(str::to_owned);
             Ok(self.seed_label.clone())
+        }
+
+        fn select_provider_ids(
+            &mut self,
+            _prompt: &str,
+            _items: &[SelectItem<u32>],
+            initial: &[u32],
+        ) -> Result<Vec<u32>> {
+            if self.selected_provider_ids.is_empty() {
+                Ok(initial.to_vec())
+            } else {
+                Ok(self.selected_provider_ids.clone())
+            }
         }
 
         fn prompt_seed_phrase(&mut self) -> Result<String> {
@@ -639,7 +1826,7 @@ mod tests {
 
     #[tokio::test]
     async fn password_confirmation_mismatch_does_not_write_seed() {
-        let conn = conn();
+        let mut conn = conn();
         let mut prompts = TestPrompts {
             seed_label: String::new(),
             seed_phrase: VALID_MNEMONIC.to_owned(),
@@ -652,10 +1839,11 @@ mod tests {
         let mut revealer = TestRevealer::default();
 
         let err = run_with_io(
-            &conn,
+            &mut conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
                 label: Some("main_seed".to_owned()),
                 random: false,
+                restore: None,
                 non_interactive: false,
             }),
             &mut prompts,
@@ -669,7 +1857,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_seed_phrase_does_not_write_seed() {
-        let conn = conn();
+        let mut conn = conn();
         let mut prompts = TestPrompts {
             seed_label: String::new(),
             seed_phrase: "not valid".to_owned(),
@@ -683,10 +1871,11 @@ mod tests {
 
         assert!(
             run_with_io(
-                &conn,
+                &mut conn,
                 SeedSubcommand::Add(crate::cli::SeedAddArgs {
                     label: Some("main_seed".to_owned()),
                     random: false,
+                    restore: None,
                     non_interactive: false,
                 }),
                 &mut prompts,
@@ -864,7 +2053,7 @@ mod tests {
 
     #[tokio::test]
     async fn seed_add_prompts_for_missing_label_in_interactive_mode() {
-        let conn = conn();
+        let mut conn = conn();
         let mut prompts = TestPrompts {
             seed_label: "prompted_seed".to_owned(),
             seed_phrase: VALID_MNEMONIC.to_owned(),
@@ -875,10 +2064,11 @@ mod tests {
         let mut revealer = TestRevealer::default();
 
         run_with_io(
-            &conn,
+            &mut conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
                 label: None,
                 random: false,
+                restore: None,
                 non_interactive: false,
             }),
             &mut prompts,
@@ -896,15 +2086,16 @@ mod tests {
 
     #[tokio::test]
     async fn seed_add_missing_label_errors_in_non_interactive_mode() {
-        let conn = conn();
+        let mut conn = conn();
         let mut prompts = TestPrompts::default();
         let mut revealer = TestRevealer::default();
 
         let err = run_with_io(
-            &conn,
+            &mut conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
                 label: None,
                 random: false,
+                restore: None,
                 non_interactive: true,
             }),
             &mut prompts,
@@ -946,9 +2137,103 @@ mod tests {
         validate_seed_phrase(&phrase).unwrap();
     }
 
+    #[test]
+    fn explicit_provider_filters_support_all_and_repeated_ids() {
+        let available = BTreeSet::from([2u32, 7u32, 9u32]);
+
+        assert_eq!(
+            resolve_explicit_provider_ids(&available, &["all".to_owned()])
+                .unwrap()
+                .unwrap(),
+            vec![2, 7, 9]
+        );
+        assert_eq!(
+            resolve_explicit_provider_ids(&available, &["2".to_owned(), "7".to_owned()])
+                .unwrap()
+                .unwrap(),
+            vec![2, 7]
+        );
+    }
+
+    #[test]
+    fn explicit_provider_filters_reject_invalid_combinations() {
+        let available = BTreeSet::from([2u32, 7u32, 9u32]);
+
+        let err = resolve_explicit_provider_ids(&available, &["all".to_owned(), "2".to_owned()])
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot be combined"));
+
+        let err = resolve_explicit_provider_ids(&available, &["999".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("unavailable"));
+    }
+
+    #[test]
+    fn extract_recovery_providers_skips_missing_recovery_metadata() {
+        let (available, skipped) = classify_recovery_provider_metadata([
+            (
+                2,
+                "Provider A".to_owned(),
+                Some("https://issuer-a.example/recover".to_owned()),
+            ),
+            (7, "Provider B".to_owned(), None),
+        ]);
+
+        assert_eq!(available, vec![2]);
+        assert_eq!(skipped, vec!["Provider B (id 7)".to_owned()]);
+    }
+
+    #[test]
+    fn account_not_found_is_treated_as_recoverable_miss() {
+        assert!(is_recoverable_account_miss(&QueryError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn seed_add_restore_missing_network_errors_before_writing_seed() {
+        let mut conn = conn();
+        let mut prompts = TestPrompts {
+            seed_phrase: VALID_MNEMONIC.to_owned(),
+            password: "password".to_owned(),
+            password_confirmation: "password".to_owned(),
+            ..Default::default()
+        };
+        let mut revealer = TestRevealer::default();
+
+        let err = run_with_io(
+            &mut conn,
+            SeedSubcommand::Add(crate::cli::SeedAddArgs {
+                label: Some("main_seed".to_owned()),
+                random: false,
+                restore: Some("missingnet".to_owned()),
+                non_interactive: false,
+            }),
+            &mut prompts,
+            &mut revealer,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("not registered"));
+        assert!(seeds::find_by_label(&conn, "main_seed").unwrap().is_none());
+    }
+
+    #[test]
+    fn recovered_labels_use_tuple_based_defaults() {
+        let conn = conn();
+        let seed = seeds::add(&conn, "main_seed", VALID_MNEMONIC.as_bytes(), "password").unwrap();
+
+        assert_eq!(
+            recovered_identity_label(&conn, "mainnet-hash", &seed.id, 7, 3).unwrap(),
+            "id_7-3"
+        );
+        assert_eq!(
+            recovered_account_label(&conn, "mainnet-hash", &seed.id, 7, 3, 2).unwrap(),
+            "acc_7-3-2"
+        );
+    }
+
     #[tokio::test]
     async fn seed_add_random_generates_stores_and_reveals_phrase() {
-        let conn = conn();
+        let mut conn = conn();
         let mut prompts = TestPrompts {
             password: "password".to_owned(),
             password_confirmation: "password".to_owned(),
@@ -957,10 +2242,11 @@ mod tests {
         let mut revealer = TestRevealer::default();
 
         run_with_io(
-            &conn,
+            &mut conn,
             SeedSubcommand::Add(crate::cli::SeedAddArgs {
                 label: Some("random_seed".to_owned()),
                 random: true,
+                restore: None,
                 non_interactive: false,
             }),
             &mut prompts,
@@ -980,7 +2266,7 @@ mod tests {
 
     #[tokio::test]
     async fn seed_add_random_rejects_duplicate_before_revealing() {
-        let conn = conn();
+        let mut conn = conn();
         add_test_seed(&conn);
         let mut prompts = TestPrompts {
             password: "password".to_owned(),
@@ -991,10 +2277,11 @@ mod tests {
 
         assert!(
             run_with_io(
-                &conn,
+                &mut conn,
                 SeedSubcommand::Add(crate::cli::SeedAddArgs {
                     label: Some("main_seed".to_owned()),
                     random: true,
+                    restore: None,
                     non_interactive: false,
                 }),
                 &mut prompts,

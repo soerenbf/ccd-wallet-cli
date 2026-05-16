@@ -6,13 +6,14 @@ use ccd_wallet_core::wallet::ConcordiumHdWallet;
 use concordium_rust_sdk::base::{
     common::{VERSION_0, Versioned},
     id::{
-        account_holder::generate_pio_v1,
+        account_holder::{generate_id_recovery_request, generate_pio_v1},
         constants::{ArCurve, IpPairing},
         pedersen_commitment::Value as PedersenValue,
         secret_sharing::Threshold,
         types::{
             AccCredentialInfo, ArIdentity, ArInfo, CredentialHolderInfo, GlobalContext,
-            IdCredentials, IdObjectUseData, IpContext, IpInfo, PreIdentityObjectV1,
+            IdCredentials, IdObjectUseData, IdRecoveryRequest, IpContext, IpInfo,
+            PreIdentityObjectV1,
         },
     },
 };
@@ -23,6 +24,12 @@ use std::collections::BTreeMap;
 struct IdentityObjectRequestV1 {
     #[serde(rename = "idObjectRequest")]
     id_object_request: Versioned<PreIdentityObjectV1<IpPairing, ArCurve>>,
+}
+
+#[derive(Serialize)]
+struct IdentityRecoveryRequestV1 {
+    #[serde(rename = "idRecoveryRequest")]
+    id_recovery_request: Versioned<IdRecoveryRequest<ArCurve>>,
 }
 
 pub fn build_request(
@@ -64,5 +71,22 @@ pub fn build_request(
 
     Ok(serde_json::to_string(&IdentityObjectRequestV1 {
         id_object_request: Versioned::new(VERSION_0, pio),
+    })?)
+}
+
+pub fn build_recovery_request(
+    wallet: &ConcordiumHdWallet,
+    ip_info: &IpInfo<IpPairing>,
+    global_context: &GlobalContext<ArCurve>,
+    identity_index: u32,
+    timestamp: u64,
+) -> Result<String> {
+    let id_cred_sec =
+        PedersenValue::new(wallet.get_id_cred_sec(ip_info.ip_identity.0, identity_index)?);
+    let request = generate_id_recovery_request(ip_info, global_context, &id_cred_sec, timestamp)
+        .ok_or_else(|| anyhow::anyhow!("generating the identity recovery request failed"))?;
+
+    Ok(serde_json::to_string(&IdentityRecoveryRequestV1 {
+        id_recovery_request: Versioned::new(VERSION_0, request),
     })?)
 }
