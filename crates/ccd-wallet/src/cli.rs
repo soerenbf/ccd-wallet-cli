@@ -2,6 +2,7 @@ use crate::commands::config::network::NetworkCommand;
 use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
 use concordium_rust_sdk::v2;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -251,12 +252,49 @@ pub struct AccountCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AccountSubcommand {
+    /// Import externally provisioned accounts.
+    Import(AccountImportCommand),
     /// List stored accounts.
     List(AccountListArgs),
     /// Create a new account from a stored identity.
     New(Box<AccountNewArgs>),
     /// Rename a stored account.
     Rename(AccountRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AccountImportCommand {
+    #[command(subcommand)]
+    pub command: AccountImportSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AccountImportSubcommand {
+    /// Import a single genesis account JSON file.
+    Genesis(AccountImportGenesisArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AccountImportGenesisArgs {
+    /// Path to a genesis account JSON file.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Label for the imported account. If omitted, interactive mode prompts with the file stem as suggestion.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]

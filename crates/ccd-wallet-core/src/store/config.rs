@@ -16,7 +16,7 @@ pub struct AppConfig {
 pub struct NetworkEntry {
     pub node_endpoint: String,
     pub genesis_hash: String,
-    pub wallet_proxy: String,
+    pub wallet_proxy: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -132,7 +132,7 @@ mod tests {
         NetworkEntry {
             node_endpoint: format!("https://{name}.example.com:20000"),
             genesis_hash: format!("hash-{name}"),
-            wallet_proxy: format!("https://wallet-proxy.{name}.example.com"),
+            wallet_proxy: Some(format!("https://wallet-proxy.{name}.example.com")),
         }
     }
 

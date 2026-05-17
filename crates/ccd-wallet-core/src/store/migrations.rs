@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 const MIGRATION_1: &str = include_str!("migrations/001_initial_schema.sql");
 const MIGRATION_2: &str = include_str!("migrations/002_account_creation.sql");
+const MIGRATION_3: &str = include_str!("migrations/003_imported_accounts.sql");
 
-pub const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2)];
+pub const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
 
 pub fn run(conn: &Connection) -> Result<()> {
     let mut version = current_version(conn)?;
@@ -86,6 +87,8 @@ mod tests {
             "identity_private_payloads",
             "accounts",
             "account_private_payloads",
+            "imported_account_vaults",
+            "imported_account_payloads",
         ] {
             let count: u32 = conn
                 .query_row(
@@ -104,6 +107,10 @@ mod tests {
             "CASCADE"
         );
         assert_eq!(foreign_key_delete_action(&conn, "accounts"), "CASCADE");
+        assert_eq!(
+            foreign_key_delete_action(&conn, "imported_account_payloads"),
+            "CASCADE"
+        );
         assert_eq!(
             foreign_key_delete_action(&conn, "account_private_payloads"),
             "CASCADE"

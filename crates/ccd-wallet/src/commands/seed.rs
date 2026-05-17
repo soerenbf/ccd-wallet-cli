@@ -149,16 +149,23 @@ impl SeedPrompts for TerminalSeedPrompts {
     }
 
     fn prompt_password(&mut self) -> Result<String> {
-        Ok(password("Set password:").mask('▪').interact()?)
+        Ok(password("Set password:")
+            .mask('▪')
+            .allow_empty()
+            .interact()?)
     }
 
     fn prompt_password_confirmation(&mut self) -> Result<String> {
-        Ok(password("Confirm password:").mask('▪').interact()?)
+        Ok(password("Confirm password:")
+            .mask('▪')
+            .allow_empty()
+            .interact()?)
     }
 
     fn prompt_unlock_password(&mut self, label: &str) -> Result<String> {
         Ok(password(format!("Password for seed '{label}':"))
             .mask('▪')
+            .allow_empty()
             .interact()?)
     }
 
@@ -857,7 +864,7 @@ async fn run_seed_recovery(
         .to_owned();
     let net = infer_net(
         network_name,
-        &network_entry.wallet_proxy,
+        network_entry.wallet_proxy.as_deref(),
         &network_entry.node_endpoint,
     );
     let wallet = Arc::new(ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?);
@@ -895,8 +902,11 @@ async fn run_seed_recovery(
 
     let spin = spinner();
     spin.start("Fetching identity providers...");
-    let wallet_proxy_entries =
-        client::fetch_wallet_proxy_ip_info(&network_entry.wallet_proxy).await?;
+    let wallet_proxy = network_entry
+        .wallet_proxy
+        .as_deref()
+        .context("selected network has no wallet_proxy configured")?;
+    let wallet_proxy_entries = client::fetch_wallet_proxy_ip_info(wallet_proxy).await?;
     spin.clear();
 
     let (available_providers, skipped_providers) =
@@ -1544,8 +1554,12 @@ fn prompt_for_network_name(
     select_or_single("Select network", &items, initial.as_ref())
 }
 
-fn infer_net(network_name: &str, wallet_proxy: &str, endpoint_label: &str) -> Net {
-    let haystack = format!("{network_name} {wallet_proxy} {endpoint_label}").to_ascii_lowercase();
+fn infer_net(network_name: &str, wallet_proxy: Option<&str>, endpoint_label: &str) -> Net {
+    let haystack = format!(
+        "{network_name} {} {endpoint_label}",
+        wallet_proxy.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
     if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
         Net::Testnet
     } else {

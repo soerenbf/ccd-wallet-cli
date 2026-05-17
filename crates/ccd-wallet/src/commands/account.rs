@@ -1,5 +1,8 @@
 use crate::{
-    cli::{AccountListArgs, AccountNewArgs, AccountRenameArgs, AccountSubcommand},
+    cli::{
+        AccountImportGenesisArgs, AccountImportSubcommand, AccountListArgs, AccountNewArgs,
+        AccountRenameArgs, AccountSubcommand,
+    },
     commands::ui::{
         ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
         log_resolved_context, select_or_single,
@@ -37,6 +40,8 @@ use futures_util::StreamExt;
 use rusqlite::Connection;
 use std::{
     collections::BTreeMap,
+    fs,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -64,6 +69,9 @@ impl AccountListStatus {
 
 pub async fn run(conn: &mut Connection, command: AccountSubcommand) -> Result<()> {
     match command {
+        AccountSubcommand::Import(command) => match command.command {
+            AccountImportSubcommand::Genesis(args) => import_genesis(conn, args).await,
+        },
         AccountSubcommand::List(args) => list_accounts(conn, args).await,
         AccountSubcommand::New(args) => new(conn, *args).await,
         AccountSubcommand::Rename(args) => rename_account(conn, args).await,
@@ -128,6 +136,65 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
             )
         );
     }
+    Ok(())
+}
+
+async fn import_genesis(conn: &mut Connection, args: AccountImportGenesisArgs) -> Result<()> {
+    validate_genesis_import_file(&args.file)?;
+
+    let (network_name, network_entry, _endpoint, endpoint_label, network_source) =
+        resolve_import_network_context(conn, args.network.as_deref(), args.non_interactive).await?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: format!("{network_name} @ {endpoint_label}"),
+        source: network_source,
+    }])?;
+
+    let label = resolve_import_label(
+        args.label,
+        &args.file,
+        args.non_interactive,
+        &network_entry.genesis_hash,
+        conn,
+    )?;
+    let json = fs::read_to_string(&args.file).with_context(|| {
+        format!(
+            "failed to read genesis account file {}",
+            args.file.display()
+        )
+    })?;
+    let original_filename = args
+        .file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned);
+    let payload = accounts::parse_genesis_account_json(&json, original_filename)?;
+
+    let vault_password =
+        prompt_imported_vault_password(conn, &network_name, &network_entry.genesis_hash)?;
+    let vault = accounts::create_or_unlock_imported_vault(
+        conn,
+        &network_entry.genesis_hash,
+        &vault_password,
+    )?;
+    let source_metadata_json = serde_json::to_string(&payload.source)
+        .context("failed to serialise imported account source metadata")?;
+    accounts::import_imported_account(
+        conn,
+        &vault.dek,
+        &vault.record,
+        accounts::ImportedAccount {
+            network_genesis_hash: &network_entry.genesis_hash,
+            label: &label,
+            import_kind: "genesis",
+            source_metadata_json: Some(&source_metadata_json),
+            payload: &payload,
+        },
+    )?;
+    println!(
+        "Imported account '{}' on network '{}'.",
+        label, network_name
+    );
     Ok(())
 }
 
@@ -426,6 +493,9 @@ fn resolve_seed_scope(
             .map(|seed| (ScopeSelection::One(seed.label), ResolutionSource::Explicit))
             .with_context(|| format!("seed '{}' is not configured", label)),
         None => {
+            if allow_all && seeds::list(conn)?.is_empty() {
+                return Ok((ScopeSelection::All, ResolutionSource::Inferred));
+            }
             let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
             if no_defaults {
                 return Ok((
@@ -516,6 +586,9 @@ fn prompt_for_seed_scope(
 ) -> Result<ScopeSelection> {
     let seeds = seeds::list(conn)?;
     if seeds.is_empty() {
+        if allow_all {
+            return Ok(ScopeSelection::All);
+        }
         bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
     }
     let mut items = Vec::new();
@@ -589,6 +662,9 @@ fn matches_seed_scope(
     scope: &(ScopeSelection, ResolutionSource),
     labels: &BTreeMap<String, String>,
 ) -> bool {
+    if record.source_kind == accounts::AccountSourceKind::Imported {
+        return !matches!(scope, (ScopeSelection::One(_), ResolutionSource::Explicit));
+    }
     match &scope.0 {
         ScopeSelection::All => true,
         ScopeSelection::One(label) => labels.get(&record.seed_id) == Some(label),
@@ -625,7 +701,10 @@ fn seed_scope_matches_record(
     match seed_scope {
         None => true,
         Some(ScopeSelection::All) => true,
-        Some(ScopeSelection::One(label)) => labels.get(&record.seed_id) == Some(label),
+        Some(ScopeSelection::One(label)) => {
+            record.source_kind == accounts::AccountSourceKind::Imported
+                || labels.get(&record.seed_id) == Some(label)
+        }
     }
 }
 
@@ -636,14 +715,35 @@ fn load_account_addresses(
     seed_scope: &(ScopeSelection, ResolutionSource),
 ) -> Result<BTreeMap<i64, String>> {
     let mut by_seed: BTreeMap<String, Vec<&accounts::AccountRecord>> = BTreeMap::new();
+    let mut by_imported_network: BTreeMap<String, Vec<&accounts::AccountRecord>> = BTreeMap::new();
     for record in records {
-        by_seed
-            .entry(record.seed_id.clone())
-            .or_default()
-            .push(record);
+        if record.source_kind == accounts::AccountSourceKind::Imported {
+            by_imported_network
+                .entry(record.network_genesis_hash.clone())
+                .or_default()
+                .push(record);
+        } else {
+            by_seed
+                .entry(record.seed_id.clone())
+                .or_default()
+                .push(record);
+        }
     }
 
     let mut addresses = BTreeMap::new();
+    for (network_genesis_hash, imported_records) in by_imported_network {
+        let password: String = password(format!(
+            "Imported accounts vault password for network '{}': ",
+            network_genesis_hash
+        ))
+        .interact()?;
+        let unlocked = accounts::unlock_imported_vault(conn, &network_genesis_hash, &password)?;
+        for record in imported_records {
+            let payload = accounts::decrypt_imported_payload(conn, record.id, &unlocked.dek)?;
+            addresses.insert(record.id, payload.account_address);
+        }
+    }
+
     for (seed_id, seed_records) in by_seed {
         let seed_label = seeds_by_id
             .get(&seed_id)
@@ -676,6 +776,9 @@ fn render_account_fuzzy_text(
         Some(address) => format!("{}{} ({address})", prefix, record.label),
         None => format!("{}{}", prefix, record.label),
     };
+    if record.source_kind == accounts::AccountSourceKind::Imported {
+        return format!("{} — {} • imported", label, network_name);
+    }
     format!(
         "{} — {} • seed:{} • provider:{} • identity:{} • cred:{}",
         label,
@@ -765,6 +868,82 @@ fn choose_account_match(
             seed_scope,
         )
     }
+}
+
+fn prompt_imported_vault_password(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+) -> Result<String> {
+    let exists = accounts::imported_vault_exists(conn, network_genesis_hash)?;
+    if !exists {
+        cliclack::log::info(format!(
+            "Setting up imported accounts vault for '{}'.",
+            network_name
+        ))?;
+    }
+    let prompt = if exists {
+        format!("Vault password for '{}':", network_name)
+    } else {
+        format!("Set vault password for '{}':", network_name)
+    };
+    let vault_password = password(prompt).allow_empty().interact()?;
+    if !exists {
+        let confirmation = password(format!("Confirm vault password for '{}':", network_name))
+            .allow_empty()
+            .interact()?;
+        if vault_password != confirmation {
+            bail!("imported accounts vault password confirmation did not match");
+        }
+    }
+    Ok(vault_password)
+}
+
+fn validate_genesis_import_file(file: &Path) -> Result<()> {
+    if file.is_dir() {
+        bail!("genesis account import expects a single JSON file, not a directory")
+    }
+    Ok(())
+}
+
+fn resolve_import_label(
+    explicit: Option<String>,
+    file: &Path,
+    non_interactive: bool,
+    network_genesis_hash: &str,
+    conn: &Connection,
+) -> Result<String> {
+    let suggested = file
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("imported-account")
+        .to_owned();
+    let label = match explicit {
+        Some(label) => label,
+        None if non_interactive => {
+            bail!("account label must be provided in --non-interactive mode")
+        }
+        None => input("Imported account label:")
+            .default_input(&suggested)
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Account label is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?,
+    };
+    validate_label("account", &label)?;
+    if accounts::find_by_network_and_label(conn, network_genesis_hash, &label)?.is_some() {
+        bail!(
+            "account label '{}' already exists for network '{}'",
+            label,
+            network_genesis_hash
+        );
+    }
+    Ok(label)
 }
 
 fn resolve_account_label(explicit: Option<String>, non_interactive: bool) -> Result<String> {
@@ -997,6 +1176,59 @@ fn is_identity_selectable(identity: &IdentityRecord, now: i64) -> bool {
             .is_some_and(|expires_at| expires_at > now),
         IdentityStatus::Pending => true,
     }
+}
+
+async fn resolve_import_network_context(
+    conn: &Connection,
+    network: Option<&str>,
+    non_interactive: bool,
+) -> Result<(String, NetworkEntry, v2::Endpoint, String, ResolutionSource)> {
+    let app_config = load()?;
+    let selected_network = match network {
+        Some(name) => (name.to_owned(), ResolutionSource::Explicit),
+        None if non_interactive => {
+            bail!("network must be provided with `--network <NAME>` in --non-interactive mode")
+        }
+        None => {
+            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+            (
+                prompt_for_network_name(&app_config, active.as_deref())?,
+                ResolutionSource::Prompted,
+            )
+        }
+    };
+
+    let entry = app_config
+        .networks
+        .get(&selected_network.0)
+        .cloned()
+        .with_context(|| format!("network '{}' is not registered", selected_network.0))?;
+    let endpoint: v2::Endpoint =
+        ccd_wallet_core::config::normalize_url_string(&entry.node_endpoint)
+            .parse()
+            .with_context(|| {
+                format!(
+                    "network '{}' has an invalid stored endpoint: {}",
+                    selected_network.0, entry.node_endpoint
+                )
+            })?;
+    let endpoint_label = ccd_wallet_core::config::endpoint_label(&endpoint);
+    let node_genesis_hash = fetch_node_genesis_hash(endpoint.clone(), &endpoint_label).await?;
+    if node_genesis_hash != entry.genesis_hash {
+        bail!(
+            "configured node for network '{}' points to genesis hash {}, which does not match the stored network genesis hash {}",
+            selected_network.0,
+            node_genesis_hash,
+            entry.genesis_hash
+        );
+    }
+    Ok((
+        selected_network.0,
+        entry,
+        endpoint,
+        endpoint_label,
+        selected_network.1,
+    ))
 }
 
 async fn resolve_account_network_context(
@@ -1293,6 +1525,64 @@ mod tests {
     }
 
     #[test]
+    fn imported_vault_password_confirmation_is_required_only_on_first_import() {
+        let conn = conn();
+        assert!(!accounts::imported_vault_exists(&conn, "genesis").unwrap());
+        accounts::create_or_unlock_imported_vault(&conn, "genesis", "").unwrap();
+        assert!(accounts::imported_vault_exists(&conn, "genesis").unwrap());
+        assert!(accounts::unlock_imported_vault(&conn, "genesis", "").is_ok());
+    }
+
+    #[test]
+    fn import_label_validation_rejects_duplicates_and_missing_noninteractive() {
+        let conn = conn();
+        let seed = seeds::add(&conn, "seed", b"seed secret", "password").unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "existing",
+            },
+        )
+        .unwrap();
+
+        let err = resolve_import_label(None, Path::new("baker-0.json"), true, "genesis", &conn)
+            .unwrap_err();
+        assert!(err.to_string().contains("account label must be provided"));
+
+        let err = resolve_import_label(
+            Some("existing".to_owned()),
+            Path::new("baker-0.json"),
+            true,
+            "genesis",
+            &conn,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+
+        assert_eq!(
+            resolve_import_label(
+                Some("baker-0".to_owned()),
+                Path::new("baker-0.json"),
+                true,
+                "genesis",
+                &conn,
+            )
+            .unwrap(),
+            "baker-0"
+        );
+    }
+
+    #[test]
+    fn genesis_import_directory_path_is_rejected() {
+        assert!(validate_genesis_import_file(Path::new(".")).is_err());
+    }
+
+    #[test]
     fn account_status_filter_matches_status() {
         let pending = accounts::AccountRecord {
             id: 1,
@@ -1301,6 +1591,10 @@ mod tests {
             ip_identity: 0,
             identity_index: 0,
             credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
             label: "pending-account".to_owned(),
             status: accounts::AccountStatus::Pending,
             transaction_hash: None,
@@ -1336,6 +1630,10 @@ mod tests {
             ip_identity: 0,
             identity_index: 0,
             credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
             label: "pending-account".to_owned(),
             status: accounts::AccountStatus::Pending,
             transaction_hash: None,
@@ -1355,6 +1653,20 @@ mod tests {
         assert!(
             render_account_fuzzy_text(&finalized, "test", "testnet", None)
                 .starts_with("finalized-account")
+        );
+
+        let imported = accounts::AccountRecord {
+            source_kind: accounts::AccountSourceKind::Imported,
+            imported_vault_id: Some("vault".to_owned()),
+            import_kind: Some("genesis".to_owned()),
+            source_metadata_json: None,
+            seed_id: String::new(),
+            label: "baker-0".to_owned(),
+            ..finalized
+        };
+        assert_eq!(
+            render_account_fuzzy_text(&imported, "", "local", None),
+            "baker-0 — local • imported"
         );
     }
 

@@ -53,7 +53,7 @@ pub struct NetworkAddArgs {
     #[arg(long = "node", value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
 
-    /// Wallet proxy base URL used to resolve wallet-facing identity provider metadata.
+    /// Optional wallet proxy base URL used to resolve wallet-facing identity provider metadata.
     #[arg(long = "wallet-proxy", value_name = "URL")]
     pub wallet_proxy: Option<String>,
 
@@ -165,12 +165,28 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
             node_input.parse().context("invalid node endpoint")?
         }
     };
-    let wallet_proxy_input = resolve_required_input(
-        args.wallet_proxy,
-        args.non_interactive,
-        "Wallet proxy URL:",
-        "wallet proxy URL must be provided in --non-interactive mode",
-    )?;
+    let wallet_proxy_input = if args.non_interactive {
+        args.wallet_proxy
+    } else {
+        match args.wallet_proxy {
+            Some(value) => Some(value),
+            None => {
+                let value: String = input("Wallet proxy URL (optional):")
+                    .required(false)
+                    .validate(|value: &String| {
+                        if value.is_empty() {
+                            Ok(())
+                        } else {
+                            reqwest::Url::parse(value)
+                                .map(|_| ())
+                                .map_err(|_| "Enter a valid wallet proxy URL.")
+                        }
+                    })
+                    .interact()?;
+                if value.is_empty() { None } else { Some(value) }
+            }
+        }
+    };
     let endpoint_label = config::endpoint_label(&node);
 
     let mut app_config = load()?;
@@ -194,11 +210,13 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
 
     let genesis_hash = format!("{}", consensus_info.genesis_block);
 
-    let wallet_proxy = config::normalize_url_string(
-        reqwest::Url::parse(&wallet_proxy_input)
-            .with_context(|| format!("invalid wallet proxy URL: {wallet_proxy_input}"))?
-            .as_ref(),
-    );
+    let wallet_proxy = wallet_proxy_input
+        .map(|wallet_proxy_input| {
+            reqwest::Url::parse(&wallet_proxy_input)
+                .with_context(|| format!("invalid wallet proxy URL: {wallet_proxy_input}"))
+                .map(|url| config::normalize_url_string(url.as_ref()))
+        })
+        .transpose()?;
 
     app_config.networks.insert(
         name.clone(),
@@ -214,7 +232,9 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
     println!("Network '{}' registered successfully.", name);
     println!("  endpoint:      {endpoint_label}");
     println!("  genesis hash:  {genesis_hash}");
-    println!("  wallet proxy:  {wallet_proxy}");
+    if let Some(wallet_proxy) = wallet_proxy {
+        println!("  wallet proxy:  {wallet_proxy}");
+    }
 
     Ok(())
 }
@@ -487,7 +507,9 @@ fn render_network_configuration(config_view: &NetworkConfigView) {
     println!("Network configuration");
     println!("- name: {}", config_view.name);
     println!("- node: {}", config_view.entry.node_endpoint);
-    println!("- wallet proxy: {}", config_view.entry.wallet_proxy);
+    if let Some(wallet_proxy) = &config_view.entry.wallet_proxy {
+        println!("- wallet proxy: {}", wallet_proxy);
+    }
     println!("- genesis hash: {}", config_view.entry.genesis_hash);
 }
 
@@ -940,7 +962,7 @@ mod tests {
                     NetworkEntry {
                         node_endpoint: format!("https://{name}.example.com:20000"),
                         genesis_hash: format!("hash-{name}"),
-                        wallet_proxy: format!("https://wallet-proxy.{name}.example.com"),
+                        wallet_proxy: Some(format!("https://wallet-proxy.{name}.example.com")),
                     },
                 )
             })
@@ -1000,7 +1022,7 @@ mod tests {
         let entry = NetworkEntry {
             node_endpoint: "https://grpc.testnet.concordium.com:20000".to_owned(),
             genesis_hash: "hash-testnet".to_owned(),
-            wallet_proxy: "https://wallet-proxy.testnet.concordium.com".to_owned(),
+            wallet_proxy: Some("https://wallet-proxy.testnet.concordium.com".to_owned()),
         };
 
         assert_eq!(
@@ -1157,7 +1179,7 @@ mod tests {
             NetworkEntry {
                 node_endpoint: "https://other.example.com:20000".to_owned(),
                 genesis_hash: "hash-testnet".to_owned(),
-                wallet_proxy: "https://wallet-proxy.other.example.com".to_owned(),
+                wallet_proxy: Some("https://wallet-proxy.other.example.com".to_owned()),
             },
         );
 

@@ -111,8 +111,11 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
 
     let spin = spinner();
     spin.start("Fetching wallet proxy metadata...");
-    let wallet_proxy_entries =
-        client::fetch_wallet_proxy_ip_info(&network_entry.wallet_proxy).await?;
+    let wallet_proxy = network_entry
+        .wallet_proxy
+        .as_deref()
+        .context("selected network has no wallet_proxy configured")?;
+    let wallet_proxy_entries = client::fetch_wallet_proxy_ip_info(wallet_proxy).await?;
     spin.clear();
     let wallet_proxy_entry =
         select_wallet_proxy_entry(&wallet_proxy_entries, ip_info.ip_identity.0)?;
@@ -122,7 +125,11 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     let ar_infos = fetch_anonymity_revokers(&mut client).await?;
     spin.clear();
 
-    let net = infer_net(&network_name, &network_entry.wallet_proxy, &endpoint_label);
+    let net = infer_net(
+        &network_name,
+        network_entry.wallet_proxy.as_deref(),
+        &endpoint_label,
+    );
     let wallet = ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?;
     let identity_index = identities::next_index(
         conn,
@@ -395,8 +402,12 @@ fn prompt_for_network_name(
     select_or_single("Select network", &items, initial.as_ref())
 }
 
-fn infer_net(network_name: &str, wallet_proxy: &str, endpoint_label: &str) -> Net {
-    let haystack = format!("{network_name} {wallet_proxy} {endpoint_label}").to_ascii_lowercase();
+fn infer_net(network_name: &str, wallet_proxy: Option<&str>, endpoint_label: &str) -> Net {
+    let haystack = format!(
+        "{network_name} {} {endpoint_label}",
+        wallet_proxy.unwrap_or_default()
+    )
+    .to_ascii_lowercase();
     if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
         Net::Testnet
     } else {
@@ -439,7 +450,13 @@ async fn resolve_identity_network_context(
                 );
             }
 
-            if entry.wallet_proxy.trim().is_empty() {
+            if entry
+                .wallet_proxy
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 bail!("network '{}' has no wallet_proxy configured", network_name);
             }
 
@@ -459,7 +476,13 @@ async fn resolve_identity_network_context(
             && entry.genesis_hash == node_genesis_hash
         {
             let entry = entry.clone();
-            if entry.wallet_proxy.trim().is_empty() {
+            if entry
+                .wallet_proxy
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 bail!(
                     "network '{}' has no wallet_proxy configured",
                     active_network
@@ -502,7 +525,13 @@ async fn resolve_identity_network_context(
             (matched_name, matched_entry, ResolutionSource::Inferred)
         };
 
-        if matched_entry.wallet_proxy.trim().is_empty() {
+        if matched_entry
+            .wallet_proxy
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             bail!("network '{}' has no wallet_proxy configured", matched_name);
         }
 
@@ -550,7 +579,13 @@ async fn resolve_identity_network_context(
             )
         })?;
 
-    if entry.wallet_proxy.trim().is_empty() {
+    if entry
+        .wallet_proxy
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
         bail!(
             "network '{}' has no wallet_proxy configured",
             selected_network
