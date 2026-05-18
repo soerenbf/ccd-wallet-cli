@@ -1,26 +1,4 @@
-# sqlite-store Specification
-
-## Purpose
-TBD - created by archiving change sqlite-wallet-store. Update Purpose after archive.
-## Requirements
-### Requirement: Database stored in OS application-data directory
-The CLI SHALL resolve the wallet database path as `{data_dir}/ccd-wallet/wallet.db`, where `{data_dir}` is the platform application-data directory (`~/Library/Application Support` on macOS, `~/.local/share` on Linux, `%APPDATA%` on Windows).
-
-#### Scenario: Database created on first run
-- **WHEN** no `wallet.db` exists at the resolved path
-- **THEN** the CLI creates parent directories as needed
-- **AND** creates a new SQLite database file at that path
-- **AND** initializes it with the current schema version
-
-#### Scenario: Database path is separate from config directory
-- **WHEN** the CLI resolves paths for both `wallet.db` and `config.json`
-- **THEN** `wallet.db` resolves under the OS data directory
-- **AND** `config.json` resolves under the OS config directory
-- **AND** the two paths are distinct
-
-#### Scenario: Database path overridden via environment variable
-- **WHEN** the environment variable `CCD_WALLET_DB_PATH` is set to an absolute path
-- **THEN** the CLI uses that path as the database file location instead of the default
+## MODIFIED Requirements
 
 ### Requirement: Versioned schema migrations
 The database SHALL contain a `schema_version` table with a single row indicating the current schema version. During this development reset, the migration set SHALL be consolidated into a single baseline schema that represents the full current wallet store. Existing development databases from earlier schema versions are not required to be migrated in-place and SHALL be rejected with an actionable error instructing the user to recreate the local database.
@@ -46,12 +24,3 @@ The consolidated baseline schema SHALL define the current wallet store tables: `
 #### Scenario: Schema tables are present after initialization
 - **WHEN** a new database is initialized
 - **THEN** querying `sqlite_master` returns table entries for `schema_version`, `wallet_state`, `seeds`, `seed_vaults`, `identities`, `identity_private_payloads`, `accounts`, `account_private_payloads`, `imported_account_vaults`, `imported_account_payloads`, `governance_key_vaults`, `governance_keys`, and `governance_key_payloads`
-
-### Requirement: SQLite foreign keys enabled for wallet database connections
-The wallet database connection SHALL enable SQLite foreign-key enforcement using `PRAGMA foreign_keys = ON` before migrations or normal operations are performed.
-
-#### Scenario: Open wallet database connection
-- **WHEN** the CLI opens `wallet.db`
-- **THEN** the connection has `PRAGMA foreign_keys` enabled
-- **AND** foreign-key cascades are enforced for that connection
-
