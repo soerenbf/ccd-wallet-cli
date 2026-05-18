@@ -567,6 +567,7 @@ dependencies = [
  "console 0.15.11",
  "futures-util",
  "open",
+ "rand 0.8.6",
  "reqwest",
  "rpassword",
  "rusqlite",

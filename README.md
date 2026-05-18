@@ -115,7 +115,7 @@ cargo run -p ccd-wallet -- seed delete daily_seed
 
 `seed delete [LABEL]` deletes a seed after asking you to type the label as confirmation. If the label is omitted, the CLI opens a selector unless `--non-interactive` is supplied. Deleting a seed also removes all identities and accounts owned by that seed. If the deleted seed is active, the active seed selection is cleared.
 
-`network reset [NAME]` prunes wallet-local identities and accounts for a network partition while keeping configured aliases intact. It accepts either a configured network name or `--genesis-hash <HASH>`. In interactive mode, omitted targets open a partition-oriented selector that shows rows like `6f8c…ab12 - testnet, staging-testnet` or `6f8c…ab12 (orphan)` together with identity/account counts.
+`network reset [NAME]` prunes wallet-local identities, accounts, imported-account vault data, and governance-vault data for a network partition while keeping configured aliases intact. It accepts either a configured network name or `--genesis-hash <HASH>`. In interactive mode, omitted targets open a partition-oriented selector that shows rows like `6f8c…ab12 - testnet, staging-testnet` or `6f8c…ab12 (orphan)` together with identity/account counts.
 
 `network delete [NAME]...` removes one or more configured network aliases only; it does not prune identities or accounts. If labels are omitted in interactive mode, the CLI opens an alias multiselect. When deleting aliases would orphan remaining local network data, the CLI warns and points you to `network reset` for cleanup.
 
@@ -167,11 +167,28 @@ cargo run -p ccd-wallet -- account rename --show-addresses --seed daily_seed
 
 By default, `account new` waits until the credential deployment finalizes and then stores the new account address encrypted under the owning seed's password domain in a structured account private payload. Use `--no-wait` to return after successful submission; the account remains pending locally for future lazy finalization checks.
 
-`account list` is human-oriented and scope-aware. By default it uses the active seed and active network, but you can broaden the scope with `--seed all` and/or `--network all`, then narrow with `--status <pending|finalized>`. Account addresses remain hidden unless you request `--show-addresses`, which prompts for the necessary seed password material to decrypt them.
+`account list` is human-oriented and scope-aware. By default it uses the resolved network but shows accounts across all seeds on that network unless you explicitly narrow with `--seed <LABEL>` (or `--seed all`) and/or `--status <pending|finalized>`. Account rows use a bracket-first format such as `[daily_seed] my_account` or `[imported] baker-0`, optionally followed by the decrypted address in parentheses when `--show-addresses` is enabled. Compact suffix metadata still shows the network and, for seed-derived accounts, provider/identity/credential information. Because address display is seed-scoped, `account list --show-addresses` requires an explicit `--seed <LABEL>`.
 
 `account rename` supports either an explicit old label or, when omitted in interactive mode, a fuzzy searchable selector across stored accounts. `account rename --show-addresses` requires a concrete seed scope, supplied either through `--seed <LABEL>` or through an interactive seed-selection prompt, before the selector can display decrypted addresses.
 
 If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal using the same interactive prompt framework.
+
+### Example: import, inspect, and remove governance keys
+
+```bash
+cargo run -p ccd-wallet -- governance keys import ~/Developer/Concordium/concordium-node/concordium-node/test-runs/p11-simple/genesis/update-keys/root-key-0.json --network local
+cargo run -p ccd-wallet -- governance keys import --dir ~/Developer/Concordium/concordium-node/concordium-node/test-runs/p11-simple/genesis/update-keys --network local
+cargo run -p ccd-wallet -- governance keys list
+cargo run -p ccd-wallet -- governance keys remove
+cargo run -p ccd-wallet -- governance keys remove <VERIFY_KEY>
+cargo run -p ccd-wallet -- governance keys remove --all --network local
+```
+
+`governance keys import <FILE>` imports a single governance keypair JSON file into a governance vault scoped by the selected network's genesis hash. `governance keys import --dir <DIR>` imports all recognized keypair files in the directory and ignores aggregate snapshot files such as `governance-keys.json`. The governance vault is created automatically on first import for a network and has its own password domain separate from seeds and imported accounts.
+
+`governance keys list` is an unlock-and-query command: it uses the active network by default, first checks whether a governance vault exists for the resolved network, then prompts for the governance vault password only when stored governance keys are present. After unlock, it decrypts stored governance keys, queries live chain parameters from the selected node, and renders tag-first rows sorted for operational use: `level 2`, then `level 1`, then `root`, then `not authorized`. By default the command abbreviates verify keys to a compact form such as `1234...5678`; use `--show-full` to render full verify keys. Root and level 1 rows summarize governance-key update authority, while level 2 rows summarize the update families the key can currently sign (for example `protocol` or `create plt`). The wallet does not trust aggregate governance snapshots as persistent authority metadata.
+
+`governance keys remove <VERIFY_KEY>` removes one imported governance key by its public key. `governance keys remove` without a public key opens an interactive fuzzy multiselect after vault unlock, reuses the same authorization-aware tag-first summaries as `governance keys list`, and abbreviates displayed verify keys to a compact form such as `1234...5678` so multiple removals are easier to review. `governance keys remove --all` removes all governance keys for the selected network. If the governance vault becomes empty after removal, it is deleted automatically.
 
 Development note: this version consolidates the SQLite schema into a new initial migration. Existing development `wallet.db` files from earlier schema versions should be deleted and recreated.
 

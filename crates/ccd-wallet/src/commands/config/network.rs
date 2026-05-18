@@ -5,7 +5,7 @@ use ccd_wallet_core::{
     store::{
         accounts,
         config::{NetworkEntry, list_networks, load, rename_network, save},
-        identities, wallet_state,
+        governance, identities, wallet_state,
     },
 };
 use clap::{Args, Subcommand};
@@ -611,6 +611,7 @@ fn known_network_hashes(conn: &Connection) -> Result<Vec<String>> {
     let mut hashes = BTreeSet::new();
     hashes.extend(identities::distinct_network_genesis_hashes(conn)?);
     hashes.extend(accounts::distinct_network_genesis_hashes(conn)?);
+    hashes.extend(governance::distinct_network_genesis_hashes(conn)?);
     Ok(hashes.into_iter().collect())
 }
 
@@ -663,6 +664,7 @@ fn select_reset_genesis_hash(
 fn prune_network_partition(conn: &Connection, genesis_hash: &str) -> Result<(usize, usize)> {
     let identity_count = identities::prune_by_network(conn, genesis_hash)?;
     let account_count = accounts::prune_by_network(conn, genesis_hash)?;
+    let _ = governance::prune_by_network(conn, genesis_hash)?;
     Ok((identity_count, account_count))
 }
 
@@ -944,7 +946,7 @@ fn select_network_name(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ccd_wallet_core::store::{config::AppConfig, migrations, seeds};
+    use ccd_wallet_core::store::{config::AppConfig, governance, migrations, seeds};
     use std::collections::BTreeMap;
 
     fn conn() -> Connection {
@@ -1168,6 +1170,17 @@ mod tests {
         assert_eq!(
             known_network_hashes(&conn).unwrap(),
             vec!["hash-mainnet".to_owned()]
+        );
+    }
+
+    #[test]
+    fn known_network_hashes_includes_governance_vault_networks() {
+        let conn = conn();
+        governance::create_or_unlock_vault(&conn, "hash-governance", "").unwrap();
+        assert!(
+            known_network_hashes(&conn)
+                .unwrap()
+                .contains(&"hash-governance".to_owned())
         );
     }
 

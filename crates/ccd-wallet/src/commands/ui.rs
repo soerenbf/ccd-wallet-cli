@@ -1,5 +1,5 @@
 use anyhow::Result;
-use cliclack::select;
+use cliclack::{multiselect, select};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ResolutionSource {
@@ -100,6 +100,24 @@ where
     Ok(picker.interact()?)
 }
 
+pub(crate) fn fuzzy_multiselect_or_single<T>(
+    prompt: &str,
+    items: &[FuzzySelectItem<T>],
+) -> Result<Vec<T>>
+where
+    T: Clone + Eq,
+{
+    if items.len() == 1 {
+        return Ok(vec![items[0].value.clone()]);
+    }
+
+    let mut picker = multiselect(prompt).filter_mode();
+    for item in items {
+        picker = picker.item(item.value.clone(), item.text.clone(), "");
+    }
+    Ok(picker.interact()?)
+}
+
 fn order_items<T>(items: &[SelectItem<T>], initial: Option<&T>) -> Vec<SelectItem<T>>
 where
     T: Clone + Eq,
@@ -119,8 +137,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextLine, ResolutionSource, SelectItem, format_resolved_context, order_items,
-        select_or_single,
+        ContextLine, ResolutionSource, SelectItem, format_resolved_context,
+        fuzzy_multiselect_or_single, order_items, select_or_single,
     };
 
     #[test]
@@ -177,6 +195,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, "testnet");
+    }
+
+    #[test]
+    fn fuzzy_multiselect_or_single_skips_prompt_for_single_item() {
+        let selected = fuzzy_multiselect_or_single(
+            "Select networks",
+            &[super::FuzzySelectItem {
+                value: "testnet".to_owned(),
+                text: "testnet".to_owned(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(selected, vec!["testnet".to_owned()]);
     }
 
     #[test]

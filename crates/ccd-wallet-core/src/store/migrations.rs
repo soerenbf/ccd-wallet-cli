@@ -1,13 +1,19 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 const MIGRATION_1: &str = include_str!("migrations/001_initial_schema.sql");
 const MIGRATION_2: &str = include_str!("migrations/002_account_creation.sql");
 const MIGRATION_3: &str = include_str!("migrations/003_imported_accounts.sql");
+const MIGRATION_4: &str = include_str!("migrations/004_governance_keys.sql");
 
-pub const MIGRATIONS: &[(u32, &str)] = &[(1, MIGRATION_1), (2, MIGRATION_2), (3, MIGRATION_3)];
+pub const MIGRATIONS: &[(u32, &str)] = &[
+    (1, MIGRATION_1),
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
+    (4, MIGRATION_4),
+];
 
 pub fn run(conn: &Connection) -> Result<()> {
     let mut version = current_version(conn)?;
@@ -89,6 +95,9 @@ mod tests {
             "account_private_payloads",
             "imported_account_vaults",
             "imported_account_payloads",
+            "governance_key_vaults",
+            "governance_keys",
+            "governance_key_payloads",
         ] {
             let count: u32 = conn
                 .query_row(
@@ -115,6 +124,14 @@ mod tests {
             foreign_key_delete_action(&conn, "account_private_payloads"),
             "CASCADE"
         );
+        assert_eq!(
+            foreign_key_delete_action(&conn, "governance_keys"),
+            "CASCADE"
+        );
+        assert_eq!(
+            foreign_key_delete_action(&conn, "governance_key_payloads"),
+            "CASCADE"
+        );
     }
 
     #[test]
@@ -122,7 +139,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE schema_version (version INTEGER NOT NULL);
-             INSERT INTO schema_version (version) VALUES (4);",
+             INSERT INTO schema_version (version) VALUES (5);",
         )
         .unwrap();
 

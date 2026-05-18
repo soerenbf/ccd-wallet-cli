@@ -79,13 +79,7 @@ pub async fn run(conn: &mut Connection, command: AccountSubcommand) -> Result<()
 }
 
 async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<()> {
-    let seed_scope = resolve_seed_scope(
-        conn,
-        args.seed.as_deref(),
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )?;
+    let seed_scope = resolve_account_list_seed_scope(conn, args.seed.as_deref())?;
     let network_scope = resolve_network_scope(
         conn,
         args.network.as_deref(),
@@ -480,43 +474,6 @@ fn network_names_by_genesis_hash() -> Result<BTreeMap<String, String>> {
         .collect())
 }
 
-fn resolve_seed_scope(
-    conn: &Connection,
-    explicit: Option<&str>,
-    non_interactive: bool,
-    no_defaults: bool,
-    allow_all: bool,
-) -> Result<(ScopeSelection, ResolutionSource)> {
-    match explicit {
-        Some("all") if allow_all => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
-        Some(label) => seeds::find_by_label(conn, label)?
-            .map(|seed| (ScopeSelection::One(seed.label), ResolutionSource::Explicit))
-            .with_context(|| format!("seed '{}' is not configured", label)),
-        None => {
-            if allow_all && seeds::list(conn)?.is_empty() {
-                return Ok((ScopeSelection::All, ResolutionSource::Inferred));
-            }
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
-            if no_defaults {
-                return Ok((
-                    prompt_for_seed_scope(conn, active.as_deref(), allow_all)?,
-                    ResolutionSource::Prompted,
-                ));
-            }
-            match active {
-                Some(label) => Ok((ScopeSelection::One(label), ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
-                ),
-                None => Ok((
-                    prompt_for_seed_scope(conn, None, allow_all)?,
-                    ResolutionSource::Prompted,
-                )),
-            }
-        }
-    }
-}
-
 fn resolve_network_scope(
     conn: &Connection,
     explicit: Option<&str>,
@@ -559,53 +516,30 @@ fn resolve_network_scope(
     }
 }
 
+fn resolve_account_list_seed_scope(
+    conn: &Connection,
+    explicit: Option<&str>,
+) -> Result<(ScopeSelection, ResolutionSource)> {
+    match explicit {
+        Some("all") => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
+        Some(label) => seeds::find_by_label(conn, label)?
+            .map(|seed| (ScopeSelection::One(seed.label), ResolutionSource::Explicit))
+            .with_context(|| format!("seed '{}' is not configured", label)),
+        None => Ok((ScopeSelection::All, ResolutionSource::Inferred)),
+    }
+}
+
 fn resolve_seed_scope_for_addresses(
     conn: &Connection,
     explicit: Option<&str>,
-    non_interactive: bool,
+    _non_interactive: bool,
 ) -> Result<ScopeSelection> {
     match explicit {
         Some(label) => seeds::find_by_label(conn, label)?
             .map(|seed| ScopeSelection::One(seed.label))
             .with_context(|| format!("seed '{}' is not configured", label)),
-        None if non_interactive => {
-            bail!("`--seed <LABEL>` is required with `--show-addresses` in --non-interactive mode")
-        }
-        None => prompt_for_seed_scope(
-            conn,
-            wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.as_deref(),
-            false,
-        ),
+        None => bail!("`--seed <LABEL>` is required with `--show-addresses`"),
     }
-}
-
-fn prompt_for_seed_scope(
-    conn: &Connection,
-    active: Option<&str>,
-    allow_all: bool,
-) -> Result<ScopeSelection> {
-    let seeds = seeds::list(conn)?;
-    if seeds.is_empty() {
-        if allow_all {
-            return Ok(ScopeSelection::All);
-        }
-        bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
-    }
-    let mut items = Vec::new();
-    if allow_all {
-        items.push(SelectItem {
-            value: ScopeSelection::All,
-            label: "All seeds".to_owned(),
-            hint: String::new(),
-        });
-    }
-    items.extend(seeds.into_iter().map(|seed| SelectItem {
-        value: ScopeSelection::One(seed.label.clone()),
-        label: seed.label,
-        hint: String::new(),
-    }));
-    let initial = active.map(|value| ScopeSelection::One(value.to_owned()));
-    select_or_single("Select seed", &items, initial.as_ref())
 }
 
 fn prompt_for_network_scope(
@@ -736,6 +670,7 @@ fn load_account_addresses(
             "Imported accounts vault password for network '{}': ",
             network_genesis_hash
         ))
+        .allow_empty()
         .interact()?;
         let unlocked = accounts::unlock_imported_vault(conn, &network_genesis_hash, &password)?;
         for record in imported_records {
@@ -768,25 +703,28 @@ fn render_account_fuzzy_text(
     network_name: &str,
     address: Option<&str>,
 ) -> String {
-    let prefix = match record.status {
+    let status_prefix = match record.status {
         accounts::AccountStatus::Pending => "[pending] ",
         accounts::AccountStatus::Finalized => "",
     };
+    let owner_tag = if record.source_kind == accounts::AccountSourceKind::Imported {
+        "[imported]".to_owned()
+    } else {
+        format!("[{seed_label}]")
+    };
     let label = match address {
-        Some(address) => format!("{}{} ({address})", prefix, record.label),
-        None => format!("{}{}", prefix, record.label),
+        Some(address) => format!(
+            "{}{} {} ({address})",
+            status_prefix, owner_tag, record.label
+        ),
+        None => format!("{}{} {}", status_prefix, owner_tag, record.label),
     };
     if record.source_kind == accounts::AccountSourceKind::Imported {
-        return format!("{} — {} • imported", label, network_name);
+        return format!("{} - {}", label, network_name);
     }
     format!(
-        "{} — {} • seed:{} • provider:{} • identity:{} • cred:{}",
-        label,
-        network_name,
-        seed_label,
-        record.ip_identity,
-        record.identity_index,
-        record.credential_counter
+        "{} - {} • provider:{} • identity:{} • cred:{}",
+        label, network_name, record.ip_identity, record.identity_index, record.credential_counter
     )
 }
 
@@ -1622,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn render_account_fuzzy_text_uses_conditional_badges() {
+    fn render_account_fuzzy_text_uses_bracket_first_rows() {
         let pending = accounts::AccountRecord {
             id: 1,
             seed_id: "seed-id".to_owned(),
@@ -1646,13 +1584,13 @@ mod tests {
             ..pending.clone()
         };
 
-        assert!(
-            render_account_fuzzy_text(&pending, "test", "testnet", None)
-                .starts_with("[pending] pending-account")
+        assert_eq!(
+            render_account_fuzzy_text(&pending, "test", "testnet", None),
+            "[pending] [test] pending-account - testnet • provider:0 • identity:0 • cred:0"
         );
-        assert!(
-            render_account_fuzzy_text(&finalized, "test", "testnet", None)
-                .starts_with("finalized-account")
+        assert_eq!(
+            render_account_fuzzy_text(&finalized, "test", "testnet", Some("addr-test")),
+            "[test] finalized-account (addr-test) - testnet • provider:0 • identity:0 • cred:0"
         );
 
         let imported = accounts::AccountRecord {
@@ -1666,14 +1604,25 @@ mod tests {
         };
         assert_eq!(
             render_account_fuzzy_text(&imported, "", "local", None),
-            "baker-0 — local • imported"
+            "[imported] baker-0 - local"
         );
     }
 
     #[test]
-    fn show_addresses_requires_seed_in_non_interactive_mode() {
+    fn account_list_defaults_to_all_seeds() {
+        let conn = conn();
+        let (scope, source) = resolve_account_list_seed_scope(&conn, None).unwrap();
+        assert_eq!(scope, ScopeSelection::All);
+        assert_eq!(source, ResolutionSource::Inferred);
+    }
+
+    #[test]
+    fn show_addresses_requires_explicit_seed_argument() {
         let conn = conn();
         let err = resolve_seed_scope_for_addresses(&conn, None, true).unwrap_err();
-        assert!(err.to_string().contains("--seed <LABEL>"));
+        assert!(
+            err.to_string()
+                .contains("`--seed <LABEL>` is required with `--show-addresses`")
+        );
     }
 }

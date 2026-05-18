@@ -20,6 +20,7 @@ async fn main() -> Result<()> {
         Command::Seed(command) => commands::seed::run(&mut conn, command.command).await,
         Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,
+        Command::Governance(command) => commands::governance::run(&mut conn, command.command).await,
     }
 }
 

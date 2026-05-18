@@ -27,6 +27,8 @@ pub enum Command {
     Identity(Box<IdentityCommand>),
     /// Account creation and management commands.
     Account(Box<AccountCommand>),
+    /// Governance key management commands.
+    Governance(Box<GovernanceCommand>),
 }
 
 #[derive(Debug, Args)]
@@ -376,6 +378,91 @@ pub struct AccountRenameArgs {
     /// Reveal decrypted account addresses in the selector.
     #[arg(long = "show-addresses")]
     pub show_addresses: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceCommand {
+    #[command(subcommand)]
+    pub command: GovernanceSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GovernanceSubcommand {
+    /// Manage imported governance keys.
+    Keys(GovernanceKeysCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceKeysCommand {
+    #[command(subcommand)]
+    pub command: GovernanceKeysSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GovernanceKeysSubcommand {
+    /// Import governance key JSON files.
+    Import(GovernanceKeysImportArgs),
+    /// List imported governance keys using live chain authorization state.
+    List(GovernanceKeysListArgs),
+    /// Remove imported governance keys.
+    Remove(GovernanceKeysRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceKeysImportArgs {
+    /// Path to a single governance key JSON file.
+    #[arg(value_name = "FILE", conflicts_with = "dir")]
+    pub file: Option<PathBuf>,
+
+    /// Path to a directory of governance key JSON files.
+    #[arg(long, value_name = "DIR", conflicts_with = "file")]
+    pub dir: Option<PathBuf>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceKeysListArgs {
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+
+    /// Show full governance verify keys instead of compact abbreviations.
+    #[arg(long = "show-full")]
+    pub show_full: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceKeysRemoveArgs {
+    /// Governance key public key to remove.
+    #[arg(value_name = "VERIFY_KEY", conflicts_with = "all")]
+    pub verify_key: Option<String>,
+
+    /// Remove all governance keys for the selected network.
+    #[arg(long, conflicts_with = "verify_key")]
+    pub all: bool,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
 
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]

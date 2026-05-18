@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod governance;
 pub mod identities;
 pub mod migrations;
 pub mod seeds;
