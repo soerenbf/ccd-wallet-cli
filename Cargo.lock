@@ -573,6 +573,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -759,8 +760,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "concordium-contracts-common"
 version = "9.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bacf3a0689d3ac154085e322eb98b0db16caa61436421d991d54ba25aaf0da3"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "base64 0.21.7",
  "bs58",
@@ -781,8 +781,7 @@ dependencies = [
 [[package]]
 name = "concordium-contracts-common-derive"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee3482ffacf3c18133be976c1b874b6e87e018ac0316e9385888b43df07fa39c"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -792,8 +791,7 @@ dependencies = [
 [[package]]
 name = "concordium-rust-sdk"
 version = "9.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28358a70e30a360e1072f7eb6d63263ad705e3627aeac5c709c5d706d9a0f4d8"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -826,8 +824,7 @@ dependencies = [
 [[package]]
 name = "concordium-smart-contract-engine"
 version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "286534f820438f29a0448c3f5e368a092b84241dbf08ac99fe38ccdb0534da15"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -851,8 +848,7 @@ dependencies = [
 [[package]]
 name = "concordium-wasm"
 version = "5.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16b5e16881ad746a68d1fbd96446d8ca5db399b9a9bcf71504f543af67557261"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "anyhow",
  "concordium-contracts-common",
@@ -864,8 +860,7 @@ dependencies = [
 [[package]]
 name = "concordium_base"
 version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e3339e2b778eb8c4e61a94627ab2f8a091006a82c9297d38697487c8e5c3ed3"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "aes",
  "anyhow",
@@ -915,8 +910,7 @@ dependencies = [
 [[package]]
 name = "concordium_base_derive"
 version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "506ed3d99b3ee6c674cc0c1e8ce95fa49fafd08b96754a6a83fc6cc34f9c373c"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fcor-2307-locks#3faeb7fcc28750c644560e54c42550c439afae91"
 dependencies = [
  "convert_case 0.8.0",
  "darling 0.20.11",

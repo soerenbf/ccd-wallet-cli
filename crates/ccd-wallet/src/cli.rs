@@ -394,6 +394,8 @@ pub struct GovernanceCommand {
 pub enum GovernanceSubcommand {
     /// Manage imported governance keys.
     Keys(GovernanceKeysCommand),
+    /// Sign and submit a governance update.
+    Update(Box<GovernanceUpdateArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -467,6 +469,57 @@ pub struct GovernanceKeysRemoveArgs {
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceUpdateArgs {
+    /// Read a governance update payload from a JSON file. If no file is supplied, prompt for pasted JSON.
+    #[arg(long = "json", value_name = "FILE", num_args = 0..=1, conflicts_with = "serialized")]
+    pub json: Option<Option<PathBuf>>,
+
+    /// Use a serialized hex governance update payload. If no hex is supplied, prompt for pasted hex.
+    #[arg(long = "serialized", value_name = "HEX", num_args = 0..=1, conflicts_with = "json")]
+    pub serialized: Option<Option<String>>,
+
+    /// Allow blind signing when a serialized payload cannot be decoded by this wallet.
+    #[arg(long = "blind")]
+    pub blind: bool,
+
+    /// Governance verify key to sign with. Repeat to select multiple signers.
+    #[arg(long = "key", value_name = "VERIFY_KEY")]
+    pub keys: Vec<String>,
+
+    /// Authorization family hint for blind signing, such as protocol, root, level1, or create-plt.
+    #[arg(long = "sign-as", value_name = "AUTH_FAMILY")]
+    pub sign_as: Option<String>,
+
+    /// Override the update sequence number.
+    #[arg(long = "sequence-number", value_name = "N")]
+    pub sequence_number: Option<u64>,
+
+    /// Effective time for the update: 0, relative duration, RFC3339, or unix seconds.
+    #[arg(long = "effective-time", value_name = "TIME")]
+    pub effective_time: Option<String>,
+
+    /// Timeout for the update: relative duration, RFC3339, or unix seconds.
+    #[arg(long = "timeout", value_name = "TIME")]
+    pub timeout: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]

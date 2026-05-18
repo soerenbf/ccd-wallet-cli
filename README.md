@@ -190,6 +190,22 @@ cargo run -p ccd-wallet -- governance keys remove --all --network local
 
 `governance keys remove <VERIFY_KEY>` removes one imported governance key by its public key. `governance keys remove` without a public key opens an interactive fuzzy multiselect after vault unlock, reuses the same authorization-aware tag-first summaries as `governance keys list`, and abbreviates displayed verify keys to a compact form such as `1234...5678` so multiple removals are easier to review. `governance keys remove --all` removes all governance keys for the selected network. If the governance vault becomes empty after removal, it is deleted automatically.
 
+### Example: sign and submit governance updates
+
+```bash
+cargo run -p ccd-wallet -- governance update --json update.json --network local --effective-time 0
+cargo run -p ccd-wallet -- governance update --serialized <HEX> --key <VERIFY_KEY> --timeout 5m
+cargo run -p ccd-wallet -- governance update --serialized <HEX> --blind --sign-as protocol --key <VERIFY_KEY> --sequence-number 7 --no-wait
+```
+
+`governance update` signs and submits governance update payloads using keys from the governance key vault. Use `--json <FILE>` for a decoded JSON payload file, or `--serialized <HEX>` for Concordium-serialized update payload bytes. In interactive mode, omitting the value after `--json` prompts for pasted JSON, and omitting the value after `--serialized` prompts for pasted hex. As a Create PLT convenience only, JSON payloads may provide `initializationParameters` as JSON instead of hex; the wallet converts that field to Concordium CBOR before signing.
+
+For known payloads, the wallet decodes the update type, derives the authorization family and sequence-number queue, queries live chain parameters, and prompts for signers if `--key <VERIFY_KEY>` is omitted. Signer prompts reuse the governance key rows from `governance keys list`, sort keys authorized for the current update first, and preselect authorized keys up to the required threshold when the threshold is known.
+
+For unknown serialized payloads, use `--blind` only after independently reviewing the payload with trusted tooling. Blind signing emits warnings. If the payload cannot be decoded and `--sign-as <AUTH_FAMILY>` is omitted, you must provide explicit `--key <VERIFY_KEY>` signer flags and `--sequence-number <N>`. `--sign-as` is a helper for cases where you know the authorization family; examples include `protocol`, `create-plt`, `root`, and `level1`.
+
+Effective time and timeout inputs accept relative durations (`5m`, `30m`, `1h`, `15d`), RFC3339 datetimes, or unix seconds. If effective time is omitted in interactive mode, the prompt defaults to `0` (immediate). If timeout is omitted, the prompt defaults to five minutes from now for immediate updates, or five minutes before a scheduled effective time, displayed as RFC3339. For scheduled updates, timeout must not be after effective time. By default, the command waits for finalization; use `--no-wait` to return after successful submission.
+
 Development note: this version consolidates the SQLite schema into a new initial migration. Existing development `wallet.db` files from earlier schema versions should be deleted and recreated.
 
 ## Logging

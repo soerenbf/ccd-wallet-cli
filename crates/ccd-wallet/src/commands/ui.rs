@@ -107,11 +107,24 @@ pub(crate) fn fuzzy_multiselect_or_single<T>(
 where
     T: Clone + Eq,
 {
+    fuzzy_multiselect_or_single_with_initial(prompt, items, &[])
+}
+
+pub(crate) fn fuzzy_multiselect_or_single_with_initial<T>(
+    prompt: &str,
+    items: &[FuzzySelectItem<T>],
+    initial: &[T],
+) -> Result<Vec<T>>
+where
+    T: Clone + Eq,
+{
     if items.len() == 1 {
         return Ok(vec![items[0].value.clone()]);
     }
 
-    let mut picker = multiselect(prompt).filter_mode();
+    let mut picker = multiselect(prompt)
+        .filter_mode()
+        .initial_values(initial.to_vec());
     for item in items {
         picker = picker.item(item.value.clone(), item.text.clone(), "");
     }
