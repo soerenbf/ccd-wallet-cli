@@ -1,8 +1,5 @@
-# node-connectivity Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change setup-rust-wallet-cli. Update Purpose after archive.
-## Requirements
 ### Requirement: Configurable Concordium node endpoint
 The CLI SHALL allow the user to specify the target Concordium node for node commands and for `transaction show` using either a named network registered in the config store (`--network <NAME>`) or an explicit gRPC endpoint (`--node <ENDPOINT>`). If neither option is supplied, the CLI SHALL fall back to the active network from the wallet-state store unless `--no-defaults` is supplied. Supplying both `--network` and `--node` SHALL be an error.
 
@@ -66,55 +63,3 @@ The CLI SHALL also allow `network show` to resolve its query node from either a 
 - **AND** an active network is configured
 - **THEN** the CLI queries the explicit endpoint directly
 - **AND** does not implicitly render the active network's configuration unless a label was explicitly supplied
-
-### Requirement: Read-only node connectivity command
-The CLI SHALL provide at least one read-only command that connects to a Concordium node through the Concordium Rust SDK and returns node information to the user.
-
-#### Scenario: Query a reachable node successfully
-- **WHEN** the user runs the read-only node command against a reachable Concordium node endpoint
-- **THEN** the CLI establishes a connection through the Concordium Rust SDK
-- **AND** the command exits successfully
-- **AND** the CLI prints returned node information in a human-readable form
-
-#### Scenario: Surface a useful connection failure
-- **WHEN** the user runs the read-only node command against an unreachable or invalid endpoint
-- **THEN** the command exits with a non-zero status
-- **AND** the CLI prints an actionable error message indicating that node connectivity failed
-
-### Requirement: Governance key inspection uses live chain queries
-The CLI SHALL use live Concordium node queries to derive governance authorization state for governance key inspection flows. `governance keys list` SHALL query current chain parameters from the resolved node instead of relying on locally stored governance authorization snapshots.
-
-#### Scenario: Governance key list derives authorization from chain parameters
-- **WHEN** the user runs `ccd-wallet governance keys list`
-- **THEN** the CLI connects to the resolved node
-- **AND** queries current chain parameters
-- **AND** derives governance key levels and authorization status from the live response
-
-#### Scenario: Governance key list surfaces node query failure actionably
-- **WHEN** the user runs `ccd-wallet governance keys list`
-- **AND** the CLI cannot connect to the resolved node or query chain parameters
-- **THEN** the command exits with a non-zero status
-- **AND** prints an actionable error indicating that live governance state could not be queried
-
-### Requirement: Governance update submission uses live chain queries when context is not explicit
-The CLI SHALL use live Concordium node queries during governance update submission when authorization, key-index, or sequence-number context is not fully specified by the user.
-
-#### Scenario: Known governance update derives signing context from chain state
-- **WHEN** the user runs `ccd-wallet governance update` with a payload the wallet can deserialize
-- **THEN** the CLI queries live chain state as needed to determine authorization structures, governance key indices, and next update sequence numbers
-
-#### Scenario: Blind signing resolves selected verify keys to current key indices
-- **WHEN** the user runs `ccd-wallet governance update --serialized <HEX> --blind --key <VERIFY_KEY>`
-- **AND** the wallet can query the resolved node
-- **THEN** the CLI uses live chain parameters to map the selected verify keys to their current governance key indices before constructing the update instruction
-
-#### Scenario: Explicit sequence number skips default lookup
-- **WHEN** the user runs `ccd-wallet governance update ... --sequence-number <N>`
-- **THEN** the CLI uses the explicit sequence number instead of requiring default next-sequence lookup from the node
-
-#### Scenario: Governance update submission surfaces node-query failure actionably
-- **WHEN** the CLI needs live governance query data during governance update submission
-- **AND** the resolved node cannot be reached or queried successfully
-- **THEN** the command exits with a non-zero status
-- **AND** prints an actionable error describing which live governance query failed
-

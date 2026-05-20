@@ -330,7 +330,9 @@ fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<Stri
 }
 
 fn unlock_seed(conn: &Connection, seed_label: &str) -> Result<seeds::UnlockedSeed> {
-    let password: String = password(format!("Password for seed '{seed_label}': ")).interact()?;
+    let password: String = password(format!("Password for seed '{seed_label}': "))
+        .allow_empty()
+        .interact()?;
     seeds::unlock_context(conn, seed_label, &password)
 }
 

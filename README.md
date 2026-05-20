@@ -93,6 +93,26 @@ Most user-facing setup flows can now prompt for missing non-secret values intera
 
 `network show [NAME]` inspects a configured network and prints `Network configuration` followed by `Consensus (<node endpoint>)`. Bare `network show` uses the active network by default unless `--no-defaults` is supplied. `network show --node <ENDPOINT>` switches into node-only mode: it queries the explicit endpoint, derives the observed genesis hash, prints `Network match(es) (<genesis hash>)` with any matching configured aliases, and then prints consensus details. `network show [NAME] --node <ENDPOINT>` keeps config mode but uses the explicit node as a diagnostic override, warning if the observed genesis hash does not match the configured network.
 
+### Example: inspect transaction status and details
+
+```bash
+cargo run -p ccd-wallet -- transaction show 0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833 --network testnet
+cargo run -p ccd-wallet -- transaction show 0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833 --node https://grpc.testnet.concordium.com:20000
+cargo run -p ccd-wallet -- transaction show 0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833
+```
+
+`transaction show <HASH>` is a read-only node-backed inspection command. It does not require the wallet to store transactions locally. The command resolves the query node from `--network <NAME>`, `--node <ENDPOINT>`, or the active network by default, and `--no-defaults` forces explicit network selection.
+
+The output is detailed by default. It renders stable fields such as `Transaction`, `Queried via`, `Status`, block hash, block time, outcome, type, and energy in a human-oriented format. For committed and finalized transactions it then renders the concrete block-item summary variant explicitly:
+- account transactions show static fields such as sender and cost, then either `Events: <N>` or `Reject reason:`
+- credential deployments show static fields such as credential type, address, and registration id
+- chain updates show stable fields such as effective time and update type, then a `Payload:` section
+- token creation shows static `CreatePlt` fields, then `Events: <N>`
+
+JSON is used only for the nested non-static payloads within those variants. Received transactions do not print empty nested detail sections.
+
+If the selected node does not know the hash, `transaction show` prints `Status: absent` instead of surfacing a raw not-found error. Because transaction hashes are network-dependent, `absent` can also mean you queried the wrong network or node.
+
 ### Example: manage seed phrases
 
 ```bash

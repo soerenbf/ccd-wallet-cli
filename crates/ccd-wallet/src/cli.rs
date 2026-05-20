@@ -21,6 +21,8 @@ pub enum Command {
     Node(Box<NodeCommand>),
     /// Network configuration commands.
     Network(Box<NetworkCommand>),
+    /// Transaction inspection commands.
+    Transaction(Box<TransactionCommand>),
     /// Seed phrase commands.
     Seed(SeedCommand),
     /// Identity issuance commands.
@@ -29,6 +31,42 @@ pub enum Command {
     Account(Box<AccountCommand>),
     /// Governance key management commands.
     Governance(Box<GovernanceCommand>),
+}
+
+#[derive(Debug, Args)]
+pub struct TransactionCommand {
+    #[command(subcommand)]
+    pub command: TransactionSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransactionSubcommand {
+    /// Show details for a transaction hash.
+    Show(Box<TransactionShowArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TransactionShowArgs {
+    /// Transaction hash to inspect.
+    #[arg(value_name = "HASH")]
+    pub hash: concordium_rust_sdk::types::hashes::TransactionHash,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(
+        long = "node",
+        env = config::NODE_ENDPOINT_ENV,
+        conflicts_with = "network",
+        value_name = "ENDPOINT"
+    )]
+    pub node: Option<v2::Endpoint>,
+
+    /// Disable silent use of the active network and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -552,4 +590,35 @@ pub struct NodeInfoArgs {
     /// Disable silent use of the active network and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_transaction_show_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "transaction",
+            "show",
+            "0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Transaction(command) => match command.command {
+                TransactionSubcommand::Show(args) => {
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.node.is_none());
+                    assert_eq!(
+                        args.hash.to_string(),
+                        "0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833"
+                    );
+                }
+            },
+            other => panic!("expected transaction command, got {other:?}"),
+        }
+    }
 }
