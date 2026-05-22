@@ -26,7 +26,14 @@ pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
             let conn = conn
                 .lock()
                 .map_err(|_| PairingRejection::new("wallet database connection is unavailable"))?;
-            approve_pairing(&conn, request).map_err(|err| PairingRejection::new(err.to_string()))
+            match approve_pairing(&conn, request) {
+                Ok(approval) => Ok(approval),
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = cliclack::log::error(&message);
+                    Err(PairingRejection::new(message))
+                }
+            }
         }
         .boxed()
     });
@@ -171,8 +178,9 @@ fn read_account_address(
                 .into_iter()
                 .find(|seed| seed.id == account.seed_id)
                 .context("selected account references unknown seed")?;
-            let password: String =
-                password(format!("Password for seed '{}':", seed.label)).interact()?;
+            let password: String = password(format!("Password for seed '{}':", seed.label))
+                .allow_empty()
+                .interact()?;
             let unlocked = seeds::unlock_context(conn, &seed.label, &password)?;
             let payload = accounts::decrypt_private_payload(conn, account.id, &unlocked.dek)?;
             Ok(payload.account_address)
