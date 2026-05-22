@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet"]
+members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet-connect", "crates/ccd-wallet"]
 resolver = "2"
 
 [workspace.package]
@@ -9,6 +9,7 @@ edition = "2024"
 [workspace.dependencies]
 anyhow = "1.0.102"
 argon2 = "0.5.3"
+base64 = "0.22.1"
 bip39 = { version = "2.2.2", features = ["rand"] }
 chacha20poly1305 = "0.10.1"
 chrono = "0.4.42"

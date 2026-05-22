@@ -2,7 +2,7 @@ use crate::commands::config::network::NetworkCommand;
 use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
 use concordium_rust_sdk::v2;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,6 +31,8 @@ pub enum Command {
     Account(Box<AccountCommand>),
     /// Governance key management commands.
     Governance(Box<GovernanceCommand>),
+    /// Start a temporary browser pairing session.
+    Connect(ConnectArgs),
 }
 
 #[derive(Debug, Args)]
@@ -420,6 +422,13 @@ pub struct AccountRenameArgs {
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ConnectArgs {
+    /// Local WebSocket address for browser pairing.
+    #[arg(long = "bind", default_value = "127.0.0.1:22771", value_name = "ADDR")]
+    pub bind: SocketAddr,
 }
 
 #[derive(Debug, Args)]

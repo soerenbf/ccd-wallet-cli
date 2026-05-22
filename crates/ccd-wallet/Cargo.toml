@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ccd-wallet-connect = { path = "../ccd-wallet-connect" }
 ccd-wallet-core = { path = "../ccd-wallet-core" }
 ccd-wallet-identity-provider = { path = "../ccd-wallet-identity-provider" }
 anyhow.workspace = true

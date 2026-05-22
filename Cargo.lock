@@ -558,6 +558,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bip39",
+ "ccd-wallet-connect",
  "ccd-wallet-core",
  "ccd-wallet-identity-provider",
  "chrono",
@@ -577,6 +578,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ccd-wallet-connect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "ccd-wallet-core",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

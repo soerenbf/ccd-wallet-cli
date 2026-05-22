@@ -93,6 +93,24 @@ Most user-facing setup flows can now prompt for missing non-secret values intera
 
 `network show [NAME]` inspects a configured network and prints `Network configuration` followed by `Consensus (<node endpoint>)`. Bare `network show` uses the active network by default unless `--no-defaults` is supplied. `network show --node <ENDPOINT>` switches into node-only mode: it queries the explicit endpoint, derives the observed genesis hash, prints `Network match(es) (<genesis hash>)` with any matching configured aliases, and then prints consensus details. `network show [NAME] --node <ENDPOINT>` keeps config mode but uses the explicit node as a diagnostic override, warning if the observed genesis hash does not match the configured network.
 
+### Example: pair a browser dApp with the wallet
+
+```bash
+cargo run -p ccd-wallet -- connect
+cargo run -p ccd-wallet -- connect --bind 127.0.0.1:22771
+```
+
+`connect` starts a temporary browser-facing WebSocket session on localhost. It is not a background daemon: the wallet is connectable only while the command is running, and pressing Ctrl-C closes the session.
+
+The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. The initial API is intentionally narrow and supports account-oriented pairing plus session-context retrieval only. Transaction proposal, signing, submission, and governance-key pairing are out of scope for this first connected-wallet flow.
+
+A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and challenge, then asks you to type the same challenge to approve that the visible browser tab matches the terminal request. During approval, the CLI prompts you to choose one configured network and one finalized account. The paired browser can then retrieve only:
+
+- the selected network genesis hash
+- the selected account address
+
+Account labels, seed labels, and the full wallet inventory are not exposed through the browser session context. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active. If a dApp needs a different account or network, stop `connect` and pair again.
+
 ### Example: inspect transaction status and details
 
 ```bash
