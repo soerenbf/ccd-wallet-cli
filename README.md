@@ -105,6 +105,8 @@ pnpm --filter @ccd-wallet/connect-client test
 
 The package lives at `packages/ccd-wallet-connect-client` and currently supports pairing and session-context retrieval only.
 
+The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React integration reference showing how a web application can pair with the wallet and display approved session context.
+
 ### Example: pair a browser dApp with the wallet
 
 ```bash

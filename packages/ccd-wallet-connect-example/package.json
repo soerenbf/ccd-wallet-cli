@@ -1,0 +1,25 @@
+{
+  "name": "@ccd-wallet/connect-example",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Vite + vanilla TypeScript integration reference for ccd-wallet connect.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@ccd-wallet/connect-client": "workspace:*",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "vite": "^8.0.0"
+  }
+}
