@@ -93,6 +93,18 @@ Most user-facing setup flows can now prompt for missing non-secret values intera
 
 `network show [NAME]` inspects a configured network and prints `Network configuration` followed by `Consensus (<node endpoint>)`. Bare `network show` uses the active network by default unless `--no-defaults` is supplied. `network show --node <ENDPOINT>` switches into node-only mode: it queries the explicit endpoint, derives the observed genesis hash, prints `Network match(es) (<genesis hash>)` with any matching configured aliases, and then prints consensus details. `network show [NAME] --node <ENDPOINT>` keeps config mode but uses the explicit node as a diagnostic override, warning if the observed genesis hash does not match the configured network.
 
+### TypeScript workspace and connect client
+
+This repository also contains a pnpm-managed TypeScript workspace for browser-facing packages. The first package is `@ccd-wallet/connect-client`, an environment-flexible client for the `ccd-wallet connect` WebSocket JSON-RPC API.
+
+```bash
+pnpm install
+pnpm --filter @ccd-wallet/connect-client build
+pnpm --filter @ccd-wallet/connect-client test
+```
+
+The package lives at `packages/ccd-wallet-connect-client` and currently supports pairing and session-context retrieval only.
+
 ### Example: pair a browser dApp with the wallet
 
 ```bash

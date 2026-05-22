@@ -1,0 +1,30 @@
+{
+  "name": "@ccd-wallet/connect-client",
+  "version": "0.1.0",
+  "description": "Environment-flexible TypeScript client for ccd-wallet connect sessions.",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "keywords": [
+    "concordium",
+    "ccd-wallet",
+    "wallet",
+    "websocket",
+    "json-rpc"
+  ],
+  "license": "MIT"
+}
