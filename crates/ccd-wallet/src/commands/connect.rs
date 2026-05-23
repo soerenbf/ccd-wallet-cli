@@ -55,20 +55,21 @@ pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
 
 fn approve_pairing(conn: &Connection, request: PairingRequest) -> Result<PairingApproval> {
     cliclack::log::info(format!(
-        "Browser pairing request\norigin: {}\nchallenge: {}",
-        request.origin, request.challenge
+        "Browser pairing request\norigin: {}",
+        request.origin
     ))?;
 
     let expected_challenge = request.challenge.clone();
-    let confirmation: String = input("Type the six-digit browser challenge to approve pairing:")
-        .validate(move |value: &String| {
-            if value == &expected_challenge {
-                Ok(())
-            } else {
-                Err("Challenge does not match.")
-            }
-        })
-        .interact()?;
+    let confirmation: String =
+        input("Enter the six-digit challenge shown in the web application to approve pairing:")
+            .validate(move |value: &String| {
+                if value == &expected_challenge {
+                    Ok(())
+                } else {
+                    Err("Challenge does not match.")
+                }
+            })
+            .interact()?;
     if confirmation != request.challenge {
         bail!("pairing rejected because challenge confirmation did not match");
     }

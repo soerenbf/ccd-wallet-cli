@@ -2,9 +2,7 @@
 
 ## Purpose
 Define the browser-facing pairing flow for `ccd-wallet connect`, including temporary session hosting, origin-aware approval, challenge-based confirmation, fixed session context selection, and browser-readable approved context.
-
 ## Requirements
-
 ### Requirement: The connect API is hosted through a dedicated connect crate
 The browser-pairing WebSocket JSON-RPC API SHALL be implemented in a dedicated `ccd-wallet-connect` crate. The CLI SHALL depend on that crate to host `ccd-wallet connect`, and the connect crate SHALL depend on `ccd-wallet-core` for wallet/domain integration logic rather than reimplementing storage behavior itself.
 
@@ -46,12 +44,15 @@ A browser dApp SHALL NOT be considered paired solely because it can reach the lo
 - **AND** cannot read session context from that rejected attempt
 
 ### Requirement: Pairing uses a richer confirmation ceremony
-The wallet SHALL require a pairing ceremony stronger than an origin-only approval. The browser pairing flow SHALL include an application-provided shared confirmation challenge or pairing code that is visible both in the browser and in the wallet approval UX.
+The wallet SHALL require a pairing ceremony stronger than an origin-only approval. The browser pairing flow SHALL include an application-provided shared confirmation challenge or pairing code that is visible in the browser and validated by the wallet during approval.
 
-#### Scenario: Pairing approval includes an application-provided visible confirmation code
+The wallet approval UX SHALL prompt the user to enter the challenge shown in the calling application. The wallet SHALL validate the entered value against the pairing request challenge, but SHALL NOT redundantly display the challenge value itself in the wallet terminal during approval.
+
+#### Scenario: Pairing approval prompts for the application-displayed challenge
 - **WHEN** a browser dApp requests pairing
-- **THEN** the pairing request includes a confirmation code or challenge
-- **AND** the wallet displays that same code or challenge in the terminal for user comparison before approval completes
+- **THEN** the wallet prompts the user to enter the challenge shown in the browser application
+- **AND** validates the entered value against the challenge supplied in the pairing request
+- **AND** does not display the challenge value itself in the wallet approval prompt
 
 ### Requirement: Approved pairing binds one network and one account as session context
 For account-oriented browser pairing, the wallet SHALL require the user to choose a network and an account during pairing approval. The approved session SHALL bind to exactly that selected network and account for the duration of the session.
@@ -94,3 +95,4 @@ The first browser-pairing endpoint SHALL cover account-oriented pairing only. Go
 - **WHEN** a browser dApp completes account-oriented pairing
 - **THEN** the resulting paired session exposes only the approved account/network context for that flow
 - **AND** does not imply governance-key pairing support
+

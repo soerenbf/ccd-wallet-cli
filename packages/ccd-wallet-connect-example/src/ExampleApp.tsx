@@ -29,6 +29,9 @@ export function ExampleApp() {
       <p className="lead">
         A minimal integration reference for pairing and session context retrieval.
       </p>
+      <p className="lead secondary">
+        When pairing, copy or type the challenge shown here into the wallet prompt.
+      </p>
 
       <section className="panel">
         <label>
@@ -41,7 +44,7 @@ export function ExampleApp() {
         </label>
 
         <label>
-          <span>Pairing challenge</span>
+          <span>Pairing challenge (enter this in the wallet prompt)</span>
           <div className="challenge-row">
             <input
               type="text"

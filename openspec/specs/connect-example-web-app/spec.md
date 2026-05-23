@@ -2,9 +2,7 @@
 
 ## Purpose
 Define the example web application package used as an integration reference for the current `ccd-wallet connect` flow, including package setup, UI scope, connect-client usage, and documentation expectations.
-
 ## Requirements
-
 ### Requirement: Repository provides a browser example app package for connect integration
 The repository SHALL provide a dedicated example web application package under the pnpm workspace for demonstrating browser-side connect integration.
 
@@ -23,10 +21,13 @@ The example application SHALL use Vite with React and TypeScript.
 ### Requirement: Example app demonstrates pairing through the TypeScript connect client
 The example application SHALL depend on `@ccd-wallet/connect-client` and SHALL use the package's public API to perform pairing with an application-provided challenge.
 
+The example application SHALL present the challenge in the browser UI as the value the user must enter into the wallet prompt during pairing.
+
 #### Scenario: Example app pairs through the client package
 - **WHEN** a user triggers pairing in the example application
 - **THEN** the example application calls the TypeScript connect client package rather than reimplementing the protocol directly
 - **AND** sends a pairing request with a visible six-digit challenge
+- **AND** presents that challenge as the value the user should paste or type into the wallet prompt
 
 ### Requirement: Example app displays approved session information
 After a successful pairing flow, the example application SHALL display the returned session token, network genesis hash, and account address.
@@ -56,3 +57,4 @@ The example application SHALL be documented and structured as an integration ref
 - **WHEN** a contributor reads the example application documentation
 - **THEN** the documentation explains that the app is an integration reference for the current connect flow
 - **AND** does not present it as a production-ready wallet frontend
+
