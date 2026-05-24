@@ -2,8 +2,9 @@
  * Shared public types and constants for the connect client package.
  *
  * This module contains the stable type contract exposed by the client,
- * including JSON-RPC envelopes, connect method parameters, session models, and
- * the minimal WebSocket surface required by the package.
+ * including JSON-RPC envelopes, connect method parameters, pairing/session
+ * models, account-request models, and the minimal WebSocket surface required by
+ * the package.
  */
 
 /**
@@ -17,9 +18,9 @@ export const DEFAULT_CONNECT_URL = "ws://127.0.0.1:22771";
 export const PAIR_METHOD = "pair";
 
 /**
- * JSON-RPC method name for retrieving approved session context.
+ * JSON-RPC method name for requesting account authority on a target network.
  */
-export const SESSION_GET_CONTEXT_METHOD = "session.getContext";
+export const REQUEST_ACCOUNT_METHOD = "requestAccount";
 
 /**
  * JSON-RPC 2.0 request identifier type used by the connect protocol.
@@ -98,31 +99,29 @@ export interface PairParams {
 }
 
 /**
- * Parameters for the `session.getContext` method.
- */
-export interface SessionParams {
-  /** Session token returned by a successful pairing request. */
-  sessionToken: string;
-}
-
-/**
- * Approved session context returned by the connect server.
- */
-export interface SessionContext {
-  /** Genesis hash of the approved network for the active session. */
-  networkGenesisHash: string;
-  /** Account address approved for the active session. */
-  accountAddress: string;
-}
-
-/**
  * Successful result of the `pair` method.
  */
 export interface PairResult {
   /** Session token identifying the approved browser session. */
   sessionToken: string;
-  /** Approved network and account context for the session. */
-  context: SessionContext;
+}
+
+/**
+ * Parameters for the `requestAccount` method.
+ */
+export interface RequestAccountParams {
+  /** Session token returned by a successful pairing request. */
+  sessionToken: string;
+  /** Genesis hash of the target network for which account authority is requested. */
+  networkGenesisHash: string;
+}
+
+/**
+ * Successful result of the `requestAccount` method.
+ */
+export interface RequestAccountResult {
+  /** Account address approved for the requested network. */
+  accountAddress: string;
 }
 
 /**

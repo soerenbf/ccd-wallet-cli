@@ -9,7 +9,7 @@ export { ConnectClientError } from "./core/errors.js";
 export {
   DEFAULT_CONNECT_URL,
   PAIR_METHOD,
-  SESSION_GET_CONTEXT_METHOD,
+  REQUEST_ACCOUNT_METHOD,
   type ConnectClientOptions,
   type JsonRpcErrorObject,
   type JsonRpcFailure,
@@ -19,8 +19,8 @@ export {
   type JsonRpcSuccess,
   type PairParams,
   type PairResult,
-  type SessionContext,
-  type SessionParams,
+  type RequestAccountParams,
+  type RequestAccountResult,
   type WebSocketConstructor,
   type WebSocketLike,
 } from "./core/types.js";

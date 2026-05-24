@@ -27,10 +27,11 @@ export function ExampleApp() {
     <main className="example-app">
       <h1>ccd-wallet connect example</h1>
       <p className="lead">
-        A minimal integration reference for pairing and session context retrieval.
+        A minimal integration reference for pairing and account requests.
       </p>
       <p className="lead secondary">
-        When pairing, copy or type the challenge shown here into the wallet prompt.
+        First pair to establish a session, then request an account for the
+        target network.
       </p>
 
       <section className="panel">
@@ -40,6 +41,17 @@ export function ExampleApp() {
             type="text"
             value={state.serverUrl}
             onChange={(event) => model.setServerUrl(event.target.value)}
+          />
+        </label>
+
+        <label>
+          <span>Target network genesis hash</span>
+          <input
+            type="text"
+            value={state.networkGenesisHash}
+            onChange={(event) =>
+              model.setNetworkGenesisHash(event.target.value)
+            }
           />
         </label>
 
@@ -66,9 +78,9 @@ export function ExampleApp() {
           <button
             type="button"
             disabled={!state.sessionToken}
-            onClick={() => void model.refresh()}
+            onClick={() => void model.requestAccount()}
           >
-            Refresh Session Context
+            Request Account
           </button>
           <button type="button" onClick={() => model.reset()}>
             Reset
@@ -83,11 +95,11 @@ export function ExampleApp() {
         <h2>Session token</h2>
         <pre>{state.sessionToken || "—"}</pre>
 
-        <h2>Network genesis hash</h2>
-        <pre>{state.context?.networkGenesisHash ?? "—"}</pre>
+        <h2>Target network genesis hash</h2>
+        <pre>{state.networkGenesisHash || "—"}</pre>
 
         <h2>Account address</h2>
-        <pre>{state.context?.accountAddress ?? "—"}</pre>
+        <pre>{state.accountAddress || "—"}</pre>
       </section>
     </main>
   );

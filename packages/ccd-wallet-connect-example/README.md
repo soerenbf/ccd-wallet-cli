@@ -5,10 +5,11 @@ A minimal Vite 8 + React + TypeScript integration reference for `ccd-wallet conn
 This example app is intentionally small and developer-oriented. It demonstrates the currently supported connect flow only:
 
 - configure the connect-server URL
+- enter the target network genesis hash
 - generate or regenerate a six-digit challenge shown in the browser
 - request pairing through `@ccd-wallet/connect-client`
-- display the returned session token, network genesis hash, and account address
-- refresh approved session context
+- request an account address for the target network using the returned session token
+- display the returned session token and account address
 - reset local example state
 
 It is not a production-ready wallet UI.
@@ -28,7 +29,7 @@ Then open the local Vite URL shown in the terminal. In another terminal, start t
 cargo run -p ccd-wallet -- connect
 ```
 
-During pairing, the browser is the source of truth for the challenge. The app shows the six-digit value and the wallet asks you to enter that same value in the terminal prompt.
+During pairing, the browser is the source of truth for the challenge. Pair first to establish a session, then request an account for the target network.
 
 ## Validate
 

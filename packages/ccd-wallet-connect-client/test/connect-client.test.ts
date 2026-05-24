@@ -69,7 +69,7 @@ test("connect opens the configured WebSocket URL", async () => {
   assert.equal(client.isConnected, true);
 });
 
-test("pair sends JSON-RPC pair request and resolves session data", async () => {
+test("pair sends JSON-RPC pair request and resolves session token", async () => {
   resetMockSockets();
   const client = new ConnectClient({ WebSocket: MockWebSocket });
   const connected = client.connect();
@@ -91,23 +91,15 @@ test("pair sends JSON-RPC pair request and resolves session data", async () => {
     id: 1,
     result: {
       sessionToken: "session-token",
-      context: {
-        networkGenesisHash: "genesis",
-        accountAddress: "addr",
-      },
     },
   });
 
   assert.deepEqual(await paired, {
     sessionToken: "session-token",
-    context: {
-      networkGenesisHash: "genesis",
-      accountAddress: "addr",
-    },
   });
 });
 
-test("getSessionContext sends JSON-RPC session.getContext request", async () => {
+test("requestAccount sends JSON-RPC requestAccount request", async () => {
   resetMockSockets();
   const client = new ConnectClient({ WebSocket: MockWebSocket });
   const connected = client.connect();
@@ -116,27 +108,26 @@ test("getSessionContext sends JSON-RPC session.getContext request", async () => 
   socket.open();
   await connected;
 
-  const context = client.getSessionContext("session-token");
+  const accountAddress = client.requestAccount("session-token", "genesis");
   assert.deepEqual(JSON.parse(socket.sent[0] ?? "{}"), {
     jsonrpc: "2.0",
     id: 1,
-    method: "session.getContext",
-    params: { sessionToken: "session-token" },
+    method: "requestAccount",
+    params: {
+      sessionToken: "session-token",
+      networkGenesisHash: "genesis",
+    },
   });
 
   socket.receive({
     jsonrpc: "2.0",
     id: 1,
     result: {
-      networkGenesisHash: "genesis",
       accountAddress: "addr",
     },
   });
 
-  assert.deepEqual(await context, {
-    networkGenesisHash: "genesis",
-    accountAddress: "addr",
-  });
+  assert.equal(await accountAddress, "addr");
 });
 
 test("JSON-RPC error responses reject with ConnectClientError", async () => {

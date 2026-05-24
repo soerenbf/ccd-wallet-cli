@@ -67,17 +67,25 @@ For account-oriented browser pairing, the wallet SHALL require the user to choos
 - **AND** the session does not silently switch to a different network or account
 
 ### Requirement: Paired browsers can read the approved session context over the session channel
-After a browser dApp has been successfully paired, it SHALL be able to query the approved session context for that session over the same WebSocket channel using JSON-RPC 2.0 semantics used for pairing. The context SHALL include the selected network identity as genesis hash and the selected account address needed for dApp preparation work.
+After a browser dApp has been successfully paired, the pairing response SHALL return only the approved session token for that session over the same WebSocket channel using JSON-RPC 2.0 semantics used for pairing. The pairing response SHALL NOT directly include selected network or account context.
 
-#### Scenario: Paired browser can read selected network genesis hash and account address
+A paired browser dApp SHALL be able to request account authority explicitly for a target network by supplying the session token and network genesis hash. When the wallet approves that request, it SHALL return the selected account address for that network.
+
+#### Scenario: Successful pairing returns a session token only
 - **WHEN** a browser dApp has completed pairing successfully
-- **THEN** it can retrieve the approved session context
-- **AND** that context includes the selected network genesis hash and selected account address
+- **THEN** the pairing response includes the session token
+- **AND** does not directly include selected network or account context
 
-#### Scenario: Session context is scoped to the approved pairing
+#### Scenario: Paired browser can request an account address for a network
+- **WHEN** a browser dApp has completed pairing successfully
+- **AND** it requests account authority for a specific network genesis hash using its session token
+- **THEN** the wallet can approve an account for that network
+- **AND** returns the selected account address
+
+#### Scenario: Account requests remain scoped to the approved pairing
 - **WHEN** one browser pairing has been approved
 - **AND** another browser has not been approved
-- **THEN** only the approved pairing can read its session context
+- **THEN** only the approved pairing can successfully request account authority for a network using its session token
 
 ### Requirement: Only one paired browser session is active at a time
 The first browser-pairing flow SHALL support only one active paired browser session at a time.

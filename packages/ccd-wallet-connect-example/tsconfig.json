@@ -5,6 +5,10 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "@ccd-wallet/connect-client": ["../ccd-wallet-connect-client/src/index.ts"]
+    },
     "strict": true,
     "noEmit": true,
     "verbatimModuleSyntax": true,

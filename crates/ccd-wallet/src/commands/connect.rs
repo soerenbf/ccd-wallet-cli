@@ -4,11 +4,12 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use ccd_wallet_connect::{
-    ConnectServer, PairingApproval, PairingRejection, PairingRequest, SessionContext,
+    AccountRequest, AccountRequestApproval, ConnectServer, PairingApproval, PairingRejection,
+    PairingRequest,
 };
 use ccd_wallet_core::store::{
     accounts::{self, AccountRecord, AccountSourceKind, AccountStatus},
-    config::{NetworkEntry, load},
+    config::{self, load},
     seeds,
 };
 use cliclack::{input, password};
@@ -20,23 +21,43 @@ use tokio::sync::oneshot;
 pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
     let conn = Arc::new(Mutex::new(conn));
     let server_conn = Arc::clone(&conn);
-    let server = ConnectServer::new(move |request| {
-        let conn = Arc::clone(&server_conn);
-        async move {
-            let conn = conn
-                .lock()
-                .map_err(|_| PairingRejection::new("wallet database connection is unavailable"))?;
-            match approve_pairing(&conn, request) {
-                Ok(approval) => Ok(approval),
-                Err(err) => {
-                    let message = err.to_string();
-                    let _ = cliclack::log::error(&message);
-                    Err(PairingRejection::new(message))
+    let account_conn = Arc::clone(&conn);
+    let server = ConnectServer::new(
+        move |request| {
+            let conn = Arc::clone(&server_conn);
+            async move {
+                let conn = conn.lock().map_err(|_| {
+                    PairingRejection::new("wallet database connection is unavailable")
+                })?;
+                match approve_pairing(&conn, request) {
+                    Ok(approval) => Ok(approval),
+                    Err(err) => {
+                        let message = err.to_string();
+                        let _ = cliclack::log::error(&message);
+                        Err(PairingRejection::new(message))
+                    }
                 }
             }
-        }
-        .boxed()
-    });
+            .boxed()
+        },
+        move |request| {
+            let conn = Arc::clone(&account_conn);
+            async move {
+                let conn = conn.lock().map_err(|_| {
+                    PairingRejection::new("wallet database connection is unavailable")
+                })?;
+                match approve_account_request(&conn, request) {
+                    Ok(approval) => Ok(approval),
+                    Err(err) => {
+                        let message = err.to_string();
+                        let _ = cliclack::log::error(&message);
+                        Err(PairingRejection::new(message))
+                    }
+                }
+            }
+            .boxed()
+        },
+    );
 
     println!(
         "Starting ccd-wallet browser pairing session on ws://{}",
@@ -53,7 +74,7 @@ pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
     server.serve(args.bind, shutdown_rx).await
 }
 
-fn approve_pairing(conn: &Connection, request: PairingRequest) -> Result<PairingApproval> {
+fn approve_pairing(_conn: &Connection, request: PairingRequest) -> Result<PairingApproval> {
     cliclack::log::info(format!(
         "Browser pairing request\norigin: {}",
         request.origin
@@ -74,44 +95,35 @@ fn approve_pairing(conn: &Connection, request: PairingRequest) -> Result<Pairing
         bail!("pairing rejected because challenge confirmation did not match");
     }
 
-    let (network_name, network_entry) = select_network()?;
-    let account = select_account(conn, &network_entry.genesis_hash)?;
+    cliclack::log::success(format!("Paired {}.", request.origin))?;
+
+    Ok(PairingApproval)
+}
+
+fn approve_account_request(
+    conn: &Connection,
+    request: AccountRequest,
+) -> Result<AccountRequestApproval> {
+    let network_name = resolve_network_display_name(&request.network_genesis_hash)?;
+    let account = select_account(conn, &request.network_genesis_hash)?;
     let account_address = read_account_address(conn, &account, &network_name)?;
 
     cliclack::log::success(format!(
-        "Paired {} with account {} on network {}.",
-        request.origin, account_address, network_name
+        "Approved account {} for network {}.",
+        account_address, network_name
     ))?;
 
-    Ok(PairingApproval {
-        context: SessionContext {
-            network_genesis_hash: network_entry.genesis_hash,
-            account_address,
-        },
-    })
+    Ok(AccountRequestApproval { account_address })
 }
 
-fn select_network() -> Result<(String, NetworkEntry)> {
-    let app_config = load()?;
-    if app_config.networks.is_empty() {
-        bail!("no networks are configured; run `ccd-wallet network add` first");
+fn resolve_network_display_name(network_genesis_hash: &str) -> Result<String> {
+    let config = load()?;
+    let matches = config::aliases_by_genesis_hash(&config, network_genesis_hash);
+    if matches.is_empty() {
+        Ok(network_genesis_hash.to_owned())
+    } else {
+        Ok(matches.join(", "))
     }
-    let entries = app_config.networks.into_iter().collect::<Vec<_>>();
-    let items = entries
-        .iter()
-        .map(|(name, entry)| SelectItem {
-            value: name.clone(),
-            label: name.clone(),
-            hint: entry.node_endpoint.clone(),
-        })
-        .collect::<Vec<_>>();
-    let selected = select_or_single("Select network for browser session", &items, None)?;
-    let entry = entries
-        .into_iter()
-        .find(|(name, _)| name == &selected)
-        .map(|(_, entry)| entry)
-        .context("selected network was not found")?;
-    Ok((selected, entry))
 }
 
 fn select_account(conn: &Connection, network_genesis_hash: &str) -> Result<AccountRecord> {

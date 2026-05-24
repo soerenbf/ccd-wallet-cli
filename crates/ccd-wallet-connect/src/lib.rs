@@ -17,13 +17,11 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 pub const PAIR_METHOD: &str = "pair";
-pub const SESSION_GET_CONTEXT_METHOD: &str = "session.getContext";
+pub const REQUEST_ACCOUNT_METHOD: &str = "requestAccount";
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionContext {
-    #[serde(rename = "networkGenesisHash")]
-    pub network_genesis_hash: String,
+pub struct RequestAccountResult {
     #[serde(rename = "accountAddress")]
     pub account_address: String,
 }
@@ -35,8 +33,16 @@ pub struct PairingRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PairingApproval {
-    pub context: SessionContext,
+pub struct PairingApproval;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountRequest {
+    pub network_genesis_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountRequestApproval {
+    pub account_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,14 +66,24 @@ type PairingApprover = Arc<
         + Sync,
 >;
 
+type AccountRequester = Arc<
+    dyn Fn(
+            AccountRequest,
+        )
+            -> BoxFuture<'static, std::result::Result<AccountRequestApproval, PairingRejection>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct ConnectServer {
     approver: PairingApprover,
+    account_requester: AccountRequester,
     state: Arc<Mutex<ServerState>>,
 }
 
 impl ConnectServer {
-    pub fn new<F>(approver: F) -> Self
+    pub fn new<F, G>(approver: F, account_requester: G) -> Self
     where
         F: Fn(
                 PairingRequest,
@@ -76,9 +92,17 @@ impl ConnectServer {
             + Send
             + Sync
             + 'static,
+        G: Fn(
+                AccountRequest,
+            )
+                -> BoxFuture<'static, std::result::Result<AccountRequestApproval, PairingRejection>>
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             approver: Arc::new(approver),
+            account_requester: Arc::new(account_requester),
             state: Arc::new(Mutex::new(ServerState::default())),
         }
     }
@@ -169,7 +193,7 @@ impl ConnectServer {
 
         match request.method.as_str() {
             PAIR_METHOD => self.handle_pair(id, origin, request.params).await,
-            SESSION_GET_CONTEXT_METHOD => self.handle_get_context(id, request.params),
+            REQUEST_ACCOUNT_METHOD => self.handle_request_account(id, request.params).await,
             _ => json_rpc_error(id, -32601, "method not found"),
         }
     }
@@ -192,20 +216,18 @@ impl ConnectServer {
             challenge: params.challenge,
         };
         match (self.approver)(request).await {
-            Ok(approval) => {
+            Ok(_approval) => {
                 let token = Uuid::new_v4().to_string();
                 let session = ActiveSession {
                     token: token.clone(),
-                    context: approval.context,
                 };
-                if !self.install_session(session.clone()) {
+                if !self.install_session(session) {
                     return json_rpc_error(id, -32001, "a browser session is already active");
                 }
                 json_rpc_result(
                     id,
                     json!({
                         "sessionToken": token,
-                        "context": session.context,
                     }),
                 )
             }
@@ -213,20 +235,31 @@ impl ConnectServer {
         }
     }
 
-    fn handle_get_context(&self, id: Option<Value>, params: Option<Value>) -> String {
+    async fn handle_request_account(&self, id: Option<Value>, params: Option<Value>) -> String {
         let params = match params
-            .map(serde_json::from_value::<SessionParams>)
+            .map(serde_json::from_value::<RequestAccountParams>)
             .transpose()
         {
             Ok(Some(params)) => params,
-            Ok(None) => return json_rpc_error(id, -32602, "session params are required"),
+            Ok(None) => return json_rpc_error(id, -32602, "requestAccount params are required"),
             Err(err) => {
-                return json_rpc_error(id, -32602, format!("invalid session params: {err}"));
+                return json_rpc_error(id, -32602, format!("invalid requestAccount params: {err}"));
             }
         };
         match self.active_session() {
             Some(session) if session.token == params.session_token => {
-                json_rpc_result(id, json!(session.context))
+                let request = AccountRequest {
+                    network_genesis_hash: params.network_genesis_hash,
+                };
+                match (self.account_requester)(request).await {
+                    Ok(approval) => json_rpc_result(
+                        id,
+                        json!(RequestAccountResult {
+                            account_address: approval.account_address,
+                        }),
+                    ),
+                    Err(rejection) => json_rpc_error(id, -32000, rejection.message),
+                }
             }
             Some(_) => json_rpc_error(id, -32003, "invalid session token"),
             None => json_rpc_error(id, -32002, "no active browser session"),
@@ -255,7 +288,6 @@ impl ConnectServer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveSession {
     token: String,
-    context: SessionContext,
 }
 
 #[derive(Default)]
@@ -290,9 +322,11 @@ struct PairParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct SessionParams {
+struct RequestAccountParams {
     #[serde(rename = "sessionToken")]
     session_token: String,
+    #[serde(rename = "networkGenesisHash")]
+    network_genesis_hash: String,
 }
 
 async fn read_handshake_request(stream: &mut TcpStream) -> Result<HandshakeRequest> {
@@ -471,8 +505,8 @@ pub fn method_descriptions() -> BTreeMap<&'static str, &'static str> {
     BTreeMap::from([
         (PAIR_METHOD, "request browser pairing"),
         (
-            SESSION_GET_CONTEXT_METHOD,
-            "retrieve approved session network genesis hash and account address",
+            REQUEST_ACCOUNT_METHOD,
+            "request an approved account address for a target network",
         ),
     ])
 }
@@ -553,17 +587,17 @@ mod tests {
     use futures_util::FutureExt;
 
     fn server() -> ConnectServer {
-        ConnectServer::new(|_| {
-            async move {
-                Ok(PairingApproval {
-                    context: SessionContext {
-                        network_genesis_hash: "genesis".to_owned(),
+        ConnectServer::new(
+            |_| async move { Ok(PairingApproval) }.boxed(),
+            |_| {
+                async move {
+                    Ok(AccountRequestApproval {
                         account_address: "addr".to_owned(),
-                    },
-                })
-            }
-            .boxed()
-        })
+                    })
+                }
+                .boxed()
+            },
+        )
     }
 
     #[test]
@@ -591,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pairing_success_returns_token_and_context_then_allows_context_read() {
+    async fn pairing_success_returns_token_only_and_request_account_uses_it() {
         let server = server();
         let response = server
             .handle_text_message(
@@ -601,8 +635,7 @@ mod tests {
             .await;
         let value: Value = serde_json::from_str(&response).unwrap();
         let token = value["result"]["sessionToken"].as_str().unwrap();
-        assert_eq!(value["result"]["context"]["networkGenesisHash"], "genesis");
-        assert_eq!(value["result"]["context"]["accountAddress"], "addr");
+        assert_eq!(value["result"].get("context"), None);
 
         let response = server
             .handle_text_message(
@@ -610,22 +643,32 @@ mod tests {
                 &json!({
                     "jsonrpc": "2.0",
                     "id": 2,
-                    "method": SESSION_GET_CONTEXT_METHOD,
-                    "params": { "sessionToken": token }
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "genesis"
+                    }
                 })
                 .to_string(),
             )
             .await;
         let value: Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(value["result"]["networkGenesisHash"], "genesis");
         assert_eq!(value["result"]["accountAddress"], "addr");
     }
 
     #[tokio::test]
     async fn rejected_pairing_returns_error() {
-        let server = ConnectServer::new(|_| {
-            async move { Err(PairingRejection::new("rejected by user")) }.boxed()
-        });
+        let server = ConnectServer::new(
+            |_| async move { Err(PairingRejection::new("rejected by user")) }.boxed(),
+            |_| {
+                async move {
+                    Ok(AccountRequestApproval {
+                        account_address: "addr".to_owned(),
+                    })
+                }
+                .boxed()
+            },
+        );
         let response = server
             .handle_text_message(
                 "https://example.com",

@@ -7,7 +7,7 @@ The package wraps the current connect protocol:
 - WebSocket transport
 - JSON-RPC 2.0 requests/responses
 - `pair` with an application-provided challenge
-- `session.getContext` with a session token
+- `requestAccount` with a session token and network genesis hash
 
 It intentionally does not include transaction proposal, signing, submission, or governance-key pairing APIs yet.
 
@@ -34,17 +34,18 @@ const client = createConnectClient({
 await client.connect();
 
 const pairing = await client.pair("123456");
+const accountAddress = await client.requestAccount(
+  pairing.sessionToken,
+  "network-genesis-hash",
+);
 
 console.log(pairing.sessionToken);
-console.log(pairing.context.networkGenesisHash);
-console.log(pairing.context.accountAddress);
-
-const context = await client.getSessionContext(pairing.sessionToken);
+console.log(accountAddress);
 
 client.close();
 ```
 
-The application is responsible for displaying the same six-digit challenge to the user while the CLI asks the user to confirm it.
+The application is responsible for displaying the same six-digit challenge to the user while the CLI asks the user to enter it.
 
 ## Runtime compatibility
 

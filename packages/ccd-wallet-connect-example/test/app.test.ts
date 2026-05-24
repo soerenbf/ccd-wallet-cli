@@ -10,7 +10,7 @@ import {
 class FakeClient implements ConnectClientLike {
   connected = false;
   pairingCalls: string[] = [];
-  refreshCalls: string[] = [];
+  accountCalls: Array<{ sessionToken: string; networkGenesisHash: string }> = [];
   closeCalls = 0;
 
   async connect(): Promise<void> {
@@ -21,19 +21,12 @@ class FakeClient implements ConnectClientLike {
     this.pairingCalls.push(challenge);
     return {
       sessionToken: "session-token",
-      context: {
-        networkGenesisHash: "genesis",
-        accountAddress: "addr",
-      },
     };
   }
 
-  async getSessionContext(sessionToken: string) {
-    this.refreshCalls.push(sessionToken);
-    return {
-      networkGenesisHash: "genesis-2",
-      accountAddress: "addr-2",
-    };
+  async requestAccount(sessionToken: string, networkGenesisHash: string) {
+    this.accountCalls.push({ sessionToken, networkGenesisHash });
+    return "addr";
   }
 
   close(): void {
@@ -41,11 +34,12 @@ class FakeClient implements ConnectClientLike {
   }
 }
 
-test("pairing uses the client package flow and stores approved session data", async () => {
+test("pairing establishes a session token first", async () => {
   const fakeClient = new FakeClient();
   const model = createExampleAppModel({
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
   });
 
   await model.pair();
@@ -53,32 +47,30 @@ test("pairing uses the client package flow and stores approved session data", as
   assert.deepEqual(fakeClient.pairingCalls, ["123456"]);
   assert.deepEqual(model.getState(), {
     serverUrl: "ws://127.0.0.1:22771",
+    networkGenesisHash: "genesis",
     challenge: "123456",
-    status: "Pairing approved.",
+    status: "Pairing approved. Request an account for the target network.",
     sessionToken: "session-token",
-    context: {
-      networkGenesisHash: "genesis",
-      accountAddress: "addr",
-    },
+    accountAddress: "",
   });
 });
 
-test("refresh retrieves approved session context again", async () => {
+test("requestAccount requests account authority for the target network", async () => {
   const fakeClient = new FakeClient();
   const model = createExampleAppModel({
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
   });
 
   await model.pair();
-  await model.refresh();
+  await model.requestAccount();
 
-  assert.deepEqual(fakeClient.refreshCalls, ["session-token"]);
-  assert.deepEqual(model.getState().context, {
-    networkGenesisHash: "genesis-2",
-    accountAddress: "addr-2",
-  });
-  assert.equal(model.getState().status, "Session context refreshed.");
+  assert.deepEqual(fakeClient.accountCalls, [
+    { sessionToken: "session-token", networkGenesisHash: "genesis" },
+  ]);
+  assert.equal(model.getState().accountAddress, "addr");
+  assert.equal(model.getState().status, "Account approved.");
 });
 
 test("reset clears local session state and regenerates the challenge", async () => {
@@ -87,17 +79,20 @@ test("reset clears local session state and regenerates the challenge", async () 
   const model = createExampleAppModel({
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => challenges.shift() ?? "000000",
+    initialNetworkGenesisHash: "genesis",
   });
 
   await model.pair();
+  await model.requestAccount();
   model.reset();
 
   assert.equal(fakeClient.closeCalls, 1);
   assert.deepEqual(model.getState(), {
     serverUrl: "ws://127.0.0.1:22771",
+    networkGenesisHash: "genesis",
     challenge: "654321",
     status: "Ready to pair.",
     sessionToken: "",
-    context: null,
+    accountAddress: "",
   });
 });

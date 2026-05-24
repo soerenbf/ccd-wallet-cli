@@ -103,9 +103,9 @@ pnpm --filter @ccd-wallet/connect-client build
 pnpm --filter @ccd-wallet/connect-client test
 ```
 
-The package lives at `packages/ccd-wallet-connect-client` and currently supports pairing and session-context retrieval only.
+The package lives at `packages/ccd-wallet-connect-client` and currently supports pairing and explicit account requests by network.
 
-The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React integration reference showing how a web application can pair with the wallet and display approved session context.
+The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React integration reference showing how a web application can pair with the wallet and request an account for a target network.
 
 ### Example: pair a browser dApp with the wallet
 
@@ -116,14 +116,11 @@ cargo run -p ccd-wallet -- connect --bind 127.0.0.1:22771
 
 `connect` starts a temporary browser-facing WebSocket session on localhost. It is not a background daemon: the wallet is connectable only while the command is running, and pressing Ctrl-C closes the session.
 
-The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. The initial API is intentionally narrow and supports account-oriented pairing plus session-context retrieval only. Transaction proposal, signing, submission, and governance-key pairing are out of scope for this first connected-wallet flow.
+The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. The initial API is intentionally narrow and supports session pairing plus explicit account requests by network only. Transaction proposal, signing, submission, and governance-key pairing are out of scope for this first connected-wallet flow.
 
-A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and challenge, then asks you to type the same challenge to approve that the visible browser tab matches the terminal request. During approval, the CLI prompts you to choose one configured network and one finalized account. The paired browser can then retrieve only:
+A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and asks you to type the same challenge to approve that the visible browser tab matches the terminal request. Successful pairing returns only a session token. The application can then request an approved account address for a target network by supplying that session token together with the network genesis hash.
 
-- the selected network genesis hash
-- the selected account address
-
-Account labels, seed labels, and the full wallet inventory are not exposed through the browser session context. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active. If a dApp needs a different account or network, stop `connect` and pair again.
+Account labels, seed labels, and the full wallet inventory are not exposed through the browser API. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active.
 
 ### Example: inspect transaction status and details
 

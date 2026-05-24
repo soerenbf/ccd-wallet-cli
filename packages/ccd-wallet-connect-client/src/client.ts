@@ -19,8 +19,8 @@ import {
   normalizeMessageData,
   resolveGlobalWebSocket,
 } from "./core/websocket.js";
+import { requestAccount } from "./features/account.js";
 import { pair } from "./features/pairing.js";
-import { getSessionContext } from "./features/session.js";
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -32,7 +32,7 @@ interface PendingRequest {
  *
  * The client keeps a single WebSocket connection open, correlates JSON-RPC
  * requests and responses, and exposes a flat API for the currently supported
- * pairing and session-context methods.
+ * pairing and account-request methods.
  *
  * @example
  * ```ts
@@ -41,7 +41,10 @@ interface PendingRequest {
  * const client = new ConnectClient();
  * await client.connect();
  * const pairing = await client.pair("123456");
- * const context = await client.getSessionContext(pairing.sessionToken);
+ * const accountAddress = await client.requestAccount(
+ *   pairing.sessionToken,
+ *   "network-genesis-hash",
+ * );
  * client.close();
  * ```
  */
@@ -148,8 +151,7 @@ export class ConnectClient {
    *
    * @param challenge - Six-digit challenge shown to the user in the calling
    * application.
-   * @returns The approved session token and session context returned by the
-   * connect server.
+   * @returns The approved session token returned by the connect server.
    * @throws {ConnectClientError} If the socket is not open, the server rejects
    * pairing, or the response is invalid.
    * @example
@@ -162,19 +164,23 @@ export class ConnectClient {
   }
 
   /**
-   * Retrieves approved session context for an active session token.
+   * Requests an approved account address for a target network.
    *
    * @param sessionToken - Session token returned by a successful pairing call.
-   * @returns The approved network genesis hash and account address.
+   * @param networkGenesisHash - Genesis hash of the target network.
+   * @returns The approved account address for the requested network.
    * @throws {ConnectClientError} If the socket is not open, the token is
    * invalid, or the response is invalid.
    * @example
    * ```ts
-   * const context = await client.getSessionContext(pairing.sessionToken);
+   * const accountAddress = await client.requestAccount(
+   *   pairing.sessionToken,
+   *   "network-genesis-hash",
+   * );
    * ```
    */
-  getSessionContext(sessionToken: string) {
-    return getSessionContext(this, sessionToken);
+  requestAccount(sessionToken: string, networkGenesisHash: string) {
+    return requestAccount(this, sessionToken, networkGenesisHash);
   }
 
   /**
@@ -192,8 +198,9 @@ export class ConnectClient {
    * is returned.
    * @example
    * ```ts
-   * const result = await client.request("session.getContext", {
+   * const result = await client.request("requestAccount", {
    *   sessionToken: "token",
+   *   networkGenesisHash: "network-genesis-hash",
    * });
    * ```
    */

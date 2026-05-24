@@ -11,7 +11,6 @@ import {
   type ConnectClient,
   type ConnectClientOptions,
   type PairResult,
-  type SessionContext,
 } from "@ccd-wallet/connect-client";
 
 /**
@@ -20,14 +19,16 @@ import {
 export interface ExampleAppState {
   /** WebSocket URL used for the local connect server. */
   serverUrl: string;
+  /** Genesis hash of the target network requested by the application. */
+  networkGenesisHash: string;
   /** Six-digit challenge shown to the user before pairing. */
   challenge: string;
   /** Human-readable status message for the current flow state. */
   status: string;
   /** Session token returned by successful pairing, if available. */
   sessionToken: string;
-  /** Approved session context returned by the connect flow, if available. */
-  context: SessionContext | null;
+  /** Account address returned by a successful account request, if available. */
+  accountAddress: string;
 }
 
 /**
@@ -38,8 +39,11 @@ export interface ConnectClientLike {
   connect(): Promise<void>;
   /** Requests pairing with an application-provided challenge. */
   pair(challenge: string): Promise<PairResult>;
-  /** Retrieves approved session context using a session token. */
-  getSessionContext(sessionToken: string): Promise<SessionContext>;
+  /** Requests an account address for a session token and target network. */
+  requestAccount(
+    sessionToken: string,
+    networkGenesisHash: string,
+  ): Promise<string>;
   /** Closes the current WebSocket connection. */
   close(): void;
 }
@@ -64,14 +68,16 @@ export interface ExampleAppModel {
   getState(): ExampleAppState;
   /** Updates the connect-server URL used for future pairing attempts. */
   setServerUrl(url: string): void;
+  /** Updates the target network genesis hash. */
+  setNetworkGenesisHash(networkGenesisHash: string): void;
   /** Updates the displayed pairing challenge. */
   setChallenge(challenge: string): void;
   /** Replaces the current challenge with a newly generated one. */
   regenerateChallenge(): void;
   /** Requests pairing through the connect client package. */
   pair(): Promise<void>;
-  /** Refreshes approved session context for the active session token. */
-  refresh(): Promise<void>;
+  /** Requests an account address for the configured target network. */
+  requestAccount(): Promise<void>;
   /** Resets local UI state and closes any active client connection. */
   reset(): void;
   /** Registers a callback invoked whenever state changes. */
@@ -88,6 +94,8 @@ export interface ExampleAppModelOptions {
   challengeGenerator?: ChallengeGenerator;
   /** Optional initial connect-server URL. */
   initialServerUrl?: string;
+  /** Optional initial target network genesis hash. */
+  initialNetworkGenesisHash?: string;
 }
 
 /**
@@ -112,6 +120,12 @@ export function generateChallenge(): string {
   return Array.from(bytes, (value) => (value % 10).toString()).join("");
 }
 
+const DEFAULT_OPTS = {
+  // testnet genesis hash
+  initialNetworkGenesisHash:
+    "4221332d34e1694168c2a0c0b3fd0f273809612cb13d000d5c2e00e85f50f796",
+} satisfies ExampleAppModelOptions;
+
 /**
  * Creates the stateful model backing the example app.
  *
@@ -121,10 +135,11 @@ export function generateChallenge(): string {
  * ```ts
  * const model = createExampleAppModel();
  * await model.pair();
+ * await model.requestAccount();
  * ```
  */
 export function createExampleAppModel(
-  options: ExampleAppModelOptions = {},
+  options: ExampleAppModelOptions = DEFAULT_OPTS,
 ): ExampleAppModel {
   const clientFactory = options.clientFactory ?? defaultClientFactory;
   const challengeGenerator = options.challengeGenerator ?? generateChallenge;
@@ -132,10 +147,11 @@ export function createExampleAppModel(
 
   let state: ExampleAppState = {
     serverUrl: options.initialServerUrl ?? DEFAULT_CONNECT_URL,
+    networkGenesisHash: options.initialNetworkGenesisHash ?? "",
     challenge: challengeGenerator(),
     status: "Ready to pair.",
     sessionToken: "",
-    context: null,
+    accountAddress: "",
   };
   let client: ConnectClientLike | undefined;
 
@@ -164,6 +180,10 @@ export function createExampleAppModel(
       update({ serverUrl: url });
     },
 
+    setNetworkGenesisHash(networkGenesisHash: string): void {
+      update({ networkGenesisHash });
+    },
+
     setChallenge(challenge: string): void {
       update({ challenge });
     },
@@ -174,38 +194,50 @@ export function createExampleAppModel(
 
     async pair(): Promise<void> {
       closeClient();
-      update({ status: "Connecting and requesting pairing..." });
+      update({
+        status: "Connecting and requesting pairing...",
+        accountAddress: "",
+      });
       try {
         client = clientFactory({ url: state.serverUrl });
         await client.connect();
         const result = await client.pair(state.challenge);
         update({
-          status: "Pairing approved.",
+          status:
+            "Pairing approved. Request an account for the target network.",
           sessionToken: result.sessionToken,
-          context: result.context,
         });
       } catch (error) {
         closeClient();
         update({
           status: formatErrorStatus(error),
           sessionToken: "",
-          context: null,
+          accountAddress: "",
         });
       }
     },
 
-    async refresh(): Promise<void> {
+    async requestAccount(): Promise<void> {
       if (!client || !state.sessionToken) {
-        update({ status: "No active session to refresh." });
+        update({ status: "No active session. Pair first." });
+        return;
+      }
+      if (!state.networkGenesisHash) {
+        update({ status: "Enter a target network genesis hash first." });
         return;
       }
 
-      update({ status: "Refreshing approved session context..." });
+      update({
+        status: "Requesting account authority for the target network...",
+      });
       try {
-        const context = await client.getSessionContext(state.sessionToken);
-        update({ status: "Session context refreshed.", context });
+        const accountAddress = await client.requestAccount(
+          state.sessionToken,
+          state.networkGenesisHash,
+        );
+        update({ status: "Account approved.", accountAddress });
       } catch (error) {
-        update({ status: formatErrorStatus(error) });
+        update({ status: formatErrorStatus(error), accountAddress: "" });
       }
     },
 
@@ -213,10 +245,11 @@ export function createExampleAppModel(
       closeClient();
       state = {
         serverUrl: state.serverUrl,
+        networkGenesisHash: state.networkGenesisHash,
         challenge: challengeGenerator(),
         status: "Ready to pair.",
         sessionToken: "",
-        context: null,
+        accountAddress: "",
       };
       emit();
     },

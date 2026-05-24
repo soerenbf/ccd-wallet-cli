@@ -2,9 +2,7 @@
 
 ## Purpose
 Define the repository's TypeScript connect client package, including pnpm workspace support, the combined client package boundary, pairing and session-context retrieval behavior, and environment-flexible browser-oriented API expectations.
-
 ## Requirements
-
 ### Requirement: Repository provides a pnpm-managed TypeScript workspace for browser-facing packages
 The repository SHALL provide a pnpm-managed JavaScript/TypeScript workspace for non-Rust packages. The workspace SHALL support the first connect client package while leaving a path for future additional packages.
 
@@ -31,20 +29,20 @@ The TypeScript connect client SHALL allow a web application to initiate pairing 
 - **AND** includes the supplied challenge in the request parameters
 
 ### Requirement: TypeScript connect client returns approved session information from pairing
-When pairing succeeds, the TypeScript connect client SHALL expose the resulting session token and approved session context returned by the connect server.
+When pairing succeeds, the TypeScript connect client SHALL expose only the resulting session token returned by the connect server. The pairing API SHALL NOT require the client to treat network or account context as part of the pairing response.
 
-#### Scenario: Successful pairing returns session token and approved context
+#### Scenario: Successful pairing returns session token only
 - **WHEN** the connect server approves a pairing request
 - **THEN** the client resolves the pairing call with the returned session token
-- **AND** includes the approved session context returned by the server
+- **AND** does not require approved network or account context to be present in the pairing result
 
 ### Requirement: TypeScript connect client can retrieve approved session context
-The TypeScript connect client SHALL allow an application to retrieve approved session context for an active session by calling the server's session-context method with the session token.
+The TypeScript connect client SHALL allow an application to request account authority for a target network by calling a dedicated client API with the session token and network genesis hash. When the server approves that request, the client SHALL resolve with the returned account address.
 
-#### Scenario: Client retrieves approved session context
-- **WHEN** an application calls the client session-context API with an active session token
+#### Scenario: Client requests an account address for a network
+- **WHEN** an application calls the client account-request API with an active session token and network genesis hash
 - **THEN** the client sends the appropriate JSON-RPC 2.0 request to the connect server
-- **AND** resolves with the approved network genesis hash and account address returned by the server
+- **AND** resolves with the approved account address returned by the server
 
 ### Requirement: TypeScript connect client is web-compatible and environment-flexible
 The TypeScript connect client SHALL be usable from browser-oriented applications and SHALL avoid requiring Node-specific runtime assumptions in its core API design.
@@ -53,3 +51,4 @@ The TypeScript connect client SHALL be usable from browser-oriented applications
 - **WHEN** an application integrates the core TypeScript connect client
 - **THEN** the public client API does not require Node-only globals or Node-only transport primitives
 - **AND** remains suitable for browser-oriented use
+
