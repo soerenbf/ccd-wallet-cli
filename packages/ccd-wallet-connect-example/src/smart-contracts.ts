@@ -12,6 +12,8 @@ import {
 } from "@concordium/web-sdk/schema";
 import {
   ContractAddress,
+  ContractName,
+  EntrypointName,
   ModuleReference,
   type ContractAddress as ContractAddressNamespace,
 } from "@concordium/web-sdk/types";
@@ -115,6 +117,7 @@ export async function prepareInitContractParameters(
     parameterJson,
     rawSchema.buffer,
     rawSchema.type === "unversioned" ? rawSchema.version : undefined,
+    true,
   );
 
   return {
@@ -157,6 +160,7 @@ export async function prepareUpdateContractParameters(
     parameterJson,
     rawSchema.buffer,
     rawSchema.type === "unversioned" ? rawSchema.version : undefined,
+    true,
   );
 
   return {
@@ -263,13 +267,21 @@ function toBase64(buffer: ArrayBuffer): string {
 function asContractName(
   value: string,
 ): Parameters<typeof serializeInitContractParameters>[0] {
-  return value.trim() as unknown as Parameters<typeof serializeInitContractParameters>[0];
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error("Contract name must not be empty.");
+  }
+  return ContractName.fromString(normalized);
 }
 
 function asEntrypointName(
   value: string,
 ): Parameters<typeof serializeUpdateContractParameters>[1] {
-  return value.trim() as unknown as Parameters<typeof serializeUpdateContractParameters>[1];
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error("Entrypoint name must not be empty.");
+  }
+  return EntrypointName.fromString(normalized);
 }
 
 function toHexString(value: unknown): string {

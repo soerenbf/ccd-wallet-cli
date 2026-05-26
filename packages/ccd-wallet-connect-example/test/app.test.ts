@@ -68,6 +68,7 @@ class FakeSmartContractTools implements SmartContractTools {
     entrypointName: string;
     parameterJson: string;
   }> = [];
+  nextError: unknown = null;
 
   async prepareInit(input: {
     nodeEndpoint: string;
@@ -75,6 +76,9 @@ class FakeSmartContractTools implements SmartContractTools {
     initName: string;
     parameterJson: string;
   }): Promise<PreparedSmartContractParameters> {
+    if (this.nextError !== null) {
+      throw this.nextError;
+    }
     this.initInputs.push(input);
     return {
       parameterHex: "deadbeef",
@@ -92,6 +96,9 @@ class FakeSmartContractTools implements SmartContractTools {
     entrypointName: string;
     parameterJson: string;
   }): Promise<PreparedSmartContractParameters> {
+    if (this.nextError !== null) {
+      throw this.nextError;
+    }
     this.updateInputs.push(input);
     return {
       parameterHex: "c0ffee",
@@ -311,6 +318,40 @@ test("smart-contract update flow derives embedded schema from the target instanc
   assert.equal(
     model.getState().smartContracts.preparedContractName,
     "weather",
+  );
+});
+
+test("string-like schema preparation errors are surfaced in app status", async () => {
+  const fakeClient = new FakeClient();
+  const fakeTools = new FakeSmartContractTools();
+  fakeTools.nextError = { message: "Schema mismatch for weather.vote parameter" };
+  const model = createExampleAppModel({
+    clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
+    challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
+    smartContractTools: fakeTools,
+  });
+
+  await model.pair();
+  await model.requestAccount();
+  model.updateSmartContracts({
+    mode: "update",
+    contractIndex: "1999",
+    contractSubindex: "0",
+    entrypointName: "vote",
+    parameterJson: '{"vote_length":8}',
+  });
+
+  await model.prepareSmartContractRequest();
+
+  assert.equal(
+    model.getState().status,
+    "Error: Schema mismatch for weather.vote parameter",
+  );
+  assert.equal(
+    model.getState().smartContracts.status,
+    "Error: Schema mismatch for weather.vote parameter",
   );
 });
 

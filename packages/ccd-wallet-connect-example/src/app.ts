@@ -228,7 +228,7 @@ const DEFAULT_OPTIONS = {
   // testnet genesis hash
   initialNetworkGenesisHash:
     "4221332d34e1694168c2a0c0b3fd0f273809612cb13d000d5c2e00e85f50f796",
-  initialNodeEndpoint: "http://127.0.0.1:20000",
+  initialNodeEndpoint: "https://grpc.testnet.concordium.com:20000",
 } satisfies ExampleAppModelOptions;
 
 /**
@@ -342,6 +342,7 @@ export function createExampleAppModel(
       });
       return prepared;
     } catch (error) {
+      console.error("Smart-contract preparation failed", error);
       updateSmartContractsState({
         preparedParameterHex: "",
         preparedSchema: null,
@@ -578,6 +579,7 @@ export function createExampleAppModel(
           lastTransactionHash: result.transactionHash,
         });
       } catch (error) {
+        console.error("Smart-contract submission failed", error);
         update({ status: formatErrorStatus(error) });
         updateSmartContractsState({ status: formatErrorStatus(error) });
       }
@@ -663,5 +665,20 @@ function formatErrorStatus(error: unknown): string {
   if (error instanceof Error) {
     return `Error: ${error.message}`;
   }
-  return "Error: Unknown failure";
+  if (typeof error === "string") {
+    return `Error: ${error}`;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return `Error: ${error.message}`;
+  }
+  try {
+    return `Error: ${JSON.stringify(error)}`;
+  } catch {
+    return `Error: ${String(error)}`;
+  }
 }

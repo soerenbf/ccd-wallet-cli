@@ -88,30 +88,16 @@ pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
         move |request| {
             let conn = Arc::clone(&init_conn);
             async move {
-                let prepared = {
-                    let conn = conn.lock().map_err(|_| {
-                        ContractExecutionRejection::other(
-                            "wallet database connection is unavailable",
-                        )
-                    })?;
-                    prepare_contract_init_request(&conn, request)?
-                };
-                submit_contract_init_request(prepared).await
+                let prepared = prepare_contract_init_request(request)?;
+                submit_contract_init_request(Arc::clone(&conn), prepared).await
             }
             .boxed()
         },
         move |request| {
             let conn = Arc::clone(&update_conn);
             async move {
-                let prepared = {
-                    let conn = conn.lock().map_err(|_| {
-                        ContractExecutionRejection::other(
-                            "wallet database connection is unavailable",
-                        )
-                    })?;
-                    prepare_contract_update_request(&conn, request)?
-                };
-                submit_contract_update_request(prepared).await
+                let prepared = prepare_contract_update_request(request)?;
+                submit_contract_update_request(Arc::clone(&conn), prepared).await
             }
             .boxed()
         },
@@ -201,13 +187,12 @@ struct PreparedContractInit {
     endpoint: v2::Endpoint,
     endpoint_label: String,
     network_name: String,
-    wallet: WalletAccount,
+    sender: AccountAddress,
     payload: InitContractPayload,
     energy: Energy,
 }
 
 fn prepare_contract_init_request(
-    conn: &Connection,
     request: ContractInitRequest,
 ) -> std::result::Result<PreparedContractInit, ContractExecutionRejection> {
     let (network_name, network_entry) = resolve_network_entry(&request.network_genesis_hash)
@@ -230,25 +215,22 @@ fn prepare_contract_init_request(
             .map_err(|err| ContractExecutionRejection::other(err.to_string()))?,
     };
     let energy = Energy::from(request.max_contract_execution_energy);
-    let wallet = unlock_wallet_account(
-        conn,
-        &network_name,
-        &network_entry,
-        &request.account_address,
-    )
-    .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let sender = AccountAddress::from_str(&request.account_address).map_err(|err| {
+        ContractExecutionRejection::other(format!("invalid session account address: {err}"))
+    })?;
     Ok(PreparedContractInit {
         request,
         endpoint,
         endpoint_label,
         network_name,
-        wallet,
+        sender,
         payload,
         energy,
     })
 }
 
 async fn submit_contract_init_request(
+    conn: Arc<Mutex<Connection>>,
     prepared: PreparedContractInit,
 ) -> std::result::Result<ContractInitApproval, ContractExecutionRejection> {
     let mut client = node_config::connect_v2_client(prepared.endpoint.clone())
@@ -263,7 +245,7 @@ async fn submit_contract_init_request(
         Some(
             match ContractInitBuilder::<()>::dry_run_new_instance_raw(
                 client.clone(),
-                prepared.wallet.address,
+                prepared.sender,
                 prepared.payload.mod_ref,
                 contract_name,
                 prepared.payload.amount,
@@ -297,15 +279,29 @@ async fn submit_contract_init_request(
             "contract init declined by user",
         ));
     }
+    let (resolved_network_name, network_entry) = resolve_network_entry(&prepared.request.network_genesis_hash)
+        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let wallet = {
+        let conn = conn.lock().map_err(|_| {
+            ContractExecutionRejection::other("wallet database connection is unavailable")
+        })?;
+        unlock_wallet_account(
+            &conn,
+            &resolved_network_name,
+            &network_entry,
+            &prepared.request.account_address,
+        )
+        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?
+    };
     let nonce = client
-        .get_next_account_sequence_number(&prepared.wallet.address)
+        .get_next_account_sequence_number(&wallet.address)
         .await
         .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?
         .nonce;
     let expiry = TransactionTime::from_seconds((chrono::Utc::now().timestamp() + 300) as u64);
     let tx = send::init_contract(
-        &prepared.wallet,
-        prepared.wallet.address,
+        &wallet,
+        wallet.address,
         nonce,
         expiry,
         prepared.payload,
@@ -354,13 +350,11 @@ struct PreparedContractUpdate {
     endpoint_label: String,
     network_name: String,
     sender: AccountAddress,
-    wallet: WalletAccount,
     payload: UpdateContractPayload,
     energy: Energy,
 }
 
 fn prepare_contract_update_request(
-    conn: &Connection,
     request: ContractUpdateRequest,
 ) -> std::result::Result<PreparedContractUpdate, ContractExecutionRejection> {
     let (network_name, network_entry) = resolve_network_entry(&request.network_genesis_hash)
@@ -390,26 +384,19 @@ fn prepare_contract_update_request(
         message: parameter,
     };
     let energy = Energy::from(request.max_contract_execution_energy);
-    let wallet = unlock_wallet_account(
-        conn,
-        &network_name,
-        &network_entry,
-        &request.account_address,
-    )
-    .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
     Ok(PreparedContractUpdate {
         request,
         endpoint,
         endpoint_label,
         network_name,
         sender,
-        wallet,
         payload,
         energy,
     })
 }
 
 async fn submit_contract_update_request(
+    conn: Arc<Mutex<Connection>>,
     prepared: PreparedContractUpdate,
 ) -> std::result::Result<ContractUpdateApproval, ContractExecutionRejection> {
     let mut client = node_config::connect_v2_client(prepared.endpoint.clone())
@@ -453,15 +440,29 @@ async fn submit_contract_update_request(
             "contract update declined by user",
         ));
     }
+    let (resolved_network_name, network_entry) = resolve_network_entry(&prepared.request.network_genesis_hash)
+        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let wallet = {
+        let conn = conn.lock().map_err(|_| {
+            ContractExecutionRejection::other("wallet database connection is unavailable")
+        })?;
+        unlock_wallet_account(
+            &conn,
+            &resolved_network_name,
+            &network_entry,
+            &prepared.request.account_address,
+        )
+        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?
+    };
     let nonce = client
-        .get_next_account_sequence_number(&prepared.wallet.address)
+        .get_next_account_sequence_number(&wallet.address)
         .await
         .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?
         .nonce;
     let expiry = TransactionTime::from_seconds((chrono::Utc::now().timestamp() + 300) as u64);
     let tx = send::update_contract(
-        &prepared.wallet,
-        prepared.wallet.address,
+        &wallet,
+        wallet.address,
         nonce,
         expiry,
         prepared.payload,
