@@ -29,8 +29,9 @@ export function ExampleApp() {
         <p className="eyebrow">ccd-wallet connect example</p>
         <h1>Paired-session API showcase</h1>
         <p className="lead">
-          Pair first to establish trusted browser-session context for one network.
-          Request account authority later only when a capability needs it.
+          Pair first to establish trusted browser-session context for one
+          network. Request account authority later only when a capability needs
+          it.
         </p>
       </header>
 
@@ -38,8 +39,9 @@ export function ExampleApp() {
         <section className="panel pairing-screen">
           <h2>Pair with Wallet</h2>
           <p className="muted">
-            This screen establishes a paired session only. Account authority is
-            requested later from the Smart Contracts area when needed.
+            This screen establishes a paired session only. The node endpoint is
+            also captured here so the Smart Contracts page can derive embedded
+            schema automatically.
           </p>
 
           <label>
@@ -59,6 +61,15 @@ export function ExampleApp() {
               onChange={(event) =>
                 model.setNetworkGenesisHash(event.target.value)
               }
+            />
+          </label>
+
+          <label>
+            <span>Browser-reachable node endpoint (gRPC-web)</span>
+            <input
+              type="text"
+              value={state.nodeEndpoint}
+              onChange={(event) => model.setNodeEndpoint(event.target.value)}
             />
           </label>
 
@@ -138,6 +149,11 @@ export function ExampleApp() {
                 testId="network-genesis-hash"
               />
               <InfoCard
+                title="Node endpoint"
+                value={state.session.nodeEndpoint}
+                testId="node-endpoint"
+              />
+              <InfoCard
                 title="Account authority"
                 value={state.accountAuthority?.accountAddress ?? "Not granted yet"}
                 testId="account-authority"
@@ -171,8 +187,9 @@ export function ExampleApp() {
                 <div>
                   <h2>Smart Contracts</h2>
                   <p className="muted">
-                    This page prepares schema-aware parameter bytes with
-                    <code>@concordium/web-sdk</code> and submits the request
+                    This page derives embedded schema from the referenced module
+                    or target contract instance with
+                    <code>@concordium/web-sdk</code> and then submits the request
                     through <code>@ccd-wallet/connect-client</code>.
                   </p>
                 </div>
@@ -191,7 +208,11 @@ export function ExampleApp() {
                 </div>
               ) : (
                 <>
-                  <div className="mode-toggle" role="tablist" aria-label="Smart contract request type">
+                  <div
+                    className="mode-toggle"
+                    role="tablist"
+                    aria-label="Smart contract request type"
+                  >
                     <button
                       type="button"
                       className={
@@ -210,67 +231,42 @@ export function ExampleApp() {
                           ? "nav-button active"
                           : "nav-button"
                       }
-                      onClick={() => model.updateSmartContracts({ mode: "update" })}
+                      onClick={() =>
+                        model.updateSmartContracts({ mode: "update" })
+                      }
                     >
                       Contract Update
                     </button>
                   </div>
 
                   <div className="form-grid two-columns">
-                    <label>
-                      <span>Contract name</span>
-                      <input
-                        type="text"
-                        value={state.smartContracts.contractName}
-                        onChange={(event) =>
-                          model.updateSmartContracts({
-                            contractName: event.target.value,
-                          })
-                        }
-                      />
-                    </label>
-
                     {state.smartContracts.mode === "init" ? (
-                      <label>
-                        <span>Init name</span>
-                        <input
-                          type="text"
-                          value={state.smartContracts.initName}
-                          onChange={(event) =>
-                            model.updateSmartContracts({
-                              initName: event.target.value,
-                            })
-                          }
-                        />
-                      </label>
-                    ) : (
-                      <label>
-                        <span>Entrypoint name</span>
-                        <input
-                          type="text"
-                          value={state.smartContracts.entrypointName}
-                          onChange={(event) =>
-                            model.updateSmartContracts({
-                              entrypointName: event.target.value,
-                            })
-                          }
-                        />
-                      </label>
-                    )}
-
-                    {state.smartContracts.mode === "init" ? (
-                      <label>
-                        <span>Module reference</span>
-                        <input
-                          type="text"
-                          value={state.smartContracts.moduleRef}
-                          onChange={(event) =>
-                            model.updateSmartContracts({
-                              moduleRef: event.target.value,
-                            })
-                          }
-                        />
-                      </label>
+                      <>
+                        <label>
+                          <span>Module reference</span>
+                          <input
+                            type="text"
+                            value={state.smartContracts.moduleRef}
+                            onChange={(event) =>
+                              model.updateSmartContracts({
+                                moduleRef: event.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>Init name</span>
+                          <input
+                            type="text"
+                            value={state.smartContracts.initName}
+                            onChange={(event) =>
+                              model.updateSmartContracts({
+                                initName: event.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                      </>
                     ) : (
                       <>
                         <label>
@@ -295,6 +291,18 @@ export function ExampleApp() {
                             onChange={(event) =>
                               model.updateSmartContracts({
                                 contractSubindex: event.target.value,
+                              })
+                            }
+                          />
+                        </label>
+                        <label>
+                          <span>Entrypoint name</span>
+                          <input
+                            type="text"
+                            value={state.smartContracts.entrypointName}
+                            onChange={(event) =>
+                              model.updateSmartContracts({
+                                entrypointName: event.target.value,
                               })
                             }
                           />
@@ -332,19 +340,6 @@ export function ExampleApp() {
                   </div>
 
                   <label>
-                    <span>Versioned module schema (base64)</span>
-                    <textarea
-                      rows={5}
-                      value={state.smartContracts.schemaBase64}
-                      onChange={(event) =>
-                        model.updateSmartContracts({
-                          schemaBase64: event.target.value,
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label>
                     <span>Parameter JSON</span>
                     <textarea
                       rows={8}
@@ -374,9 +369,9 @@ export function ExampleApp() {
                     <button
                       type="button"
                       className="secondary-button"
-                      onClick={() => model.prepareSmartContractRequest()}
+                      onClick={() => void model.prepareSmartContractRequest()}
                     >
-                      Prepare with web-sdk
+                      Derive Embedded Schema
                     </button>
                     <button
                       type="button"
@@ -391,6 +386,16 @@ export function ExampleApp() {
                       title="Prepared parameter hex"
                       value={state.smartContracts.preparedParameterHex || "Not prepared yet"}
                       testId="prepared-parameter-hex"
+                    />
+                    <InfoCard
+                      title="Prepared module reference"
+                      value={state.smartContracts.preparedModuleRef || "Not resolved yet"}
+                      testId="prepared-module-ref"
+                    />
+                    <InfoCard
+                      title="Prepared contract name"
+                      value={state.smartContracts.preparedContractName || "Not resolved yet"}
+                      testId="prepared-contract-name"
                     />
                     <InfoCard
                       title="Last transaction hash"

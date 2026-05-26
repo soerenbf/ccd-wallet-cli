@@ -1,23 +1,31 @@
 /**
- * Schema-aware smart contract helpers for the connect example app.
+ * Embedded-schema-aware smart contract helpers for the connect example app.
  *
  * This module keeps `@concordium/web-sdk` usage isolated to the example
  * application so `@ccd-wallet/connect-client` stays focused on transport and
  * protocol concerns.
  */
+import { ConcordiumGRPCWebClient } from "@concordium/web-sdk/grpc";
 import {
   serializeInitContractParameters,
   serializeUpdateContractParameters,
 } from "@concordium/web-sdk/schema";
+import {
+  ContractAddress,
+  ModuleReference,
+  type ContractAddress as ContractAddressNamespace,
+} from "@concordium/web-sdk/types";
 
 /**
  * Input needed to prepare init-contract parameters from schema-aware JSON.
  */
 export interface SmartContractInitPreparation {
-  /** Base64-encoded versioned module schema. */
-  schemaBase64: string;
-  /** Contract name used for schema lookup, without the `init_` prefix. */
-  contractName: string;
+  /** Browser-reachable gRPC-web node endpoint used for module lookup. */
+  nodeEndpoint: string;
+  /** Module reference whose embedded schema should be used for serialization. */
+  moduleRef: string;
+  /** Init function name, typically `init_<contractName>`. */
+  initName: string;
   /** JSON value matching the init parameter schema. */
   parameterJson: string;
 }
@@ -26,10 +34,12 @@ export interface SmartContractInitPreparation {
  * Input needed to prepare update-contract parameters from schema-aware JSON.
  */
 export interface SmartContractUpdatePreparation {
-  /** Base64-encoded versioned module schema. */
-  schemaBase64: string;
-  /** Contract name used for schema lookup. */
-  contractName: string;
+  /** Browser-reachable gRPC-web node endpoint used for instance/module lookup. */
+  nodeEndpoint: string;
+  /** Contract instance index. */
+  contractIndex: string;
+  /** Contract instance subindex. */
+  contractSubindex: string;
   /** Receive entrypoint name without the contract-name prefix. */
   entrypointName: string;
   /** JSON value matching the receive parameter schema. */
@@ -42,27 +52,31 @@ export interface SmartContractUpdatePreparation {
 export interface PreparedSmartContractParameters {
   /** Hex-encoded serialized parameter bytes without a `0x` prefix. */
   parameterHex: string;
-  /** Schema descriptor passed back to the wallet for human-readable rendering. */
-  schema: { base64: string };
+  /** Schema descriptor passed back to the wallet for human-readable rendering when available. */
+  schema: { base64: string } | null;
   /** Parsed JSON value used for serialization. */
   parameterJson: unknown;
+  /** Contract name used during schema-aware serialization. */
+  contractName: string;
+  /** Module reference from which the embedded schema was derived. */
+  moduleRef: string;
 }
 
 /**
- * Small abstraction layer for schema-aware preparation.
+ * Small abstraction layer for embedded-schema preparation.
  *
  * Tests can inject a fake implementation while the real UI uses the
  * `@concordium/web-sdk`-backed default tools.
  */
 export interface SmartContractTools {
-  /** Prepares init parameters from schema-aware JSON input. */
+  /** Prepares init parameters from node-derived embedded schema and JSON input. */
   prepareInit(
     input: SmartContractInitPreparation,
-  ): PreparedSmartContractParameters;
-  /** Prepares update parameters from schema-aware JSON input. */
+  ): Promise<PreparedSmartContractParameters>;
+  /** Prepares update parameters from node-derived embedded schema and JSON input. */
   prepareUpdate(
     input: SmartContractUpdatePreparation,
-  ): PreparedSmartContractParameters;
+  ): Promise<PreparedSmartContractParameters>;
 }
 
 /**
@@ -74,55 +88,133 @@ export const defaultSmartContractTools: SmartContractTools = {
 };
 
 /**
- * Prepares init-contract parameters from schema-aware JSON input.
+ * Prepares init-contract parameters from embedded module schema.
  *
  * @param input - Init preparation input.
  * @returns The prepared connect-request payload pieces.
- * @throws {Error} If the schema or JSON input cannot be parsed or serialized.
+ * @throws {Error} If node access, module lookup, schema lookup, or JSON parsing fails.
  */
-export function prepareInitContractParameters(
+export async function prepareInitContractParameters(
   input: SmartContractInitPreparation,
-): PreparedSmartContractParameters {
-  const normalizedSchema = normalizeSchemaBase64(input.schemaBase64);
-  const schemaBytes = decodeBase64(normalizedSchema);
+): Promise<PreparedSmartContractParameters> {
+  const nodeClient = createNodeClient(input.nodeEndpoint);
+  const moduleReference = ModuleReference.fromHexString(
+    normalizeHex(input.moduleRef, "moduleRef"),
+  );
+  const rawSchema = await nodeClient.getEmbeddedSchema(moduleReference);
+  if (!rawSchema) {
+    throw new Error(
+      "The selected module does not expose an embedded schema. This showcase supports only contracts with embedded schema.",
+    );
+  }
+
   const parameterJson = parseJsonValue(input.parameterJson);
+  const contractName = contractNameFromInitName(input.initName);
   const serialized = serializeInitContractParameters(
-    asContractName(input.contractName),
+    asContractName(contractName),
     parameterJson,
-    toExactArrayBuffer(schemaBytes),
+    rawSchema.buffer,
+    rawSchema.type === "unversioned" ? rawSchema.version : undefined,
   );
 
   return {
     parameterHex: toHexString(serialized),
-    schema: { base64: normalizedSchema },
+    schema: rawSchema.type === "versioned" ? { base64: toBase64(rawSchema.buffer) } : null,
     parameterJson,
+    contractName,
+    moduleRef: moduleReference.toString(),
   };
 }
 
 /**
- * Prepares update-contract parameters from schema-aware JSON input.
+ * Prepares update-contract parameters from a target instance's embedded module schema.
  *
  * @param input - Update preparation input.
  * @returns The prepared connect-request payload pieces.
- * @throws {Error} If the schema or JSON input cannot be parsed or serialized.
+ * @throws {Error} If node access, instance lookup, schema lookup, or JSON parsing fails.
  */
-export function prepareUpdateContractParameters(
+export async function prepareUpdateContractParameters(
   input: SmartContractUpdatePreparation,
-): PreparedSmartContractParameters {
-  const normalizedSchema = normalizeSchemaBase64(input.schemaBase64);
-  const schemaBytes = decodeBase64(normalizedSchema);
+): Promise<PreparedSmartContractParameters> {
+  const nodeClient = createNodeClient(input.nodeEndpoint);
+  const contractAddress = ContractAddress.create(
+    parseUnsignedBigInt(input.contractIndex, "contractIndex"),
+    parseUnsignedBigInt(input.contractSubindex, "contractSubindex"),
+  );
+  const instanceInfo = await nodeClient.getInstanceInfo(contractAddress);
+  const rawSchema = await nodeClient.getEmbeddedSchema(instanceInfo.sourceModule);
+  if (!rawSchema) {
+    throw new Error(
+      "The target contract module does not expose an embedded schema. This showcase supports only contracts with embedded schema.",
+    );
+  }
+
   const parameterJson = parseJsonValue(input.parameterJson);
+  const contractName = contractNameFromInitName(instanceInfo.name.toString());
   const serialized = serializeUpdateContractParameters(
-    asContractName(input.contractName),
+    asContractName(contractName),
     asEntrypointName(input.entrypointName),
     parameterJson,
-    toExactArrayBuffer(schemaBytes),
+    rawSchema.buffer,
+    rawSchema.type === "unversioned" ? rawSchema.version : undefined,
   );
 
   return {
     parameterHex: toHexString(serialized),
-    schema: { base64: normalizedSchema },
+    schema: rawSchema.type === "versioned" ? { base64: toBase64(rawSchema.buffer) } : null,
     parameterJson,
+    contractName,
+    moduleRef: instanceInfo.sourceModule.toString(),
+  };
+}
+
+interface NodeClientLike {
+  getEmbeddedSchema(
+    moduleRef: Parameters<ConcordiumGRPCWebClient["getEmbeddedSchema"]>[0],
+  ): ReturnType<ConcordiumGRPCWebClient["getEmbeddedSchema"]>;
+  getInstanceInfo(
+    contractAddress: ContractAddressNamespace.Type,
+  ): ReturnType<ConcordiumGRPCWebClient["getInstanceInfo"]>;
+}
+
+function createNodeClient(nodeEndpoint: string): NodeClientLike {
+  const endpoint = parseNodeEndpoint(nodeEndpoint);
+  return new ConcordiumGRPCWebClient(endpoint.address, endpoint.port);
+}
+
+function parseNodeEndpoint(nodeEndpoint: string): {
+  address: string;
+  port: number;
+} {
+  let url: URL;
+  try {
+    url = new URL(nodeEndpoint.trim());
+  } catch {
+    throw new Error(
+      "Enter a valid browser-reachable gRPC-web node endpoint, for example http://127.0.0.1:20000.",
+    );
+  }
+
+  if (!(url.protocol === "http:" || url.protocol === "https:")) {
+    throw new Error("The node endpoint must use http:// or https://.");
+  }
+  if (!url.hostname) {
+    throw new Error("The node endpoint must include a hostname.");
+  }
+  if (url.pathname && url.pathname !== "/") {
+    throw new Error("The node endpoint must not include a path.");
+  }
+  if (url.search || url.hash) {
+    throw new Error("The node endpoint must not include query or hash parts.");
+  }
+
+  return {
+    address: `${url.protocol}//${url.hostname}`,
+    port: url.port
+      ? Number.parseInt(url.port, 10)
+      : url.protocol === "https:"
+        ? 443
+        : 80,
   };
 }
 
@@ -135,25 +227,37 @@ function parseJsonValue(source: string): unknown {
   return JSON.parse(source);
 }
 
-function normalizeSchemaBase64(schemaBase64: string): string {
-  const normalized = schemaBase64.replace(/\s+/g, "").trim();
+function normalizeHex(value: string, fieldName: string): string {
+  const normalized = value.trim().replace(/^0x/i, "");
+  if (!/^[0-9a-f]+$/i.test(normalized)) {
+    throw new Error(`${fieldName} must be a hex string.`);
+  }
+  return normalized;
+}
+
+function contractNameFromInitName(initName: string): string {
+  const normalized = initName.trim();
   if (!normalized) {
-    throw new Error("Enter a base64-encoded versioned module schema.");
+    throw new Error("Enter an init name or target contract first.");
   }
-  const padding = normalized.length % 4;
-  if (padding === 0) {
-    return normalized;
-  }
-  return `${normalized}${"=".repeat(4 - padding)}`;
+  return normalized.startsWith("init_") ? normalized.slice(5) : normalized;
 }
 
-function decodeBase64(value: string): Uint8Array {
-  const decoded = globalThis.atob(value);
-  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+function parseUnsignedBigInt(value: string, fieldName: string): bigint {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${fieldName} must be a non-negative integer.`);
+  }
+  return BigInt(normalized);
 }
 
-function toExactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(bytes).buffer;
+function toBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return globalThis.btoa(binary);
 }
 
 function asContractName(

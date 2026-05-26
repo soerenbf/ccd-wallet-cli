@@ -20,11 +20,11 @@
 
 - [x] 4.1 Refactor `packages/ccd-wallet-connect-example` state model to represent paired-session context separately from optional account authority state.
 - [x] 4.2 Restructure the React UI into an unpaired pairing screen and a paired application shell with global session context and navigation.
-- [x] 4.3 Add `@concordium/web-sdk` to the example app and introduce schema/type helpers for the Smart Contracts section without coupling that dependency into `@ccd-wallet/connect-client`.
+- [x] 4.3 Add `@concordium/web-sdk` to the example app together with browser-reachable node access and embedded-schema lookup helpers for the Smart Contracts section without coupling that dependency into `@ccd-wallet/connect-client`.
 - [x] 4.4 Implement the Smart Contracts section authority gate so it surfaces missing account authority and offers an explicit account-request action before account-backed forms are enabled.
-- [x] 4.5 Use `@concordium/web-sdk` in the Smart Contracts section to support schema-aware contract input preparation and connect-request payload construction.
+- [x] 4.5 Use `@concordium/web-sdk` in the Smart Contracts section to derive embedded schema from the supplied module or target contract instance and build connect-request payloads from schema-aware input.
 - [x] 4.6 Add placeholder navigation/pages for Transactions and Chain Updates to establish the showcase structure without implementing those API areas yet.
-- [x] 4.7 Update example-app tests, README, and any relevant styling to cover the new shell, navigation, deferred-account flow, and `web-sdk`-assisted Smart Contracts behavior.
+- [x] 4.7 Update example-app tests, README, and any relevant styling to cover the new shell, navigation, deferred-account flow, node-backed embedded-schema lookup, and `web-sdk`-assisted Smart Contracts behavior.
 
 ## 5. Repository documentation and spec alignment
 

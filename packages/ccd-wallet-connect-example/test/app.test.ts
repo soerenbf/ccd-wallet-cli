@@ -55,48 +55,62 @@ class FakeClient implements ConnectClientLike {
 }
 
 class FakeSmartContractTools implements SmartContractTools {
-  initInputs: Array<{ schemaBase64: string; contractName: string; parameterJson: string }> = [];
+  initInputs: Array<{
+    nodeEndpoint: string;
+    moduleRef: string;
+    initName: string;
+    parameterJson: string;
+  }> = [];
   updateInputs: Array<{
-    schemaBase64: string;
-    contractName: string;
+    nodeEndpoint: string;
+    contractIndex: string;
+    contractSubindex: string;
     entrypointName: string;
     parameterJson: string;
   }> = [];
 
-  prepareInit(input: {
-    schemaBase64: string;
-    contractName: string;
+  async prepareInit(input: {
+    nodeEndpoint: string;
+    moduleRef: string;
+    initName: string;
     parameterJson: string;
-  }): PreparedSmartContractParameters {
+  }): Promise<PreparedSmartContractParameters> {
     this.initInputs.push(input);
     return {
       parameterHex: "deadbeef",
-      schema: { base64: input.schemaBase64 },
+      schema: { base64: "embedded-schema-base64" },
       parameterJson: JSON.parse(input.parameterJson),
+      contractName: "my_contract",
+      moduleRef: input.moduleRef,
     };
   }
 
-  prepareUpdate(input: {
-    schemaBase64: string;
-    contractName: string;
+  async prepareUpdate(input: {
+    nodeEndpoint: string;
+    contractIndex: string;
+    contractSubindex: string;
     entrypointName: string;
     parameterJson: string;
-  }): PreparedSmartContractParameters {
+  }): Promise<PreparedSmartContractParameters> {
     this.updateInputs.push(input);
     return {
       parameterHex: "c0ffee",
-      schema: { base64: input.schemaBase64 },
+      schema: { base64: "embedded-update-schema" },
       parameterJson: JSON.parse(input.parameterJson),
+      contractName: "weather",
+      moduleRef:
+        "44434352ddba724930d6b1b09cd58bd1fba6ad9714cf519566d5fe72d80da0d1",
     };
   }
 }
 
-test("pairing establishes a paired session shell before account authority exists", async () => {
+test("pairing establishes a paired session shell with node lookup context before account authority exists", async () => {
   const fakeClient = new FakeClient();
   const model = createExampleAppModel({
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
     initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
   });
 
   await model.pair();
@@ -105,31 +119,34 @@ test("pairing establishes a paired session shell before account authority exists
   assert.deepEqual(model.getState(), {
     serverUrl: "ws://127.0.0.1:22771",
     networkGenesisHash: "genesis",
+    nodeEndpoint: "http://127.0.0.1:20000",
     challenge: "123456",
-    status: "Pairing approved. Session established for the selected network.",
+    status:
+      "Pairing approved. Session established for the selected network and node context.",
     currentPage: "smart-contracts",
     session: {
       sessionToken: "session-token",
       networkGenesisHash: "genesis",
+      nodeEndpoint: "http://127.0.0.1:20000",
     },
     accountAuthority: null,
     smartContracts: {
       mode: "init",
       moduleRef: "",
-      contractName: "",
       initName: "init_my_contract",
       entrypointName: "set",
       contractIndex: "0",
       contractSubindex: "0",
       amountMicroCcd: "0",
       maxContractExecutionEnergy: "30000",
-      schemaBase64: "",
       parameterJson: "{}",
       validate: true,
       status:
-        "Provide a schema, JSON value, and request details to prepare a Smart Contracts payload.",
+        "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
       preparedParameterHex: "",
       preparedSchema: null,
+      preparedModuleRef: "",
+      preparedContractName: "",
       lastTransactionHash: "",
     },
   });
@@ -141,6 +158,7 @@ test("requestAccount requests account authority for the active paired session", 
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
     initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
   });
 
   await model.pair();
@@ -162,6 +180,7 @@ test("paired shell navigation works while deferred account authority gate remain
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
     initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
   });
 
   await model.pair();
@@ -184,13 +203,14 @@ test("paired shell navigation works while deferred account authority gate remain
   );
 });
 
-test("smart-contract init flow uses injected web-sdk helpers and connect-client payload construction", async () => {
+test("smart-contract init flow derives embedded schema from the referenced module", async () => {
   const fakeClient = new FakeClient();
   const fakeTools = new FakeSmartContractTools();
   const model = createExampleAppModel({
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => "123456",
     initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
     smartContractTools: fakeTools,
   });
 
@@ -198,23 +218,22 @@ test("smart-contract init flow uses injected web-sdk helpers and connect-client 
   await model.requestAccount();
   model.updateSmartContracts({
     mode: "init",
-    contractName: "my_contract",
     initName: "init_my_contract",
     moduleRef: "module-ref",
-    schemaBase64: "schema-base64",
     parameterJson: '{"owner":"4Jx"}',
     amountMicroCcd: "0",
     maxContractExecutionEnergy: "30000",
     validate: true,
   });
 
-  model.prepareSmartContractRequest();
+  await model.prepareSmartContractRequest();
   await model.submitSmartContractRequest();
 
   assert.deepEqual(fakeTools.initInputs, [
     {
-      schemaBase64: "schema-base64",
-      contractName: "my_contract",
+      nodeEndpoint: "http://127.0.0.1:20000",
+      moduleRef: "module-ref",
+      initName: "init_my_contract",
       parameterJson: '{"owner":"4Jx"}',
     },
   ]);
@@ -226,18 +245,76 @@ test("smart-contract init flow uses injected web-sdk helpers and connect-client 
       amountMicroCcd: "0",
       maxContractExecutionEnergy: 30000,
       parameterHex: "deadbeef",
-      schema: { base64: "schema-base64" },
+      schema: { base64: "embedded-schema-base64" },
       validate: true,
     },
   ]);
-  assert.equal(model.getState().smartContracts.lastTransactionHash, "tx-init");
   assert.equal(
-    model.getState().smartContracts.status,
-    "Init request submitted through @ccd-wallet/connect-client.",
+    model.getState().smartContracts.preparedModuleRef,
+    "module-ref",
+  );
+  assert.equal(
+    model.getState().smartContracts.preparedContractName,
+    "my_contract",
+  );
+  assert.equal(model.getState().smartContracts.lastTransactionHash, "tx-init");
+});
+
+test("smart-contract update flow derives embedded schema from the target instance module", async () => {
+  const fakeClient = new FakeClient();
+  const fakeTools = new FakeSmartContractTools();
+  const model = createExampleAppModel({
+    clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
+    challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
+    smartContractTools: fakeTools,
+  });
+
+  await model.pair();
+  await model.requestAccount();
+  model.updateSmartContracts({
+    mode: "update",
+    contractIndex: "42",
+    contractSubindex: "0",
+    entrypointName: "set",
+    parameterJson: '{"value":17}',
+    amountMicroCcd: "1",
+    maxContractExecutionEnergy: "30000",
+    validate: false,
+  });
+
+  await model.prepareSmartContractRequest();
+  await model.submitSmartContractRequest();
+
+  assert.deepEqual(fakeTools.updateInputs, [
+    {
+      nodeEndpoint: "http://127.0.0.1:20000",
+      contractIndex: "42",
+      contractSubindex: "0",
+      entrypointName: "set",
+      parameterJson: '{"value":17}',
+    },
+  ]);
+  assert.deepEqual(fakeClient.updateCalls, [
+    {
+      sessionToken: "session-token",
+      contractAddress: { index: 42, subindex: 0 },
+      receiveName: "weather.set",
+      amountMicroCcd: "1",
+      maxContractExecutionEnergy: 30000,
+      parameterHex: "c0ffee",
+      schema: { base64: "embedded-update-schema" },
+      validate: false,
+    },
+  ]);
+  assert.equal(
+    model.getState().smartContracts.preparedContractName,
+    "weather",
   );
 });
 
-test("reset clears paired session state, authority state, and showcase progress", async () => {
+test("reset clears paired session state, authority state, and embedded-schema preparation state", async () => {
   const fakeClient = new FakeClient();
   const fakeTools = new FakeSmartContractTools();
   let challenges = ["123456", "654321"];
@@ -245,23 +322,24 @@ test("reset clears paired session state, authority state, and showcase progress"
     clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
     challengeGenerator: () => challenges.shift() ?? "000000",
     initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
     smartContractTools: fakeTools,
   });
 
   await model.pair();
   await model.requestAccount();
   model.updateSmartContracts({
-    contractName: "my_contract",
-    schemaBase64: "schema-base64",
+    moduleRef: "module-ref",
     parameterJson: "{}",
   });
-  model.prepareSmartContractRequest();
+  await model.prepareSmartContractRequest();
   model.reset();
 
   assert.equal(fakeClient.closeCalls, 1);
   assert.deepEqual(model.getState(), {
     serverUrl: "ws://127.0.0.1:22771",
     networkGenesisHash: "genesis",
+    nodeEndpoint: "http://127.0.0.1:20000",
     challenge: "654321",
     status: "Ready to pair.",
     currentPage: "smart-contracts",
@@ -270,20 +348,20 @@ test("reset clears paired session state, authority state, and showcase progress"
     smartContracts: {
       mode: "init",
       moduleRef: "",
-      contractName: "",
       initName: "init_my_contract",
       entrypointName: "set",
       contractIndex: "0",
       contractSubindex: "0",
       amountMicroCcd: "0",
       maxContractExecutionEnergy: "30000",
-      schemaBase64: "",
       parameterJson: "{}",
       validate: true,
       status:
-        "Provide a schema, JSON value, and request details to prepare a Smart Contracts payload.",
+        "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
       preparedParameterHex: "",
       preparedSchema: null,
+      preparedModuleRef: "",
+      preparedContractName: "",
       lastTransactionHash: "",
     },
   });

@@ -8,7 +8,7 @@ The current connect flow conflates browser-session trust with account authority 
 - Change `requestAccount` from a read-back of pairing-bound context into an explicit account-authority acquisition step for an already paired session.
 - Update account-requiring connect flows, including smart contract init/update requests, to require previously granted account authority in the active session instead of relying on account selection during pairing.
 - Restructure the example web app into a session-gated API showcase shell with navigation between feature areas, with Smart Contracts implemented first and Transactions / Chain Updates prepared as future sections.
-- Use `@concordium/web-sdk` in the example app's Smart Contracts area to work with contract schemas and typed contract parameters while still sending requests through `@ccd-wallet/connect-client`.
+- Use `@concordium/web-sdk` in the example app's Smart Contracts area to derive embedded contract schemas from the chain or referenced module and prepare typed contract parameters while still sending requests through `@ccd-wallet/connect-client`.
 - Update documentation to explain the new separation between session trust, network context, and account authority.
 
 ## Capabilities
@@ -24,6 +24,6 @@ The current connect flow conflates browser-session trust with account authority 
 ## Impact
 
 - Affected code: `crates/ccd-wallet-connect`, `crates/ccd-wallet/src/commands/connect.rs`, `packages/ccd-wallet-connect-client`, and `packages/ccd-wallet-connect-example`.
-- Affected dependencies: `packages/ccd-wallet-connect-example` will add `@concordium/web-sdk` for browser-side contract schema/type handling.
-- Affected behavior: pairing UX, session state, account-request handling, smart contract request preconditions, and example-app information architecture.
+- Affected dependencies: `packages/ccd-wallet-connect-example` will add `@concordium/web-sdk` for browser-side contract schema/type handling and require browser-reachable node access for embedded schema lookup.
+- Affected behavior: pairing UX, session state, account-request handling, smart contract request preconditions, and example-app information architecture, including embedded-schema-only Smart Contracts preparation.
 - Affected documentation: connect protocol docs, TypeScript client docs, and the example app README/spec coverage.

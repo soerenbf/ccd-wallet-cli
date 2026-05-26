@@ -3,8 +3,8 @@
  *
  * This module keeps the core integration behavior framework-agnostic so tests
  * can validate the paired-session shell, deferred account-authority flow, and
- * smart-contract request preparation without depending on a browser DOM or
- * React rendering details.
+ * embedded-schema Smart Contracts preparation without depending on a browser
+ * DOM or React rendering details.
  */
 import {
   DEFAULT_CONNECT_URL,
@@ -41,6 +41,8 @@ export interface PairedSessionContext {
   sessionToken: string;
   /** Network genesis hash bound to the active paired session. */
   networkGenesisHash: string;
+  /** Browser-reachable node endpoint used for Smart Contracts schema lookup. */
+  nodeEndpoint: string;
 }
 
 /**
@@ -59,8 +61,6 @@ export interface SmartContractsState {
   mode: SmartContractMode;
   /** Module reference used for init requests. */
   moduleRef: string;
-  /** Contract name used for schema lookup and receive-name construction. */
-  contractName: string;
   /** Init function name sent to the connect server. */
   initName: string;
   /** Receive entrypoint name without the contract-name prefix. */
@@ -73,8 +73,6 @@ export interface SmartContractsState {
   amountMicroCcd: string;
   /** Maximum contract execution energy accepted by the dApp. */
   maxContractExecutionEnergy: string;
-  /** Base64-encoded versioned module schema used for schema-aware preparation. */
-  schemaBase64: string;
   /** JSON value that should match the selected init/update parameter schema. */
   parameterJson: string;
   /** Whether the wallet should simulate the contract request before prompting. */
@@ -83,8 +81,12 @@ export interface SmartContractsState {
   status: string;
   /** Latest prepared hex-encoded parameter bytes, if available. */
   preparedParameterHex: string;
-  /** Schema descriptor paired with the latest prepared parameter bytes. */
+  /** Schema descriptor paired with the latest prepared parameter bytes when available. */
   preparedSchema: { base64: string } | null;
+  /** Module reference from which the currently prepared schema was derived. */
+  preparedModuleRef: string;
+  /** Contract name used for the currently prepared request. */
+  preparedContractName: string;
   /** Latest submitted transaction hash, if available. */
   lastTransactionHash: string;
 }
@@ -97,6 +99,8 @@ export interface ExampleAppState {
   serverUrl: string;
   /** Genesis hash selected before pairing and bound into the session on approval. */
   networkGenesisHash: string;
+  /** Browser-reachable node endpoint used for embedded schema lookup. */
+  nodeEndpoint: string;
   /** Six-digit challenge shown to the user before pairing. */
   challenge: string;
   /** Human-readable status message for the current global app flow. */
@@ -156,6 +160,8 @@ export interface ExampleAppModel {
   setServerUrl(url: string): void;
   /** Updates the target network genesis hash used for pairing. */
   setNetworkGenesisHash(networkGenesisHash: string): void;
+  /** Updates the node endpoint used for Smart Contracts schema lookup. */
+  setNodeEndpoint(nodeEndpoint: string): void;
   /** Updates the displayed pairing challenge. */
   setChallenge(challenge: string): void;
   /** Replaces the current challenge with a newly generated one. */
@@ -168,8 +174,8 @@ export interface ExampleAppModel {
   pair(): Promise<void>;
   /** Requests account authority for the active paired session. */
   requestAccount(): Promise<void>;
-  /** Prepares schema-aware smart-contract parameter bytes using `web-sdk`. */
-  prepareSmartContractRequest(): void;
+  /** Prepares embedded-schema smart-contract parameter bytes using `web-sdk`. */
+  prepareSmartContractRequest(): Promise<void>;
   /** Submits the active Smart Contracts form through the connect client. */
   submitSmartContractRequest(): Promise<void>;
   /** Resets local UI state and closes any active client connection. */
@@ -192,6 +198,8 @@ export interface ExampleAppModelOptions {
   initialServerUrl?: string;
   /** Optional initial target network genesis hash. */
   initialNetworkGenesisHash?: string;
+  /** Optional initial node endpoint for embedded schema lookup. */
+  initialNodeEndpoint?: string;
 }
 
 /**
@@ -220,6 +228,7 @@ const DEFAULT_OPTIONS = {
   // testnet genesis hash
   initialNetworkGenesisHash:
     "4221332d34e1694168c2a0c0b3fd0f273809612cb13d000d5c2e00e85f50f796",
+  initialNodeEndpoint: "http://127.0.0.1:20000",
 } satisfies ExampleAppModelOptions;
 
 /**
@@ -232,7 +241,7 @@ const DEFAULT_OPTIONS = {
  * const model = createExampleAppModel();
  * await model.pair();
  * await model.requestAccount();
- * model.prepareSmartContractRequest();
+ * await model.prepareSmartContractRequest();
  * await model.submitSmartContractRequest();
  * ```
  */
@@ -248,6 +257,7 @@ export function createExampleAppModel(
   let state: ExampleAppState = {
     serverUrl: options.initialServerUrl ?? DEFAULT_CONNECT_URL,
     networkGenesisHash: options.initialNetworkGenesisHash ?? "",
+    nodeEndpoint: options.initialNodeEndpoint ?? "",
     challenge: challengeGenerator(),
     status: "Ready to pair.",
     currentPage: "smart-contracts",
@@ -268,7 +278,9 @@ export function createExampleAppModel(
     emit();
   };
 
-  const updateSmartContracts = (patch: Partial<SmartContractsState>): void => {
+  const updateSmartContractsState = (
+    patch: Partial<SmartContractsState>,
+  ): void => {
     state = {
       ...state,
       smartContracts: {
@@ -284,38 +296,58 @@ export function createExampleAppModel(
     client = undefined;
   };
 
-  const prepareSmartContractRequest = (): PreparedSmartContractParameters | null => {
+  const prepareSmartContractRequest = async (): Promise<PreparedSmartContractParameters | null> => {
+    if (!state.session) {
+      update({ status: "No active session. Pair first." });
+      return null;
+    }
+
+    update({ status: "Resolving embedded contract schema from the node..." });
+    updateSmartContractsState({
+      status:
+        state.smartContracts.mode === "init"
+          ? "Fetching embedded schema for the selected module..."
+          : "Fetching target contract info and embedded schema...",
+    });
+
     try {
       const prepared =
         state.smartContracts.mode === "init"
-          ? smartContractTools.prepareInit({
-              schemaBase64: state.smartContracts.schemaBase64,
-              contractName: state.smartContracts.contractName,
+          ? await smartContractTools.prepareInit({
+              nodeEndpoint: state.session.nodeEndpoint,
+              moduleRef: state.smartContracts.moduleRef,
+              initName: state.smartContracts.initName,
               parameterJson: state.smartContracts.parameterJson,
             })
-          : smartContractTools.prepareUpdate({
-              schemaBase64: state.smartContracts.schemaBase64,
-              contractName: state.smartContracts.contractName,
+          : await smartContractTools.prepareUpdate({
+              nodeEndpoint: state.session.nodeEndpoint,
+              contractIndex: state.smartContracts.contractIndex,
+              contractSubindex: state.smartContracts.contractSubindex,
               entrypointName: state.smartContracts.entrypointName,
               parameterJson: state.smartContracts.parameterJson,
             });
-      updateSmartContracts({
+      updateSmartContractsState({
         preparedParameterHex: prepared.parameterHex,
         preparedSchema: prepared.schema,
-        status: `Prepared ${state.smartContracts.mode} request parameter bytes from schema-aware JSON.`,
-        lastTransactionHash: state.smartContracts.lastTransactionHash,
+        preparedModuleRef: prepared.moduleRef,
+        preparedContractName: prepared.contractName,
+        status:
+          state.smartContracts.mode === "init"
+            ? `Prepared init request bytes from embedded schema in module ${prepared.moduleRef}.`
+            : `Prepared update request bytes from embedded schema in module ${prepared.moduleRef}.`,
       });
       update({
         status:
-          "Smart contract parameters prepared. Review the payload and submit the request when ready.",
+          "Smart contract parameters prepared from embedded schema. Review the payload and submit the request when ready.",
       });
       return prepared;
     } catch (error) {
-      updateSmartContracts({
+      updateSmartContractsState({
         preparedParameterHex: "",
         preparedSchema: null,
+        preparedModuleRef: "",
+        preparedContractName: "",
         status: formatErrorStatus(error),
-        lastTransactionHash: state.smartContracts.lastTransactionHash,
       });
       update({ status: formatErrorStatus(error) });
       return null;
@@ -335,6 +367,10 @@ export function createExampleAppModel(
       update({ networkGenesisHash });
     },
 
+    setNodeEndpoint(nodeEndpoint: string): void {
+      update({ nodeEndpoint });
+    },
+
     setChallenge(challenge: string): void {
       update({ challenge });
     },
@@ -350,16 +386,20 @@ export function createExampleAppModel(
     updateSmartContracts(patch: Partial<SmartContractsState>): void {
       const resetsPreparation =
         patch.mode !== undefined ||
-        patch.schemaBase64 !== undefined ||
-        patch.contractName !== undefined ||
+        patch.moduleRef !== undefined ||
+        patch.initName !== undefined ||
         patch.entrypointName !== undefined ||
+        patch.contractIndex !== undefined ||
+        patch.contractSubindex !== undefined ||
         patch.parameterJson !== undefined;
-      updateSmartContracts({
+      updateSmartContractsState({
         ...patch,
         ...(resetsPreparation
           ? {
               preparedParameterHex: "",
               preparedSchema: null,
+              preparedModuleRef: "",
+              preparedContractName: "",
               lastTransactionHash: patch.lastTransactionHash ?? "",
             }
           : {}),
@@ -369,6 +409,13 @@ export function createExampleAppModel(
     async pair(): Promise<void> {
       if (!state.networkGenesisHash.trim()) {
         update({ status: "Enter a target network genesis hash first." });
+        return;
+      }
+      if (!state.nodeEndpoint.trim()) {
+        update({
+          status:
+            "Enter a browser-reachable node endpoint first so Smart Contracts lookups can resolve embedded schema.",
+        });
         return;
       }
 
@@ -386,10 +433,11 @@ export function createExampleAppModel(
         const result = await client.pair(state.challenge);
         update({
           status:
-            "Pairing approved. Session established for the selected network.",
+            "Pairing approved. Session established for the selected network and node context.",
           session: {
             sessionToken: result.sessionToken,
             networkGenesisHash: state.networkGenesisHash,
+            nodeEndpoint: state.nodeEndpoint,
           },
           accountAuthority: null,
           currentPage: "smart-contracts",
@@ -431,8 +479,8 @@ export function createExampleAppModel(
       }
     },
 
-    prepareSmartContractRequest(): void {
-      prepareSmartContractRequest();
+    async prepareSmartContractRequest(): Promise<void> {
+      await prepareSmartContractRequest();
     },
 
     async submitSmartContractRequest(): Promise<void> {
@@ -445,7 +493,7 @@ export function createExampleAppModel(
           status:
             "Account authority is required before Smart Contracts requests can be submitted.",
         });
-        updateSmartContracts({
+        updateSmartContractsState({
           status:
             "Request account authority to enable Smart Contracts requests.",
         });
@@ -455,11 +503,12 @@ export function createExampleAppModel(
       const prepared = state.smartContracts.preparedParameterHex
         ? {
             parameterHex: state.smartContracts.preparedParameterHex,
-            schema: state.smartContracts.preparedSchema ?? {
-              base64: state.smartContracts.schemaBase64,
-            },
+            schema: state.smartContracts.preparedSchema,
+            parameterJson: undefined,
+            contractName: state.smartContracts.preparedContractName,
+            moduleRef: state.smartContracts.preparedModuleRef,
           }
-        : prepareSmartContractRequest();
+        : await prepareSmartContractRequest();
       if (!prepared) {
         return;
       }
@@ -467,7 +516,7 @@ export function createExampleAppModel(
       try {
         if (state.smartContracts.mode === "init") {
           update({ status: "Submitting smart contract init request..." });
-          const result = await client.requestContractInit({
+          const initRequest: ContractInitParams = {
             sessionToken: state.session.sessionToken,
             moduleRef: state.smartContracts.moduleRef.trim(),
             initName: state.smartContracts.initName.trim(),
@@ -477,14 +526,17 @@ export function createExampleAppModel(
               "maxContractExecutionEnergy",
             ),
             parameterHex: prepared.parameterHex,
-            schema: prepared.schema,
             validate: state.smartContracts.validate,
-          });
+          };
+          if (prepared.schema) {
+            initRequest.schema = prepared.schema;
+          }
+          const result = await client.requestContractInit(initRequest);
           update({
             status:
               "Smart contract init request approved. The wallet returned a transaction hash.",
           });
-          updateSmartContracts({
+          updateSmartContractsState({
             status: "Init request submitted through @ccd-wallet/connect-client.",
             lastTransactionHash: result.transactionHash,
           });
@@ -492,8 +544,7 @@ export function createExampleAppModel(
         }
 
         update({ status: "Submitting smart contract update request..." });
-        const receiveName = `${state.smartContracts.contractName.trim()}.${state.smartContracts.entrypointName.trim()}`;
-        const result = await client.requestContractUpdate({
+        const updateRequest: ContractUpdateParams = {
           sessionToken: state.session.sessionToken,
           contractAddress: {
             index: parseUnsignedInteger(
@@ -505,27 +556,30 @@ export function createExampleAppModel(
               "contractAddress.subindex",
             ),
           },
-          receiveName,
+          receiveName: `${prepared.contractName}.${state.smartContracts.entrypointName.trim()}`,
           amountMicroCcd: state.smartContracts.amountMicroCcd.trim(),
           maxContractExecutionEnergy: parseUnsignedInteger(
             state.smartContracts.maxContractExecutionEnergy,
             "maxContractExecutionEnergy",
           ),
           parameterHex: prepared.parameterHex,
-          schema: prepared.schema,
           validate: state.smartContracts.validate,
-        });
+        };
+        if (prepared.schema) {
+          updateRequest.schema = prepared.schema;
+        }
+        const result = await client.requestContractUpdate(updateRequest);
         update({
           status:
             "Smart contract update request approved. The wallet returned a transaction hash.",
         });
-        updateSmartContracts({
+        updateSmartContractsState({
           status: "Update request submitted through @ccd-wallet/connect-client.",
           lastTransactionHash: result.transactionHash,
         });
       } catch (error) {
         update({ status: formatErrorStatus(error) });
-        updateSmartContracts({ status: formatErrorStatus(error) });
+        updateSmartContractsState({ status: formatErrorStatus(error) });
       }
     },
 
@@ -534,6 +588,7 @@ export function createExampleAppModel(
       state = {
         serverUrl: state.serverUrl,
         networkGenesisHash: state.networkGenesisHash,
+        nodeEndpoint: state.nodeEndpoint,
         challenge: challengeGenerator(),
         status: "Ready to pair.",
         currentPage: "smart-contracts",
@@ -558,20 +613,20 @@ function createDefaultSmartContractsState(): SmartContractsState {
   return {
     mode: "init",
     moduleRef: "",
-    contractName: "",
     initName: "init_my_contract",
     entrypointName: "set",
     contractIndex: "0",
     contractSubindex: "0",
     amountMicroCcd: "0",
     maxContractExecutionEnergy: "30000",
-    schemaBase64: "",
     parameterJson: "{}",
     validate: true,
     status:
-      "Provide a schema, JSON value, and request details to prepare a Smart Contracts payload.",
+      "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
     preparedParameterHex: "",
     preparedSchema: null,
+    preparedModuleRef: "",
+    preparedContractName: "",
     lastTransactionHash: "",
   };
 }
