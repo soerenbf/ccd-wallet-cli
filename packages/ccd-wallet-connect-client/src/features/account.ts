@@ -1,5 +1,5 @@
 /**
- * Account-request feature helpers for the connect client package.
+ * Account-authority feature helpers for the connect client package.
  *
  * This module contains the feature-level wrapper around the `requestAccount`
  * protocol method while leaving transport and JSON-RPC details to the shared

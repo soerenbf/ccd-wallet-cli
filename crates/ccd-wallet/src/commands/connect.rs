@@ -132,7 +132,7 @@ pub async fn run(conn: Connection, args: ConnectArgs) -> Result<()> {
     server.serve(args.bind, shutdown_rx).await
 }
 
-fn approve_pairing(conn: &Connection, request: PairingRequest) -> Result<PairingApproval> {
+fn approve_pairing(_conn: &Connection, request: PairingRequest) -> Result<PairingApproval> {
     cliclack::log::info(format!(
         "Browser pairing request\norigin: {}",
         request.origin
@@ -154,34 +154,36 @@ fn approve_pairing(conn: &Connection, request: PairingRequest) -> Result<Pairing
     }
 
     let (network_name, network_entry) = select_network()?;
-    let account = select_account(conn, &network_entry.genesis_hash)?;
-    let account_address = read_account_address(conn, &account, &network_name)?;
 
     cliclack::log::success(format!(
-        "Paired {} for account {} on network {}.",
-        request.origin, account_address, network_name
+        "Paired {} on network {}.",
+        request.origin, network_name
     ))?;
 
     Ok(PairingApproval {
         network_genesis_hash: network_entry.genesis_hash,
-        account_address,
     })
 }
 
 fn approve_account_request(
-    _conn: &Connection,
+    conn: &Connection,
     request: AccountRequest,
 ) -> Result<AccountRequestApproval> {
     let network_name = resolve_network_display_name(&request.network_genesis_hash)?;
-
-    cliclack::log::success(format!(
-        "Returned session-bound account {} for network {}.",
-        request.account_address, network_name
+    cliclack::log::info(format!(
+        "Account authority request\norigin: {}\nnetwork: {}",
+        request.origin, network_name
     ))?;
 
-    Ok(AccountRequestApproval {
-        account_address: request.account_address,
-    })
+    let account = select_account(conn, &request.network_genesis_hash)?;
+    let account_address = read_account_address(conn, &account, &network_name)?;
+
+    cliclack::log::success(format!(
+        "Approved account authority {} for {} on network {}.",
+        account_address, request.origin, network_name
+    ))?;
+
+    Ok(AccountRequestApproval { account_address })
 }
 
 fn resolve_network_display_name(network_genesis_hash: &str) -> Result<String> {
@@ -802,7 +804,7 @@ fn select_account(conn: &Connection, network_genesis_hash: &str) -> Result<Accou
             hint: account_hint(record),
         })
         .collect::<Vec<_>>();
-    let selected = select_or_single("Select account for browser session", &items, None)?;
+    let selected = select_or_single("Select account authority for browser session", &items, None)?;
     accounts
         .into_iter()
         .find(|record| record.id == selected)
@@ -951,29 +953,5 @@ mod tests {
         let mut no_schema = update;
         no_schema.schema = None;
         assert_eq!(display_update_parameter(&no_schema), "0x2a");
-    }
-
-    #[test]
-    fn account_request_returns_session_bound_address() {
-        let home = isolated_home("account-request");
-        write_config(
-            &home,
-            r#"{
-                "version": 1,
-                "networks": {
-                    "testnet": { "node_endpoint": "http://node.example", "genesis_hash": "genesis", "wallet_proxy": null }
-                }
-            }"#,
-        );
-        let conn = Connection::open_in_memory().unwrap();
-        let approval = approve_account_request(
-            &conn,
-            AccountRequest {
-                network_genesis_hash: "genesis".to_owned(),
-                account_address: "session-account".to_owned(),
-            },
-        )
-        .unwrap();
-        assert_eq!(approval.account_address, "session-account");
     }
 }

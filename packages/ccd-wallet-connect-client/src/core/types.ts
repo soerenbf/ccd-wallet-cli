@@ -122,7 +122,7 @@ export interface PairResult {
 export interface RequestAccountParams {
   /** Session token returned by a successful pairing request. */
   sessionToken: string;
-  /** Genesis hash of the target network for which account authority is requested. */
+  /** Genesis hash of the network already bound to the paired session. */
   networkGenesisHash: string;
 }
 
@@ -130,7 +130,7 @@ export interface RequestAccountParams {
  * Successful result of the `requestAccount` method.
  */
 export interface RequestAccountResult {
-  /** Account address approved for the requested network. */
+  /** Account address approved as account authority for the paired session. */
   accountAddress: string;
 }
 

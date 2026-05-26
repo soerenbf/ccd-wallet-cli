@@ -2,7 +2,7 @@
 //!
 //! Supported JSON-RPC methods:
 //! - `pair`: approve a browser session and return a session token.
-//! - `requestAccount`: return the network/account context bound during pairing.
+//! - `requestAccount`: acquire account authority for an existing paired session.
 //! - `requestContractInit`: request wallet approval for a smart contract init transaction.
 //! - `requestContractUpdate`: request wallet approval for a smart contract update transaction.
 
@@ -28,6 +28,9 @@ pub const PAIR_METHOD: &str = "pair";
 pub const REQUEST_ACCOUNT_METHOD: &str = "requestAccount";
 pub const REQUEST_CONTRACT_INIT_METHOD: &str = "requestContractInit";
 pub const REQUEST_CONTRACT_UPDATE_METHOD: &str = "requestContractUpdate";
+const MISSING_ACCOUNT_AUTHORITY_CODE: i64 = -32006;
+const MISSING_ACCOUNT_AUTHORITY_MESSAGE: &str =
+    "session is missing account authority; call requestAccount first";
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -45,13 +48,12 @@ pub struct PairingRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PairingApproval {
     pub network_genesis_hash: String,
-    pub account_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRequest {
+    pub origin: String,
     pub network_genesis_hash: String,
-    pub account_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -168,6 +170,15 @@ type PairingApprover = Arc<
         + Sync,
 >;
 
+type AccountRequester = Arc<
+    dyn Fn(
+            AccountRequest,
+        )
+            -> BoxFuture<'static, std::result::Result<AccountRequestApproval, PairingRejection>>
+        + Send
+        + Sync,
+>;
+
 pub type ContractInitApprover = Arc<
     dyn Fn(
             ContractInitRequest,
@@ -191,6 +202,7 @@ pub type ContractUpdateApprover = Arc<
 #[derive(Clone)]
 pub struct ConnectServer {
     approver: PairingApprover,
+    account_requester: AccountRequester,
     contract_init_approver: ContractInitApprover,
     contract_update_approver: ContractUpdateApprover,
     state: Arc<Mutex<ServerState>>,
@@ -199,7 +211,7 @@ pub struct ConnectServer {
 impl ConnectServer {
     pub fn new<F, G, H, I>(
         approver: F,
-        _account_requester: G,
+        account_requester: G,
         contract_init_approver: H,
         contract_update_approver: I,
     ) -> Self
@@ -237,6 +249,7 @@ impl ConnectServer {
     {
         Self {
             approver: Arc::new(approver),
+            account_requester: Arc::new(account_requester),
             contract_init_approver: Arc::new(contract_init_approver),
             contract_update_approver: Arc::new(contract_update_approver),
             state: Arc::new(Mutex::new(ServerState::default())),
@@ -329,7 +342,10 @@ impl ConnectServer {
 
         match request.method.as_str() {
             PAIR_METHOD => self.handle_pair(id, origin, request.params).await,
-            REQUEST_ACCOUNT_METHOD => self.handle_request_account(id, request.params).await,
+            REQUEST_ACCOUNT_METHOD => {
+                self.handle_request_account(id, origin, request.params)
+                    .await
+            }
             REQUEST_CONTRACT_INIT_METHOD => {
                 self.handle_contract_init(id, origin, request.params).await
             }
@@ -363,8 +379,9 @@ impl ConnectServer {
                 let token = Uuid::new_v4().to_string();
                 let session = ActiveSession {
                     token: token.clone(),
+                    origin: origin.to_owned(),
                     network_genesis_hash: approval.network_genesis_hash,
-                    account_address: approval.account_address,
+                    authorities: SessionAuthorities::default(),
                 };
                 if !self.install_session(session) {
                     return json_rpc_error(id, -32001, "a browser session is already active");
@@ -380,7 +397,12 @@ impl ConnectServer {
         }
     }
 
-    async fn handle_request_account(&self, id: Option<Value>, params: Option<Value>) -> String {
+    async fn handle_request_account(
+        &self,
+        id: Option<Value>,
+        origin: &str,
+        params: Option<Value>,
+    ) -> String {
         let params = match params
             .map(serde_json::from_value::<RequestAccountParams>)
             .transpose()
@@ -391,24 +413,54 @@ impl ConnectServer {
                 return json_rpc_error(id, -32602, format!("invalid requestAccount params: {err}"));
             }
         };
-        match self.active_session() {
-            Some(session) if session.token == params.session_token => {
-                if params.network_genesis_hash != session.network_genesis_hash {
-                    return json_rpc_error(
-                        id,
-                        -32000,
-                        "requestAccount networkGenesisHash does not match the active session",
-                    );
+
+        let Some(session) = self.active_session() else {
+            return json_rpc_error(id, -32002, "no active browser session");
+        };
+        if session.token != params.session_token {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        if params.network_genesis_hash != session.network_genesis_hash {
+            return json_rpc_error(
+                id,
+                -32000,
+                "requestAccount networkGenesisHash does not match the active session",
+            );
+        }
+        if session.origin != origin {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        if let Some(account_authority) = session.authorities.account.as_ref() {
+            return json_rpc_result(
+                id,
+                json!(RequestAccountResult {
+                    account_address: account_authority.account_address.clone(),
+                }),
+            );
+        }
+
+        match (self.account_requester)(AccountRequest {
+            origin: session.origin.clone(),
+            network_genesis_hash: session.network_genesis_hash.clone(),
+        })
+        .await
+        {
+            Ok(approval) => {
+                if !self.grant_account_authority(
+                    &params.session_token,
+                    &params.network_genesis_hash,
+                    approval.account_address.clone(),
+                ) {
+                    return json_rpc_error(id, -32003, "invalid session token");
                 }
                 json_rpc_result(
                     id,
                     json!(RequestAccountResult {
-                        account_address: session.account_address,
+                        account_address: approval.account_address,
                     }),
                 )
             }
-            Some(_) => json_rpc_error(id, -32003, "invalid session token"),
-            None => json_rpc_error(id, -32002, "no active browser session"),
+            Err(rejection) => json_rpc_error(id, -32000, rejection.message),
         }
     }
 
@@ -440,11 +492,21 @@ impl ConnectServer {
         if session.token != params.session_token {
             return json_rpc_error(id, -32003, "invalid session token");
         }
+        if session.origin != origin {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        let Some(account_authority) = session.authorities.account.as_ref() else {
+            return json_rpc_error(
+                id,
+                MISSING_ACCOUNT_AUTHORITY_CODE,
+                MISSING_ACCOUNT_AUTHORITY_MESSAGE,
+            );
+        };
 
         let request = ContractInitRequest {
             origin: origin.to_owned(),
             network_genesis_hash: session.network_genesis_hash,
-            account_address: session.account_address,
+            account_address: account_authority.account_address.clone(),
             module_ref: params.module_ref,
             init_name: params.init_name,
             amount_micro_ccd: params.amount_micro_ccd,
@@ -489,11 +551,21 @@ impl ConnectServer {
         if session.token != params.session_token {
             return json_rpc_error(id, -32003, "invalid session token");
         }
+        if session.origin != origin {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        let Some(account_authority) = session.authorities.account.as_ref() else {
+            return json_rpc_error(
+                id,
+                MISSING_ACCOUNT_AUTHORITY_CODE,
+                MISSING_ACCOUNT_AUTHORITY_MESSAGE,
+            );
+        };
 
         let request = ContractUpdateRequest {
             origin: origin.to_owned(),
             network_genesis_hash: session.network_genesis_hash,
-            account_address: session.account_address,
+            account_address: account_authority.account_address.clone(),
             contract_address: params.contract_address,
             receive_name: params.receive_name,
             amount_micro_ccd: params.amount_micro_ccd,
@@ -527,12 +599,42 @@ impl ConnectServer {
         state.active_session = Some(session);
         true
     }
+
+    fn grant_account_authority(
+        &self,
+        token: &str,
+        network_genesis_hash: &str,
+        account_address: String,
+    ) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        let Some(session) = state.active_session.as_mut() else {
+            return false;
+        };
+        if session.token != token || session.network_genesis_hash != network_genesis_hash {
+            return false;
+        }
+        session.authorities.account = Some(AccountAuthority { account_address });
+        true
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveSession {
     token: String,
+    origin: String,
     network_genesis_hash: String,
+    authorities: SessionAuthorities,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SessionAuthorities {
+    account: Option<AccountAuthority>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountAuthority {
     account_address: String,
 }
 
@@ -788,7 +890,7 @@ pub fn method_descriptions() -> BTreeMap<&'static str, &'static str> {
         (PAIR_METHOD, "request browser pairing"),
         (
             REQUEST_ACCOUNT_METHOD,
-            "request the account address bound to the active browser session",
+            "request account authority for the active browser session",
         ),
         (
             REQUEST_CONTRACT_INIT_METHOD,
@@ -875,23 +977,30 @@ fn sha1(input: &[u8]) -> [u8; 20] {
 mod tests {
     use super::*;
     use futures_util::FutureExt;
+    use std::sync::{Arc, Mutex};
 
     fn server() -> ConnectServer {
+        server_with_account_responses(vec!["addr".to_owned()])
+    }
+
+    fn server_with_account_responses(account_responses: Vec<String>) -> ConnectServer {
+        let account_responses = Arc::new(Mutex::new(account_responses));
         ConnectServer::new(
             |_| {
                 async move {
                     Ok(PairingApproval {
                         network_genesis_hash: "genesis".to_owned(),
-                        account_address: "addr".to_owned(),
                     })
                 }
                 .boxed()
             },
-            |_| {
+            move |request| {
+                let account_responses = Arc::clone(&account_responses);
                 async move {
-                    Ok(AccountRequestApproval {
-                        account_address: "unused".to_owned(),
-                    })
+                    assert_eq!(request.origin, "https://example.com");
+                    assert_eq!(request.network_genesis_hash, "genesis");
+                    let account_address = account_responses.lock().unwrap().remove(0);
+                    Ok(AccountRequestApproval { account_address })
                 }
                 .boxed()
             },
@@ -971,6 +1080,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_account_requests_return_cached_session_authority() {
+        let server = server_with_account_responses(vec!["addr-1".to_owned(), "addr-2".to_owned()]);
+        let pair_response = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":1,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let value: Value = serde_json::from_str(&pair_response).unwrap();
+        let token = value["result"]["sessionToken"].as_str().unwrap();
+
+        let first = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "genesis"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let first_value: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first_value["result"]["accountAddress"], "addr-1");
+
+        let second = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "genesis"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let second_value: Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(second_value["result"]["accountAddress"], "addr-1");
+    }
+
+    #[tokio::test]
     async fn request_account_rejects_mismatched_genesis_hash() {
         let server = server();
         let pair_response = server
@@ -1013,12 +1171,28 @@ mod tests {
         let value: Value = serde_json::from_str(&pair_response).unwrap();
         let token = value["result"]["sessionToken"].as_str().unwrap();
 
-        let init_response = server
+        let _ = server
             .handle_text_message(
                 "https://example.com",
                 &json!({
                     "jsonrpc": "2.0",
                     "id": 2,
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "genesis"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+
+        let init_response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
                     "method": REQUEST_CONTRACT_INIT_METHOD,
                     "params": {
                         "sessionToken": token,
@@ -1041,7 +1215,7 @@ mod tests {
                 "https://example.com",
                 &json!({
                     "jsonrpc": "2.0",
-                    "id": 3,
+                    "id": 4,
                     "method": REQUEST_CONTRACT_UPDATE_METHOD,
                     "params": {
                         "sessionToken": token,
@@ -1057,6 +1231,42 @@ mod tests {
             .await;
         let value: Value = serde_json::from_str(&update_response).unwrap();
         assert_eq!(value["result"]["transactionHash"], "update-hash");
+    }
+
+    #[tokio::test]
+    async fn contract_execution_rejects_before_account_authority_is_granted() {
+        let server = server();
+        let pair_response = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":1,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let value: Value = serde_json::from_str(&pair_response).unwrap();
+        let token = value["result"]["sessionToken"].as_str().unwrap();
+
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": REQUEST_CONTRACT_UPDATE_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "contractAddress": { "index": 1, "subindex": 0 },
+                        "receiveName": "contract.receive",
+                        "amountMicroCcd": "0",
+                        "maxContractExecutionEnergy": 30000,
+                        "parameterHex": ""
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], MISSING_ACCOUNT_AUTHORITY_CODE);
+        assert_eq!(value["error"]["message"], MISSING_ACCOUNT_AUTHORITY_MESSAGE);
     }
 
     #[tokio::test]
@@ -1133,15 +1343,17 @@ mod tests {
         let server = server();
         assert!(server.install_session(ActiveSession {
             token: "token".to_owned(),
+            origin: "https://example.com".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
-            account_address: "addr".to_owned(),
+            authorities: SessionAuthorities::default(),
         }));
         assert_eq!(
             server.active_session(),
             Some(ActiveSession {
                 token: "token".to_owned(),
+                origin: "https://example.com".to_owned(),
                 network_genesis_hash: "genesis".to_owned(),
-                account_address: "addr".to_owned(),
+                authorities: SessionAuthorities::default(),
             })
         );
     }
