@@ -1,3 +1,11 @@
+//! WebSocket JSON-RPC server for `ccd-wallet connect` browser sessions.
+//!
+//! Supported JSON-RPC methods:
+//! - `pair`: approve a browser session and return a session token.
+//! - `requestAccount`: return the network/account context bound during pairing.
+//! - `requestContractInit`: request wallet approval for a smart contract init transaction.
+//! - `requestContractUpdate`: request wallet approval for a smart contract update transaction.
+
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::future::BoxFuture;
@@ -18,6 +26,8 @@ use uuid::Uuid;
 
 pub const PAIR_METHOD: &str = "pair";
 pub const REQUEST_ACCOUNT_METHOD: &str = "requestAccount";
+pub const REQUEST_CONTRACT_INIT_METHOD: &str = "requestContractInit";
+pub const REQUEST_CONTRACT_UPDATE_METHOD: &str = "requestContractUpdate";
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -33,16 +43,108 @@ pub struct PairingRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PairingApproval;
+pub struct PairingApproval {
+    pub network_genesis_hash: String,
+    pub account_address: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRequest {
     pub network_genesis_hash: String,
+    pub account_address: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountRequestApproval {
     pub account_address: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ContractAddress {
+    pub index: u64,
+    pub subindex: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractInitRequest {
+    pub origin: String,
+    pub network_genesis_hash: String,
+    pub account_address: String,
+    pub module_ref: String,
+    pub init_name: String,
+    pub amount_micro_ccd: String,
+    pub max_contract_execution_energy: u64,
+    pub parameter_hex: String,
+    pub schema: Option<Value>,
+    pub validate: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractUpdateRequest {
+    pub origin: String,
+    pub network_genesis_hash: String,
+    pub account_address: String,
+    pub contract_address: ContractAddress,
+    pub receive_name: String,
+    pub amount_micro_ccd: String,
+    pub max_contract_execution_energy: u64,
+    pub parameter_hex: String,
+    pub schema: Option<Value>,
+    pub validate: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractInitApproval {
+    pub transaction_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractUpdateApproval {
+    pub transaction_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContractExecutionErrorKind {
+    UserDeclined,
+    SubmissionFailed,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContractExecutionRejection {
+    pub kind: ContractExecutionErrorKind,
+    pub message: String,
+}
+
+impl ContractExecutionRejection {
+    pub fn user_declined(message: impl Into<String>) -> Self {
+        Self {
+            kind: ContractExecutionErrorKind::UserDeclined,
+            message: message.into(),
+        }
+    }
+
+    pub fn submission_failed(message: impl Into<String>) -> Self {
+        Self {
+            kind: ContractExecutionErrorKind::SubmissionFailed,
+            message: message.into(),
+        }
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            kind: ContractExecutionErrorKind::Other,
+            message: message.into(),
+        }
+    }
+
+    fn json_rpc_code(&self) -> i64 {
+        match self.kind {
+            ContractExecutionErrorKind::UserDeclined => -32004,
+            ContractExecutionErrorKind::SubmissionFailed => -32005,
+            ContractExecutionErrorKind::Other => -32000,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,24 +168,41 @@ type PairingApprover = Arc<
         + Sync,
 >;
 
-type AccountRequester = Arc<
+pub type ContractInitApprover = Arc<
     dyn Fn(
-            AccountRequest,
-        )
-            -> BoxFuture<'static, std::result::Result<AccountRequestApproval, PairingRejection>>
-        + Send
+            ContractInitRequest,
+        ) -> BoxFuture<
+            'static,
+            std::result::Result<ContractInitApproval, ContractExecutionRejection>,
+        > + Send
+        + Sync,
+>;
+
+pub type ContractUpdateApprover = Arc<
+    dyn Fn(
+            ContractUpdateRequest,
+        ) -> BoxFuture<
+            'static,
+            std::result::Result<ContractUpdateApproval, ContractExecutionRejection>,
+        > + Send
         + Sync,
 >;
 
 #[derive(Clone)]
 pub struct ConnectServer {
     approver: PairingApprover,
-    account_requester: AccountRequester,
+    contract_init_approver: ContractInitApprover,
+    contract_update_approver: ContractUpdateApprover,
     state: Arc<Mutex<ServerState>>,
 }
 
 impl ConnectServer {
-    pub fn new<F, G>(approver: F, account_requester: G) -> Self
+    pub fn new<F, G, H, I>(
+        approver: F,
+        _account_requester: G,
+        contract_init_approver: H,
+        contract_update_approver: I,
+    ) -> Self
     where
         F: Fn(
                 PairingRequest,
@@ -99,10 +218,27 @@ impl ConnectServer {
             + Send
             + Sync
             + 'static,
+        H: Fn(
+                ContractInitRequest,
+            ) -> BoxFuture<
+                'static,
+                std::result::Result<ContractInitApproval, ContractExecutionRejection>,
+            > + Send
+            + Sync
+            + 'static,
+        I: Fn(
+                ContractUpdateRequest,
+            ) -> BoxFuture<
+                'static,
+                std::result::Result<ContractUpdateApproval, ContractExecutionRejection>,
+            > + Send
+            + Sync
+            + 'static,
     {
         Self {
             approver: Arc::new(approver),
-            account_requester: Arc::new(account_requester),
+            contract_init_approver: Arc::new(contract_init_approver),
+            contract_update_approver: Arc::new(contract_update_approver),
             state: Arc::new(Mutex::new(ServerState::default())),
         }
     }
@@ -194,6 +330,13 @@ impl ConnectServer {
         match request.method.as_str() {
             PAIR_METHOD => self.handle_pair(id, origin, request.params).await,
             REQUEST_ACCOUNT_METHOD => self.handle_request_account(id, request.params).await,
+            REQUEST_CONTRACT_INIT_METHOD => {
+                self.handle_contract_init(id, origin, request.params).await
+            }
+            REQUEST_CONTRACT_UPDATE_METHOD => {
+                self.handle_contract_update(id, origin, request.params)
+                    .await
+            }
             _ => json_rpc_error(id, -32601, "method not found"),
         }
     }
@@ -216,10 +359,12 @@ impl ConnectServer {
             challenge: params.challenge,
         };
         match (self.approver)(request).await {
-            Ok(_approval) => {
+            Ok(approval) => {
                 let token = Uuid::new_v4().to_string();
                 let session = ActiveSession {
                     token: token.clone(),
+                    network_genesis_hash: approval.network_genesis_hash,
+                    account_address: approval.account_address,
                 };
                 if !self.install_session(session) {
                     return json_rpc_error(id, -32001, "a browser session is already active");
@@ -248,21 +393,120 @@ impl ConnectServer {
         };
         match self.active_session() {
             Some(session) if session.token == params.session_token => {
-                let request = AccountRequest {
-                    network_genesis_hash: params.network_genesis_hash,
-                };
-                match (self.account_requester)(request).await {
-                    Ok(approval) => json_rpc_result(
+                if params.network_genesis_hash != session.network_genesis_hash {
+                    return json_rpc_error(
                         id,
-                        json!(RequestAccountResult {
-                            account_address: approval.account_address,
-                        }),
-                    ),
-                    Err(rejection) => json_rpc_error(id, -32000, rejection.message),
+                        -32000,
+                        "requestAccount networkGenesisHash does not match the active session",
+                    );
                 }
+                json_rpc_result(
+                    id,
+                    json!(RequestAccountResult {
+                        account_address: session.account_address,
+                    }),
+                )
             }
             Some(_) => json_rpc_error(id, -32003, "invalid session token"),
             None => json_rpc_error(id, -32002, "no active browser session"),
+        }
+    }
+
+    async fn handle_contract_init(
+        &self,
+        id: Option<Value>,
+        origin: &str,
+        params: Option<Value>,
+    ) -> String {
+        let params = match params
+            .map(serde_json::from_value::<ContractInitParams>)
+            .transpose()
+        {
+            Ok(Some(params)) => params,
+            Ok(None) => {
+                return json_rpc_error(id, -32602, "requestContractInit params are required");
+            }
+            Err(err) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    format!("invalid requestContractInit params: {err}"),
+                );
+            }
+        };
+        let Some(session) = self.active_session() else {
+            return json_rpc_error(id, -32002, "no active browser session");
+        };
+        if session.token != params.session_token {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+
+        let request = ContractInitRequest {
+            origin: origin.to_owned(),
+            network_genesis_hash: session.network_genesis_hash,
+            account_address: session.account_address,
+            module_ref: params.module_ref,
+            init_name: params.init_name,
+            amount_micro_ccd: params.amount_micro_ccd,
+            max_contract_execution_energy: params.max_contract_execution_energy,
+            parameter_hex: params.parameter_hex,
+            schema: params.schema,
+            validate: params.validate.unwrap_or(false),
+        };
+        match (self.contract_init_approver)(request).await {
+            Ok(approval) => {
+                json_rpc_result(id, json!({ "transactionHash": approval.transaction_hash }))
+            }
+            Err(rejection) => json_rpc_error(id, rejection.json_rpc_code(), rejection.message),
+        }
+    }
+
+    async fn handle_contract_update(
+        &self,
+        id: Option<Value>,
+        origin: &str,
+        params: Option<Value>,
+    ) -> String {
+        let params = match params
+            .map(serde_json::from_value::<ContractUpdateParams>)
+            .transpose()
+        {
+            Ok(Some(params)) => params,
+            Ok(None) => {
+                return json_rpc_error(id, -32602, "requestContractUpdate params are required");
+            }
+            Err(err) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    format!("invalid requestContractUpdate params: {err}"),
+                );
+            }
+        };
+        let Some(session) = self.active_session() else {
+            return json_rpc_error(id, -32002, "no active browser session");
+        };
+        if session.token != params.session_token {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+
+        let request = ContractUpdateRequest {
+            origin: origin.to_owned(),
+            network_genesis_hash: session.network_genesis_hash,
+            account_address: session.account_address,
+            contract_address: params.contract_address,
+            receive_name: params.receive_name,
+            amount_micro_ccd: params.amount_micro_ccd,
+            max_contract_execution_energy: params.max_contract_execution_energy,
+            parameter_hex: params.parameter_hex,
+            schema: params.schema,
+            validate: params.validate.unwrap_or(false),
+        };
+        match (self.contract_update_approver)(request).await {
+            Ok(approval) => {
+                json_rpc_result(id, json!({ "transactionHash": approval.transaction_hash }))
+            }
+            Err(rejection) => json_rpc_error(id, rejection.json_rpc_code(), rejection.message),
         }
     }
 
@@ -288,6 +532,8 @@ impl ConnectServer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActiveSession {
     token: String,
+    network_genesis_hash: String,
+    account_address: String,
 }
 
 #[derive(Default)]
@@ -327,6 +573,42 @@ struct RequestAccountParams {
     session_token: String,
     #[serde(rename = "networkGenesisHash")]
     network_genesis_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractInitParams {
+    #[serde(rename = "sessionToken")]
+    session_token: String,
+    #[serde(rename = "moduleRef")]
+    module_ref: String,
+    #[serde(rename = "initName")]
+    init_name: String,
+    #[serde(rename = "amountMicroCcd")]
+    amount_micro_ccd: String,
+    #[serde(rename = "maxContractExecutionEnergy")]
+    max_contract_execution_energy: u64,
+    #[serde(rename = "parameterHex")]
+    parameter_hex: String,
+    schema: Option<Value>,
+    validate: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContractUpdateParams {
+    #[serde(rename = "sessionToken")]
+    session_token: String,
+    #[serde(rename = "contractAddress")]
+    contract_address: ContractAddress,
+    #[serde(rename = "receiveName")]
+    receive_name: String,
+    #[serde(rename = "amountMicroCcd")]
+    amount_micro_ccd: String,
+    #[serde(rename = "maxContractExecutionEnergy")]
+    max_contract_execution_energy: u64,
+    #[serde(rename = "parameterHex")]
+    parameter_hex: String,
+    schema: Option<Value>,
+    validate: Option<bool>,
 }
 
 async fn read_handshake_request(stream: &mut TcpStream) -> Result<HandshakeRequest> {
@@ -506,7 +788,15 @@ pub fn method_descriptions() -> BTreeMap<&'static str, &'static str> {
         (PAIR_METHOD, "request browser pairing"),
         (
             REQUEST_ACCOUNT_METHOD,
-            "request an approved account address for a target network",
+            "request the account address bound to the active browser session",
+        ),
+        (
+            REQUEST_CONTRACT_INIT_METHOD,
+            "request approval to initialize a smart contract instance",
+        ),
+        (
+            REQUEST_CONTRACT_UPDATE_METHOD,
+            "request approval to invoke a smart contract receive function",
         ),
     ])
 }
@@ -588,11 +878,35 @@ mod tests {
 
     fn server() -> ConnectServer {
         ConnectServer::new(
-            |_| async move { Ok(PairingApproval) }.boxed(),
+            |_| {
+                async move {
+                    Ok(PairingApproval {
+                        network_genesis_hash: "genesis".to_owned(),
+                        account_address: "addr".to_owned(),
+                    })
+                }
+                .boxed()
+            },
             |_| {
                 async move {
                     Ok(AccountRequestApproval {
-                        account_address: "addr".to_owned(),
+                        account_address: "unused".to_owned(),
+                    })
+                }
+                .boxed()
+            },
+            |_| {
+                async move {
+                    Ok(ContractInitApproval {
+                        transaction_hash: "init-hash".to_owned(),
+                    })
+                }
+                .boxed()
+            },
+            |_| {
+                async move {
+                    Ok(ContractUpdateApproval {
+                        transaction_hash: "update-hash".to_owned(),
                     })
                 }
                 .boxed()
@@ -657,6 +971,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_account_rejects_mismatched_genesis_hash() {
+        let server = server();
+        let pair_response = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":1,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let value: Value = serde_json::from_str(&pair_response).unwrap();
+        let token = value["result"]["sessionToken"].as_str().unwrap();
+
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "other-genesis"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32000);
+    }
+
+    #[tokio::test]
+    async fn contract_execution_dispatches_with_session_context() {
+        let server = server();
+        let pair_response = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":1,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let value: Value = serde_json::from_str(&pair_response).unwrap();
+        let token = value["result"]["sessionToken"].as_str().unwrap();
+
+        let init_response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": REQUEST_CONTRACT_INIT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "moduleRef": "00",
+                        "initName": "init_contract",
+                        "amountMicroCcd": "0",
+                        "maxContractExecutionEnergy": 30000,
+                        "parameterHex": "",
+                        "validate": true
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&init_response).unwrap();
+        assert_eq!(value["result"]["transactionHash"], "init-hash");
+
+        let update_response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": REQUEST_CONTRACT_UPDATE_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "contractAddress": { "index": 1, "subindex": 0 },
+                        "receiveName": "contract.receive",
+                        "amountMicroCcd": "0",
+                        "maxContractExecutionEnergy": 30000,
+                        "parameterHex": ""
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&update_response).unwrap();
+        assert_eq!(value["result"]["transactionHash"], "update-hash");
+    }
+
+    #[tokio::test]
+    async fn contract_execution_rejects_invalid_session_token_and_parse_errors() {
+        let server = server();
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": REQUEST_CONTRACT_UPDATE_METHOD,
+                    "params": {
+                        "sessionToken": "missing",
+                        "contractAddress": { "index": 1, "subindex": 0 },
+                        "receiveName": "contract.receive",
+                        "amountMicroCcd": "0",
+                        "maxContractExecutionEnergy": 30000,
+                        "parameterHex": ""
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32002);
+
+        let _ = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":2,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": REQUEST_CONTRACT_UPDATE_METHOD,
+                    "params": { "sessionToken": "wrong" }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32602);
+
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": REQUEST_CONTRACT_UPDATE_METHOD,
+                    "params": {
+                        "sessionToken": "wrong",
+                        "contractAddress": { "index": 1, "subindex": 0 },
+                        "receiveName": "contract.receive",
+                        "amountMicroCcd": "0",
+                        "maxContractExecutionEnergy": 30000,
+                        "parameterHex": ""
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32003);
+    }
+
+    #[test]
+    fn install_session_preserves_bound_context() {
+        let server = server();
+        assert!(server.install_session(ActiveSession {
+            token: "token".to_owned(),
+            network_genesis_hash: "genesis".to_owned(),
+            account_address: "addr".to_owned(),
+        }));
+        assert_eq!(
+            server.active_session(),
+            Some(ActiveSession {
+                token: "token".to_owned(),
+                network_genesis_hash: "genesis".to_owned(),
+                account_address: "addr".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn rejected_pairing_returns_error() {
         let server = ConnectServer::new(
             |_| async move { Err(PairingRejection::new("rejected by user")) }.boxed(),
@@ -668,6 +1158,8 @@ mod tests {
                 }
                 .boxed()
             },
+            |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
+            |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
         );
         let response = server
             .handle_text_message(

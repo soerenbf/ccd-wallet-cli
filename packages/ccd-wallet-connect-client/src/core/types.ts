@@ -23,6 +23,16 @@ export const PAIR_METHOD = "pair";
 export const REQUEST_ACCOUNT_METHOD = "requestAccount";
 
 /**
+ * JSON-RPC method name for requesting smart contract initialization.
+ */
+export const REQUEST_CONTRACT_INIT_METHOD = "requestContractInit";
+
+/**
+ * JSON-RPC method name for requesting smart contract update execution.
+ */
+export const REQUEST_CONTRACT_UPDATE_METHOD = "requestContractUpdate";
+
+/**
  * JSON-RPC 2.0 request identifier type used by the connect protocol.
  */
 export type JsonRpcId = string | number | null;
@@ -122,6 +132,76 @@ export interface RequestAccountParams {
 export interface RequestAccountResult {
   /** Account address approved for the requested network. */
   accountAddress: string;
+}
+
+/**
+ * Smart contract instance address.
+ */
+export interface ContractAddress {
+  /** Contract instance index. */
+  index: number;
+  /** Contract instance subindex. */
+  subindex: number;
+}
+
+/**
+ * Parameters for the `requestContractInit` method.
+ */
+export interface ContractInitParams {
+  /** Session token returned by a successful pairing request. */
+  sessionToken: string;
+  /** Hex-encoded module reference to initialize from. */
+  moduleRef: string;
+  /** Init function name, e.g. `init_my_contract`. */
+  initName: string;
+  /** CCD amount to attach, in microCCD, encoded as a decimal string. */
+  amountMicroCcd: string;
+  /** Maximum contract execution energy the caller allows. */
+  maxContractExecutionEnergy: number;
+  /** Serialized contract parameter bytes encoded as hex. */
+  parameterHex: string;
+  /** Optional base64-encoded versioned module schema or schema descriptor. */
+  schema?: unknown;
+  /** Whether the wallet should simulate the request before prompting. */
+  validate?: boolean;
+}
+
+/**
+ * Successful result of the `requestContractInit` method.
+ */
+export interface ContractInitResult {
+  /** Submitted transaction hash. */
+  transactionHash: string;
+}
+
+/**
+ * Parameters for the `requestContractUpdate` method.
+ */
+export interface ContractUpdateParams {
+  /** Session token returned by a successful pairing request. */
+  sessionToken: string;
+  /** Contract instance to invoke. */
+  contractAddress: ContractAddress;
+  /** Fully-qualified receive name, e.g. `my_contract.transfer`. */
+  receiveName: string;
+  /** CCD amount to attach, in microCCD, encoded as a decimal string. */
+  amountMicroCcd: string;
+  /** Maximum contract execution energy the caller allows. */
+  maxContractExecutionEnergy: number;
+  /** Serialized contract parameter bytes encoded as hex. */
+  parameterHex: string;
+  /** Optional base64-encoded versioned module schema or schema descriptor. */
+  schema?: unknown;
+  /** Whether the wallet should simulate the request before prompting. */
+  validate?: boolean;
+}
+
+/**
+ * Successful result of the `requestContractUpdate` method.
+ */
+export interface ContractUpdateResult {
+  /** Submitted transaction hash. */
+  transactionHash: string;
 }
 
 /**

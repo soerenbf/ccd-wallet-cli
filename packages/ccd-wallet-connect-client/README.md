@@ -8,8 +8,10 @@ The package wraps the current connect protocol:
 - JSON-RPC 2.0 requests/responses
 - `pair` with an application-provided challenge
 - `requestAccount` with a session token and network genesis hash
+- `requestContractInit` for wallet-approved smart contract initialization
+- `requestContractUpdate` for wallet-approved smart contract receive-function execution
 
-It intentionally does not include transaction proposal, signing, submission, or governance-key pairing APIs yet.
+The wallet signs and submits approved contract transactions and returns the submitted transaction hash. Finalization is displayed locally by the CLI wallet.
 
 ## Install
 
@@ -42,10 +44,34 @@ const accountAddress = await client.requestAccount(
 console.log(pairing.sessionToken);
 console.log(accountAddress);
 
+const init = await client.requestContractInit({
+  sessionToken: pairing.sessionToken,
+  moduleRef: "0123...abcd",
+  initName: "init_my_contract",
+  amountMicroCcd: "0",
+  maxContractExecutionEnergy: 30000,
+  parameterHex: "",
+  validate: true,
+});
+console.log(init.transactionHash);
+
+const update = await client.requestContractUpdate({
+  sessionToken: pairing.sessionToken,
+  contractAddress: { index: 42, subindex: 0 },
+  receiveName: "my_contract.transfer",
+  amountMicroCcd: "0",
+  maxContractExecutionEnergy: 30000,
+  parameterHex: "2a",
+  validate: true,
+});
+console.log(update.transactionHash);
+
 client.close();
 ```
 
 The application is responsible for displaying the same six-digit challenge to the user while the CLI asks the user to enter it.
+
+Contract parameters are serialized by the dApp and passed as `parameterHex`. Optionally pass a base64-encoded versioned module schema (or an object containing it in `base64`, `moduleSchema`, or `schema`) to let the wallet render human-readable parameters; otherwise the wallet displays hex.
 
 ## Runtime compatibility
 

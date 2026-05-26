@@ -130,6 +130,122 @@ test("requestAccount sends JSON-RPC requestAccount request", async () => {
   assert.equal(await accountAddress, "addr");
 });
 
+test("requestContractInit sends JSON-RPC requestContractInit request", async () => {
+  resetMockSockets();
+  const client = new ConnectClient({ WebSocket: MockWebSocket });
+  const connected = client.connect();
+  const socket = MockWebSocket.instances[0];
+  assert.ok(socket);
+  socket.open();
+  await connected;
+
+  const result = client.requestContractInit({
+    sessionToken: "session-token",
+    moduleRef: "module-ref",
+    initName: "init_contract",
+    amountMicroCcd: "0",
+    maxContractExecutionEnergy: 30000,
+    parameterHex: "2a",
+    validate: true,
+  });
+  assert.deepEqual(JSON.parse(socket.sent[0] ?? "{}"), {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "requestContractInit",
+    params: {
+      sessionToken: "session-token",
+      moduleRef: "module-ref",
+      initName: "init_contract",
+      amountMicroCcd: "0",
+      maxContractExecutionEnergy: 30000,
+      parameterHex: "2a",
+      validate: true,
+    },
+  });
+
+  socket.receive({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { transactionHash: "tx-init" },
+  });
+
+  assert.deepEqual(await result, { transactionHash: "tx-init" });
+});
+
+test("requestContractUpdate sends JSON-RPC requestContractUpdate request", async () => {
+  resetMockSockets();
+  const client = new ConnectClient({ WebSocket: MockWebSocket });
+  const connected = client.connect();
+  const socket = MockWebSocket.instances[0];
+  assert.ok(socket);
+  socket.open();
+  await connected;
+
+  const result = client.requestContractUpdate({
+    sessionToken: "session-token",
+    contractAddress: { index: 42, subindex: 0 },
+    receiveName: "contract.receive",
+    amountMicroCcd: "1",
+    maxContractExecutionEnergy: 30000,
+    parameterHex: "2a",
+  });
+  assert.deepEqual(JSON.parse(socket.sent[0] ?? "{}"), {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "requestContractUpdate",
+    params: {
+      sessionToken: "session-token",
+      contractAddress: { index: 42, subindex: 0 },
+      receiveName: "contract.receive",
+      amountMicroCcd: "1",
+      maxContractExecutionEnergy: 30000,
+      parameterHex: "2a",
+    },
+  });
+
+  socket.receive({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { transactionHash: "tx-update" },
+  });
+
+  assert.deepEqual(await result, { transactionHash: "tx-update" });
+});
+
+test("contract request server errors reject with ConnectClientError", async () => {
+  resetMockSockets();
+  const client = new ConnectClient({ WebSocket: MockWebSocket });
+  const connected = client.connect();
+  const socket = MockWebSocket.instances[0];
+  assert.ok(socket);
+  socket.open();
+  await connected;
+
+  const result = client.requestContractUpdate({
+    sessionToken: "session-token",
+    contractAddress: { index: 42, subindex: 0 },
+    receiveName: "contract.receive",
+    amountMicroCcd: "1",
+    maxContractExecutionEnergy: 30000,
+    parameterHex: "2a",
+  });
+  socket.receive({
+    jsonrpc: "2.0",
+    id: 1,
+    error: { code: -32004, message: "contract update declined by user" },
+  });
+
+  await assert.rejects(result, (error: unknown) => {
+    assert.equal(error instanceof ConnectClientError, true);
+    assert.equal(
+      (error as ConnectClientError).message,
+      "contract update declined by user",
+    );
+    assert.equal((error as ConnectClientError).code, -32004);
+    return true;
+  });
+});
+
 test("JSON-RPC error responses reject with ConnectClientError", async () => {
   resetMockSockets();
   const client = new ConnectClient({ WebSocket: MockWebSocket });

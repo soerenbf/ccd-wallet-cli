@@ -557,6 +557,7 @@ name = "ccd-wallet"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bip39",
  "ccd-wallet-connect",
  "ccd-wallet-core",
@@ -566,7 +567,9 @@ dependencies = [
  "cliclack",
  "concordium-rust-sdk",
  "console 0.15.11",
+ "ed25519-dalek",
  "futures-util",
+ "hex",
  "open",
  "rand 0.8.6",
  "reqwest",

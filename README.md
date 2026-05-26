@@ -103,7 +103,7 @@ pnpm --filter @ccd-wallet/connect-client build
 pnpm --filter @ccd-wallet/connect-client test
 ```
 
-The package lives at `packages/ccd-wallet-connect-client` and currently supports pairing and explicit account requests by network.
+The package lives at `packages/ccd-wallet-connect-client` and supports pairing, session-bound account lookup, and wallet-approved smart contract init/update requests.
 
 The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React integration reference showing how a web application can pair with the wallet and request an account for a target network.
 
@@ -116,11 +116,47 @@ cargo run -p ccd-wallet -- connect --bind 127.0.0.1:22771
 
 `connect` starts a temporary browser-facing WebSocket session on localhost. It is not a background daemon: the wallet is connectable only while the command is running, and pressing Ctrl-C closes the session.
 
-The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. The initial API is intentionally narrow and supports session pairing plus explicit account requests by network only. Transaction proposal, signing, submission, and governance-key pairing are out of scope for this first connected-wallet flow.
+The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. It supports:
 
-A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and asks you to type the same challenge to approve that the visible browser tab matches the terminal request. Successful pairing returns only a session token. The application can then request an approved account address for a target network by supplying that session token together with the network genesis hash.
+- `pair`: challenge-confirmed browser pairing. During pairing the CLI asks you to select one network and one account; that context is bound to the session.
+- `requestAccount`: returns the account address bound at pairing time, rejecting a mismatched `networkGenesisHash`.
+- `requestContractInit`: prompts the wallet to review, sign, and submit a smart contract initialization transaction.
+- `requestContractUpdate`: prompts the wallet to review, sign, and submit a smart contract receive-function transaction.
+
+A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and asks you to type the same challenge to approve that the visible browser tab matches the terminal request. Successful pairing returns only a session token. The application can then call `requestAccount` with that token to read the session-bound account address.
+
+Contract execution requests use the network and account selected during pairing; the browser cannot override them. The dApp supplies serialized parameter bytes as `parameterHex`, a caller-chosen `maxContractExecutionEnergy`, and optionally a base64-encoded versioned module schema for human-readable parameter display. If `validate: true` is set, the wallet runs a simulation before prompting; simulation failures are shown as warnings and do not block an explicit approval. On approval, the wallet unlocks the account, signs, submits, returns `{ transactionHash }`, and prints finalization locally in the terminal.
 
 Account labels, seed labels, and the full wallet inventory are not exposed through the browser API. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active.
+
+Browser-side example:
+
+```ts
+const pairing = await client.pair("123456");
+const account = await client.requestAccount(pairing.sessionToken, "network-genesis-hash");
+
+const init = await client.requestContractInit({
+  sessionToken: pairing.sessionToken,
+  moduleRef: "0123...abcd",
+  initName: "init_my_contract",
+  amountMicroCcd: "0",
+  maxContractExecutionEnergy: 30000,
+  parameterHex: "",
+  validate: true,
+});
+
+const update = await client.requestContractUpdate({
+  sessionToken: pairing.sessionToken,
+  contractAddress: { index: 42, subindex: 0 },
+  receiveName: "my_contract.transfer",
+  amountMicroCcd: "0",
+  maxContractExecutionEnergy: 30000,
+  parameterHex: "2a",
+  validate: true,
+});
+
+console.log(account, init.transactionHash, update.transactionHash);
+```
 
 ### Example: inspect transaction status and details
 

@@ -8,13 +8,16 @@ ccd-wallet-connect = { path = "../ccd-wallet-connect" }
 ccd-wallet-core = { path = "../ccd-wallet-core" }
 ccd-wallet-identity-provider = { path = "../ccd-wallet-identity-provider" }
 anyhow.workspace = true
+base64.workspace = true
 bip39.workspace = true
 chrono.workspace = true
 clap.workspace = true
 cliclack.workspace = true
 console.workspace = true
 concordium-rust-sdk.workspace = true
+ed25519-dalek.workspace = true
 futures-util.workspace = true
+hex.workspace = true
 open.workspace = true
 rand.workspace = true
 reqwest.workspace = true

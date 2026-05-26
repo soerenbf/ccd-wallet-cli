@@ -10,6 +10,10 @@ import { ConnectClientError } from "./core/errors.js";
 import {
   DEFAULT_CONNECT_URL,
   type ConnectClientOptions,
+  type ContractInitParams,
+  type ContractInitResult,
+  type ContractUpdateParams,
+  type ContractUpdateResult,
   type JsonRpcId,
   type WebSocketConstructor,
   type WebSocketLike,
@@ -20,6 +24,8 @@ import {
   resolveGlobalWebSocket,
 } from "./core/websocket.js";
 import { requestAccount } from "./features/account.js";
+import { requestContractInit } from "./features/contract-init.js";
+import { requestContractUpdate } from "./features/contract-update.js";
 import { pair } from "./features/pairing.js";
 
 interface PendingRequest {
@@ -181,6 +187,58 @@ export class ConnectClient {
    */
   requestAccount(sessionToken: string, networkGenesisHash: string) {
     return requestAccount(this, sessionToken, networkGenesisHash);
+  }
+
+  /**
+   * Requests wallet-approved smart contract initialization.
+   *
+   * @param params - Contract initialization parameters, including the active
+   * session token, module reference, init name, amount, energy ceiling, and
+   * serialized parameter bytes.
+   * @returns The submitted transaction hash returned by the wallet.
+   * @throws {ConnectClientError} If the socket is not open, the token is
+   * invalid, the user declines, or submission fails.
+   * @example
+   * ```ts
+   * const { transactionHash } = await client.requestContractInit({
+   *   sessionToken,
+   *   moduleRef: "...",
+   *   initName: "init_my_contract",
+   *   amountMicroCcd: "0",
+   *   maxContractExecutionEnergy: 30000,
+   *   parameterHex: "",
+   *   validate: true,
+   * });
+   * ```
+   */
+  requestContractInit(params: ContractInitParams): Promise<ContractInitResult> {
+    return requestContractInit(this, params);
+  }
+
+  /**
+   * Requests wallet-approved smart contract update execution.
+   *
+   * @param params - Contract update parameters, including the active session
+   * token, target contract address, receive name, amount, energy ceiling, and
+   * serialized parameter bytes.
+   * @returns The submitted transaction hash returned by the wallet.
+   * @throws {ConnectClientError} If the socket is not open, the token is
+   * invalid, the user declines, or submission fails.
+   * @example
+   * ```ts
+   * const { transactionHash } = await client.requestContractUpdate({
+   *   sessionToken,
+   *   contractAddress: { index: 42, subindex: 0 },
+   *   receiveName: "my_contract.transfer",
+   *   amountMicroCcd: "0",
+   *   maxContractExecutionEnergy: 30000,
+   *   parameterHex: "",
+   *   validate: true,
+   * });
+   * ```
+   */
+  requestContractUpdate(params: ContractUpdateParams): Promise<ContractUpdateResult> {
+    return requestContractUpdate(this, params);
   }
 
   /**
