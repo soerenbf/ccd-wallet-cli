@@ -37,8 +37,8 @@ interface PendingRequest {
  * High-level client for the `ccd-wallet connect` WebSocket JSON-RPC API.
  *
  * The client keeps a single WebSocket connection open, correlates JSON-RPC
- * requests and responses, and exposes a flat API for the currently supported
- * pairing and account-request methods.
+ * requests and responses, and exposes a flat API for pairing, deferred
+ * account-authority acquisition, and contract-request methods.
  *
  * @example
  * ```ts
@@ -155,6 +155,9 @@ export class ConnectClient {
   /**
    * Requests browser pairing using an application-provided challenge.
    *
+   * Pairing establishes trusted browser-session context for one approved
+   * network. It does not acquire account authority.
+   *
    * @param challenge - Six-digit challenge shown to the user in the calling
    * application.
    * @returns The approved session token returned by the connect server.
@@ -170,13 +173,20 @@ export class ConnectClient {
   }
 
   /**
-   * Requests an approved account address for a target network.
+   * Requests account authority for a paired session on its bound network.
+   *
+   * After pairing succeeds, applications call this method when a capability
+   * needs account-backed authority. The wallet may prompt the user on the first
+   * call and can return cached session authority on later calls for the same
+   * session.
    *
    * @param sessionToken - Session token returned by a successful pairing call.
-   * @param networkGenesisHash - Genesis hash of the target network.
-   * @returns The approved account address for the requested network.
+   * @param networkGenesisHash - Genesis hash of the network bound to that
+   * paired session.
+   * @returns The approved account address for the paired session.
    * @throws {ConnectClientError} If the socket is not open, the token is
-   * invalid, or the response is invalid.
+   * invalid, the network does not match the paired session, or the response is
+   * invalid.
    * @example
    * ```ts
    * const accountAddress = await client.requestAccount(

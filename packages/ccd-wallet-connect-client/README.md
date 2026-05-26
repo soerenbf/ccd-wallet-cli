@@ -6,8 +6,8 @@ The package wraps the current connect protocol:
 
 - WebSocket transport
 - JSON-RPC 2.0 requests/responses
-- `pair` with an application-provided challenge
-- `requestAccount` with a session token and network genesis hash
+- `pair` to establish a trusted browser session for one approved network
+- `requestAccount` to acquire account authority for that paired session when a capability needs it
 - `requestContractInit` for wallet-approved smart contract initialization
 - `requestContractUpdate` for wallet-approved smart contract receive-function execution
 
@@ -35,15 +35,18 @@ const client = createConnectClient({
 
 await client.connect();
 
+// 1. Pair to establish a session for one approved network.
 const pairing = await client.pair("123456");
+console.log(pairing.sessionToken);
+
+// 2. Request account authority later, when a feature actually needs it.
 const accountAddress = await client.requestAccount(
   pairing.sessionToken,
   "network-genesis-hash",
 );
-
-console.log(pairing.sessionToken);
 console.log(accountAddress);
 
+// 3. Submit account-backed smart contract requests using the paired session.
 const init = await client.requestContractInit({
   sessionToken: pairing.sessionToken,
   moduleRef: "0123...abcd",
@@ -70,6 +73,16 @@ client.close();
 ```
 
 The application is responsible for displaying the same six-digit challenge to the user while the CLI asks the user to enter it.
+
+## Session and authority semantics
+
+Successful pairing returns only a session token. Pairing binds browser trust and network context, but it does **not** select an account.
+
+Call `requestAccount(sessionToken, networkGenesisHash)` when your feature needs account-backed authority. The wallet validates that the requested network matches the session-bound network, may prompt the user to approve an account, and returns the approved account address. The wallet can cache that granted authority for the rest of the active session.
+
+Account-backed methods such as `requestContractInit` and `requestContractUpdate` depend on previously granted session account authority. If the session does not have account authority yet, the server rejects those requests with an actionable error telling the caller to invoke `requestAccount` first.
+
+## Contract parameter display
 
 Contract parameters are serialized by the dApp and passed as `parameterHex`. Optionally pass a base64-encoded versioned module schema (or an object containing it in `base64`, `moduleSchema`, or `schema`) to let the wallet render human-readable parameters; otherwise the wallet displays hex.
 

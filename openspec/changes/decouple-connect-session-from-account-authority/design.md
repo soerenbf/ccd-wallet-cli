@@ -15,6 +15,7 @@ The change spans the Rust connect server, the wallet CLI approval flow, the Type
 - Preserve session-bound network safety so later account-oriented requests cannot silently switch networks.
 - Update smart contract execution flows to require previously granted account authority instead of assuming pairing already selected an account.
 - Restructure the example app into a paired shell with feature navigation and feature-specific authority prompts.
+- Make the Smart Contracts showcase derive schema automatically from embedded module metadata instead of requiring manual schema entry.
 
 **Non-Goals:**
 - Supporting multiple simultaneous browser sessions.
@@ -85,13 +86,19 @@ The paired shell SHALL include a Smart Contracts section and placeholder section
 
 **Alternative considered:** Rename `requestAccount` to something like `grantAccountAuthority`. Rejected because the current name remains understandable and the ecosystem is still small enough that documentation can carry the semantic clarification.
 
-### 7. The example app uses `@concordium/web-sdk` for contract schemas and typed parameters
+### 7. The example app uses `@concordium/web-sdk` with embedded schemas derived from the chain or referenced module
 
-**Decision:** The Smart Contracts section in the example app SHALL depend on `@concordium/web-sdk` for browser-side contract schema handling and typed parameter workflows. The initial Smart Contracts UX SHALL expose schema-driven JSON value entry that is translated through the schema into serialized parameters for connect requests. `@ccd-wallet/connect-client` itself SHALL remain focused on transport/protocol concerns and SHALL NOT take on a `web-sdk` dependency.
+**Decision:** The Smart Contracts section in the example app SHALL depend on `@concordium/web-sdk` for browser-side smart contract schema handling and typed parameter workflows, but it SHALL support only contracts whose schema is embedded in the deployed module. The example app SHALL NOT ask the user to paste a base64-encoded schema manually.
 
-**Rationale:** Smart-contract-focused example pages become much more valuable if they can demonstrate realistic schema-aware usage rather than only raw hex entry. `@concordium/web-sdk` is the natural browser-facing SDK for these concerns and keeps that logic in the example application layer where contract-specific concerns belong. Starting with JSON-value-driven authoring keeps the first showcase comprehensible while still demonstrating schema-aware preparation.
+For contract init flows, the example app SHALL derive the embedded schema from the module referenced by the supplied `moduleRef`.
 
-**Alternative considered:** Keep the example app entirely schema-agnostic and require only raw `parameterHex` entry. Rejected because it undercuts the value of the Smart Contracts showcase and misses an opportunity to demonstrate the intended browser-side toolchain.
+For contract update flows, the example app SHALL query the target contract instance, derive the instance's `sourceModule`, and fetch the embedded schema from that module before preparing parameter bytes.
+
+To support those lookups, the example app SHALL maintain browser-reachable node access as part of its paired application context for Smart Contracts workflows. `@ccd-wallet/connect-client` itself SHALL remain focused on transport/protocol concerns and SHALL NOT take on a `web-sdk` dependency.
+
+**Rationale:** Embedded-schema-only support produces a cleaner showcase than manual schema entry, reduces user error, and better demonstrates the intended browser-side toolchain for realistic contract integrations. Deriving the schema from the chain or referenced module ensures the prepared parameter bytes correspond to the actual contract module in use.
+
+**Alternative considered:** Continue to accept pasted base64 schemas in the example app. Rejected because it introduces avoidable friction, makes schema/module mismatches easier, and weakens the example's value as a realistic reference integration.
 
 ## Risks / Trade-offs
 
@@ -99,7 +106,8 @@ The paired shell SHALL include a Smart Contracts section and placeholder section
 - **Cached account authority may hide when approval actually occurs** → Make the example app and status messaging explicit about account authority state and when it was granted.
 - **Missing-authority contract errors may feel like extra friction** → Present the prerequisite clearly in the Smart Contracts page rather than letting users discover it only through an RPC failure.
 - **Future authority types could require a richer session model than zero-or-one account authority** → Model session authority as a separate concept now so future expansion is additive rather than another rewrite.
-- **Adding `@concordium/web-sdk` increases example-app complexity and bundle surface** → Keep the dependency confined to the example app, use it only for Smart Contracts concerns, and avoid leaking it into the connect client package.
+- **Adding `@concordium/web-sdk` and node access increases example-app complexity and bundle surface** → Keep the dependency confined to the example app, use it only for Smart Contracts concerns, and avoid leaking it into the connect client package.
+- **Embedded-schema-only support excludes modules without embedded schema** → Surface a clear error that the showcase only supports contracts whose module exposes embedded schema.
 
 ## Migration Plan
 
@@ -107,7 +115,7 @@ The paired shell SHALL include a Smart Contracts section and placeholder section
 2. Change the connect server and wallet pairing flow so pairing stores only network context and empty authority state.
 3. Rework `requestAccount` to perform account selection/approval and store approved account authority into the session.
 4. Update contract execution handling to require granted account authority and return actionable missing-authority errors otherwise.
-5. Update the TypeScript client documentation and the example app shell/navigation to teach the new flow, including `@concordium/web-sdk`-based Smart Contracts workflows.
+5. Update the TypeScript client documentation and the example app shell/navigation to teach the new flow, including `@concordium/web-sdk`-based Smart Contracts workflows that derive embedded schema from the chain or referenced module.
 6. Validate the new flow end-to-end with example-app tests and connect-client / Rust integration tests.
 
 ## Resolved Follow-ups
@@ -115,4 +123,5 @@ The paired shell SHALL include a Smart Contracts section and placeholder section
 - Repeated `requestAccount` calls for the same active session return the already granted account authority. Changing accounts within a session is deferred to a later change.
 - The example app keeps account acquisition explicit. Entering an account-backed section does not auto-request authority.
 - Missing account authority on account-backed methods uses the next dedicated JSON-RPC error code, `-32006`, with an actionable message telling the caller to invoke `requestAccount` first.
-- The first Smart Contracts page exposes schema-driven JSON value input that is translated through the schema into serialized parameters.
+- The first Smart Contracts page exposes schema-driven JSON value input that is translated through embedded module schema into serialized parameters.
+- The example app supports only contracts with embedded schema and derives that schema automatically from the chain or supplied module reference rather than requiring pasted schema input.

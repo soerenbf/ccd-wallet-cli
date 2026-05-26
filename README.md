@@ -103,9 +103,9 @@ pnpm --filter @ccd-wallet/connect-client build
 pnpm --filter @ccd-wallet/connect-client test
 ```
 
-The package lives at `packages/ccd-wallet-connect-client` and supports pairing, session-bound account lookup, and wallet-approved smart contract init/update requests.
+The package lives at `packages/ccd-wallet-connect-client` and supports pairing, deferred session account-authority acquisition, and wallet-approved smart contract init/update requests.
 
-The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React integration reference showing how a web application can pair with the wallet and request an account for a target network.
+The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React paired-session showcase showing how a web application can pair with the wallet first, request account authority later, and prepare schema-aware smart contract payloads with `@concordium/web-sdk`.
 
 ### Example: pair a browser dApp with the wallet
 
@@ -118,14 +118,16 @@ cargo run -p ccd-wallet -- connect --bind 127.0.0.1:22771
 
 The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. It supports:
 
-- `pair`: challenge-confirmed browser pairing. During pairing the CLI asks you to select one network and one account; that context is bound to the session.
-- `requestAccount`: returns the account address bound at pairing time, rejecting a mismatched `networkGenesisHash`.
+- `pair`: challenge-confirmed browser pairing. During pairing the CLI asks you to select one network; that network is bound to the session.
+- `requestAccount`: acquires account authority for an already paired session, rejecting a mismatched `networkGenesisHash`.
 - `requestContractInit`: prompts the wallet to review, sign, and submit a smart contract initialization transaction.
 - `requestContractUpdate`: prompts the wallet to review, sign, and submit a smart contract receive-function transaction.
 
-A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and asks you to type the same challenge to approve that the visible browser tab matches the terminal request. Successful pairing returns only a session token. The application can then call `requestAccount` with that token to read the session-bound account address.
+A browser dApp begins pairing by sending a `pair` request that includes a six-digit challenge code. The CLI shows the browser origin and asks you to type the same challenge to approve that the visible browser tab matches the terminal request. Successful pairing returns only a session token. Pairing binds browser trust and network context, but not account authority.
 
-Contract execution requests use the network and account selected during pairing; the browser cannot override them. The dApp supplies serialized parameter bytes as `parameterHex`, a caller-chosen `maxContractExecutionEnergy`, and optionally a base64-encoded versioned module schema for human-readable parameter display. If `validate: true` is set, the wallet runs a simulation before prompting; simulation failures are shown as warnings and do not block an explicit approval. On approval, the wallet unlocks the account, signs, submits, returns `{ transactionHash }`, and prints finalization locally in the terminal.
+Applications later call `requestAccount(sessionToken, networkGenesisHash)` when a feature needs account-backed authority. The wallet validates that the requested network matches the session-bound network, prompts the user to select an account if authority has not been granted yet, and returns the approved account address. Repeated account requests for the same session can return the cached session authority.
+
+Contract execution requests always use the session-bound network and require previously granted session account authority; the browser cannot override either. If account authority has not been granted yet, the wallet rejects account-backed contract requests with an actionable error instructing the caller to invoke `requestAccount` first. The dApp supplies serialized parameter bytes as `parameterHex`, a caller-chosen `maxContractExecutionEnergy`, and optionally a base64-encoded versioned module schema for human-readable parameter display. If `validate: true` is set, the wallet runs a simulation before prompting; simulation failures are shown as warnings and do not block an explicit approval. On approval, the wallet unlocks the approved account, signs, submits, returns `{ transactionHash }`, and prints finalization locally in the terminal.
 
 Account labels, seed labels, and the full wallet inventory are not exposed through the browser API. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active.
 

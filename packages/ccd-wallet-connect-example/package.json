@@ -2,7 +2,7 @@
   "name": "@ccd-wallet/connect-example",
   "private": true,
   "version": "0.1.0",
-  "description": "Vite + vanilla TypeScript integration reference for ccd-wallet connect.",
+  "description": "Vite + React API showcase for ccd-wallet connect paired sessions.",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@ccd-wallet/connect-client": "workspace:*",
+    "@concordium/web-sdk": "^12.0.2",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

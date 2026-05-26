@@ -18,20 +18,37 @@ The example application SHALL distinguish between pairing state and account-auth
 - **THEN** the application indicates that account authority is required for Smart Contracts actions
 - **AND** offers an explicit action to request account authority for the active session
 
-### Requirement: Smart Contracts section uses `@concordium/web-sdk` for schema-aware contract workflows
-The example application's Smart Contracts section SHALL use `@concordium/web-sdk` for browser-side smart contract schema and type handling. The application SHALL use the SDK to support schema-aware contract interaction preparation while continuing to submit pairing, account, and contract requests through `@ccd-wallet/connect-client`.
+### Requirement: Smart Contracts section uses `@concordium/web-sdk` for embedded-schema-aware contract workflows
+The example application's Smart Contracts section SHALL use `@concordium/web-sdk` for browser-side smart contract schema and type handling. The application SHALL derive schema-aware contract interaction data from embedded module schema while continuing to submit pairing, account, and contract requests through `@ccd-wallet/connect-client`.
 
-#### Scenario: Smart Contracts page prepares contract input with web-sdk support
-- **WHEN** a user works with a schema-aware contract flow in the Smart Contracts section
-- **THEN** the example application uses `@concordium/web-sdk` to handle the relevant contract schema or typed parameter data
+The example application SHALL support only Smart Contracts flows whose relevant module exposes embedded schema. The application SHALL NOT require the user to paste schema bytes manually.
+
+#### Scenario: Smart Contracts init flow derives embedded schema from the referenced module
+- **WHEN** a user prepares a schema-aware contract init flow in the Smart Contracts section
+- **AND** supplies a module reference for a module with embedded schema
+- **THEN** the example application uses `@concordium/web-sdk` together with node access to fetch the embedded schema for that module
+- **AND** uses the derived schema to serialize the provided JSON parameter value
 - **AND** uses `@ccd-wallet/connect-client` to send the resulting connect request to the wallet
+
+#### Scenario: Smart Contracts update flow derives embedded schema from the target instance module
+- **WHEN** a user prepares a schema-aware contract update flow in the Smart Contracts section
+- **AND** supplies a contract instance address whose source module has embedded schema
+- **THEN** the example application queries the target instance to determine its source module
+- **AND** fetches the embedded schema for that module using `@concordium/web-sdk`
+- **AND** uses the derived schema to serialize the provided JSON parameter value
+- **AND** uses `@ccd-wallet/connect-client` to send the resulting connect request to the wallet
+
+#### Scenario: Smart Contracts page rejects modules without embedded schema
+- **WHEN** a user prepares a Smart Contracts flow for a module that does not expose embedded schema
+- **THEN** the example application rejects the preparation attempt
+- **AND** explains that the showcase supports only contracts with embedded schema
 
 ## MODIFIED Requirements
 
 ### Requirement: Example app demonstrates pairing through the TypeScript connect client
 The example application SHALL depend on `@ccd-wallet/connect-client` and SHALL use the package's public API to perform pairing with an application-provided challenge.
 
-After pairing succeeds, the example application SHALL transition into a paired application shell that uses the returned session token together with the approved network context to drive capability-specific actions. When a feature area requires an account, the example application SHALL request an account address through the client package for the active paired session.
+After pairing succeeds, the example application SHALL transition into a paired application shell that uses the returned session token together with the approved network context and browser-reachable node access to drive capability-specific actions. When a feature area requires an account, the example application SHALL request an account address through the client package for the active paired session.
 
 #### Scenario: Example app pairs into a session-gated showcase shell
 - **WHEN** a user triggers pairing in the example application
@@ -45,12 +62,13 @@ After pairing succeeds, the example application SHALL transition into a paired a
 - **THEN** the example application uses the returned session token to request an account address for the target network
 
 ### Requirement: Example app displays approved session information
-After a successful pairing, the example application SHALL display the returned session token and target network genesis hash as global paired-session context. If account authority has been granted for the session, the example application SHALL also display the approved account address.
+After a successful pairing, the example application SHALL display the returned session token, target network genesis hash, and the node access context used for Smart Contracts lookups as global paired-session context. If account authority has been granted for the session, the example application SHALL also display the approved account address.
 
 #### Scenario: Successful pairing renders session context before account authority exists
 - **WHEN** the connect server approves pairing for the example application
 - **THEN** the example application displays the session token
 - **AND** displays the target network genesis hash
+- **AND** displays the node access context used for Smart Contracts lookups
 - **AND** can show that no account authority has yet been granted
 
 #### Scenario: Approved account authority updates the paired session display
