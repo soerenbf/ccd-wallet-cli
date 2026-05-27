@@ -279,8 +279,9 @@ async fn submit_contract_init_request(
             "contract init declined by user",
         ));
     }
-    let (resolved_network_name, network_entry) = resolve_network_entry(&prepared.request.network_genesis_hash)
-        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let (resolved_network_name, network_entry) =
+        resolve_network_entry(&prepared.request.network_genesis_hash)
+            .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
     let wallet = {
         let conn = conn.lock().map_err(|_| {
             ContractExecutionRejection::other("wallet database connection is unavailable")
@@ -440,8 +441,9 @@ async fn submit_contract_update_request(
             "contract update declined by user",
         ));
     }
-    let (resolved_network_name, network_entry) = resolve_network_entry(&prepared.request.network_genesis_hash)
-        .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let (resolved_network_name, network_entry) =
+        resolve_network_entry(&prepared.request.network_genesis_hash)
+            .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
     let wallet = {
         let conn = conn.lock().map_err(|_| {
             ContractExecutionRejection::other("wallet database connection is unavailable")

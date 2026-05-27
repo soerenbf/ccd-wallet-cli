@@ -3,16 +3,16 @@
 ## Purpose
 TBD - created by archiving change add-imported-account-vault-and-genesis-import. Update Purpose after archive.
 ## Requirements
-### Requirement: Account signing material resolution is source-aware
-The system SHALL resolve account signing material through the account's source kind. Derived accounts SHALL use seed-derived signing material, and imported accounts SHALL use encrypted imported account secret material from the imported accounts vault for the account's network.
+### Requirement: Account material resolution is source-aware for signing and export
+The system SHALL resolve account material through the account's source kind for operations that need signer-capable account data. Derived accounts SHALL use seed-derived signing material, and imported accounts SHALL use encrypted imported account secret material from the imported accounts vault for the account's network.
 
-#### Scenario: Derived account signing source resolves through seed
-- **WHEN** a signing operation targets a derived account
+#### Scenario: Derived account material resolves through seed
+- **WHEN** a signing or export operation targets a derived account
 - **THEN** the system resolves the owning seed and derivation coordinates
 - **AND** derives the account signing key material from the unlocked seed
 
-#### Scenario: Imported account signing source resolves through imported vault
-- **WHEN** a signing operation targets an imported account
+#### Scenario: Imported account material resolves through imported vault
+- **WHEN** a signing or export operation targets an imported account
 - **THEN** the system resolves the imported accounts vault for the account's network genesis hash
 - **AND** decrypts the imported account signing material from that vault
 

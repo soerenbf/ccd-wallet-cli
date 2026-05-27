@@ -55,37 +55,41 @@ The wallet approval UX SHALL prompt the user to enter the challenge shown in the
 - **AND** does not display the challenge value itself in the wallet approval prompt
 
 ### Requirement: Approved pairing binds one network and one account as session context
-For account-oriented browser pairing, the wallet SHALL require the user to choose a network and an account during pairing approval. The approved session SHALL bind to exactly that selected network and account for the duration of the session.
+For account-capable browser pairing, the wallet SHALL require the user to choose a network during pairing approval. The approved session SHALL bind to exactly that selected network for the duration of the session.
 
-#### Scenario: Pairing approval chooses network and account
-- **WHEN** the user approves an account-oriented pairing request
-- **THEN** the wallet requires selection of one network and one account before the session is finalized
+The wallet SHALL NOT require account selection during pairing approval, and the paired session MAY exist without account authority until a later `requestAccount` call grants it.
 
-#### Scenario: Session context remains fixed after pairing
-- **WHEN** an account-oriented browser session has been paired with network `testnet` and account `alice`
-- **THEN** later browser context reads from that session report `testnet` and `alice`
-- **AND** the session does not silently switch to a different network or account
+#### Scenario: Pairing approval chooses a network without requiring an account
+- **WHEN** the user approves a browser pairing request
+- **THEN** the wallet requires selection of exactly one network before the session is finalized
+- **AND** does not require selection of an account during pairing approval
+
+#### Scenario: Session network context remains fixed after pairing
+- **WHEN** a browser session has been paired with network `testnet`
+- **THEN** later browser requests from that session remain scoped to `testnet`
+- **AND** the session does not silently switch to a different network
 
 ### Requirement: Paired browsers can read the approved session context over the session channel
 After a browser dApp has been successfully paired, the pairing response SHALL return only the approved session token for that session over the same WebSocket channel using JSON-RPC 2.0 semantics used for pairing. The pairing response SHALL NOT directly include selected network or account context.
 
-A paired browser dApp SHALL be able to request account authority explicitly for a target network by supplying the session token and network genesis hash. When the wallet approves that request, it SHALL return the selected account address for that network.
+A paired browser dApp SHALL be able to request account authority explicitly for the session-bound network by supplying the session token and network genesis hash. When the wallet approves that request, it SHALL return the selected account address for that network and associate that account authority with the active session.
 
 #### Scenario: Successful pairing returns a session token only
 - **WHEN** a browser dApp has completed pairing successfully
 - **THEN** the pairing response includes the session token
 - **AND** does not directly include selected network or account context
 
-#### Scenario: Paired browser can request an account address for a network
+#### Scenario: Paired browser can request an account address for its bound network
 - **WHEN** a browser dApp has completed pairing successfully
-- **AND** it requests account authority for a specific network genesis hash using its session token
-- **THEN** the wallet can approve an account for that network
+- **AND** it requests account authority for the session-bound network genesis hash using its session token
+- **THEN** the wallet can approve an account for that session
 - **AND** returns the selected account address
 
-#### Scenario: Account requests remain scoped to the approved pairing
-- **WHEN** one browser pairing has been approved
-- **AND** another browser has not been approved
-- **THEN** only the approved pairing can successfully request account authority for a network using its session token
+#### Scenario: Account requests remain scoped to the approved pairing and network
+- **WHEN** one browser pairing has been approved for network `testnet`
+- **AND** the browser requests account authority for a different network genesis hash
+- **THEN** the wallet does not grant account authority for that different network
+- **AND** the session remains scoped to its originally approved network
 
 ### Requirement: Only one paired browser session is active at a time
 The first browser-pairing flow SHALL support only one active paired browser session at a time.
@@ -103,4 +107,17 @@ The first browser-pairing endpoint SHALL cover account-oriented pairing only. Go
 - **WHEN** a browser dApp completes account-oriented pairing
 - **THEN** the resulting paired session exposes only the approved account/network context for that flow
 - **AND** does not imply governance-key pairing support
+
+### Requirement: Approved pairing binds session context used for contract execution
+The network and account selected during pairing approval SHALL be stored in the session state and used as the authoritative execution context for any contract execution request received in that session. The wallet SHALL NOT require or allow the browser to supply a different account or network for contract execution.
+
+#### Scenario: Session state carries bound network and account after pairing
+- **WHEN** the user approves a pairing request and selects network `testnet` and account `alice`
+- **THEN** the active session state contains the genesis hash for `testnet` and the address for `alice`
+- **AND** subsequent contract execution requests in the same session use those values
+
+#### Scenario: Contract execution cannot override session-bound context
+- **WHEN** a browser sends a contract execution request
+- **AND** the request includes a different account address or network genesis hash than what is session-bound
+- **THEN** the wallet ignores the supplied values and uses the session-bound context
 

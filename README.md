@@ -241,6 +241,7 @@ cargo run -p ccd-wallet -- account new my_account --identity primary_identity --
 cargo run -p ccd-wallet -- account new my_account --identity primary_identity --network testnet --no-wait
 cargo run -p ccd-wallet -- account new my_account --identity primary_identity --seed daily_seed --network testnet
 cargo run -p ccd-wallet -- account import genesis ~/Developer/Concordium/concordium-node/concordium-node/test-runs/p11-simple/genesis/accounts/baker-0.json --network local --label baker-0
+cargo run -p ccd-wallet -- account export my_account --network testnet --out ./my_account.json
 cargo run -p ccd-wallet -- account list
 cargo run -p ccd-wallet -- account list --network all --status pending
 cargo run -p ccd-wallet -- account list --seed daily_seed --show-addresses
@@ -249,6 +250,10 @@ cargo run -p ccd-wallet -- account rename --show-addresses --seed daily_seed
 ```
 
 `account import genesis <FILE> --network <NAME> --label <LABEL>` imports a single genesis account JSON bundle as an account on the resolved network. Imported accounts are not tied to a seed or identity; their secret material is encrypted in an imported accounts vault scoped to the network genesis hash. The vault is created automatically on first import for that network and reused for later imports. If `--label` is omitted in interactive mode, the CLI prompts for a label using the JSON filename stem as the suggested value. Labels must follow normal account-label rules and remain unique across all accounts on the network, whether seed-derived or imported. Imported account addresses remain hidden by default and are only decrypted when address display is explicitly requested.
+
+`account export [LABEL] --network <NAME> --out <FILE>` writes a minimal JSON signer file containing only `address` and `accountKeys`. The output is intentionally compatible with `concordium_rust_sdk::types::WalletAccount::from_json_file`, making it suitable for Concordium Rust SDK examples and other signer-based tooling. Both seed-derived and imported accounts can be exported, but the wallet always requires the appropriate unlock path first: seed password for derived accounts, imported-vault password for imported accounts.
+
+Export writes plaintext signing material to disk. The destination path is therefore explicit: in non-interactive mode you must pass `--out <FILE>`, and the wallet refuses to overwrite an existing file. Paths entered as `~/...` are expanded to your home directory before validation and writing. The initial export format is not a full genesis-account bundle and is not intended to round-trip through `account import genesis`.
 
 `account new [LABEL]` creates a normal Concordium account by deriving credential material from the selected seed and issued identity, submitting a credential deployment to the resolved node, and storing the local account record. If `--identity <LABEL>` is omitted, the CLI prompts you to choose a usable identity unless `--non-interactive` is supplied. Usable identities must belong to the selected seed and network and must not be expired. If a selected identity is still pending, the wallet checks the stored encrypted `code_uri` with the identity provider before account creation proceeds.
 

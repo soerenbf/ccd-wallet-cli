@@ -294,6 +294,8 @@ pub struct AccountCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum AccountSubcommand {
+    /// Export a stored account as a JSON signer file.
+    Export(AccountExportArgs),
     /// Import externally provisioned accounts.
     Import(AccountImportCommand),
     /// List stored accounts.
@@ -302,6 +304,29 @@ pub enum AccountSubcommand {
     New(Box<AccountNewArgs>),
     /// Rename a stored account.
     Rename(AccountRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AccountExportArgs {
+    /// Account label to export. If omitted, interactive mode opens an account selector.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Path to write the exported signer JSON file.
+    #[arg(long = "out", value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -628,6 +653,37 @@ mod tests {
                 }
             },
             other => panic!("expected transaction command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_account_export_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "account",
+            "export",
+            "alice",
+            "--network",
+            "testnet",
+            "--out",
+            "alice.json",
+            "--non-interactive",
+        ]);
+
+        match cli.command {
+            Command::Account(command) => match command.command {
+                AccountSubcommand::Export(args) => {
+                    assert_eq!(args.label.as_deref(), Some("alice"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert_eq!(
+                        args.output.as_deref(),
+                        Some(std::path::Path::new("alice.json"))
+                    );
+                    assert!(args.non_interactive);
+                }
+                other => panic!("expected account export command, got {other:?}"),
+            },
+            other => panic!("expected account command, got {other:?}"),
         }
     }
 }

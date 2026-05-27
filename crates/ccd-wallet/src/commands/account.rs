@@ -1,7 +1,7 @@
 use crate::{
     cli::{
-        AccountImportGenesisArgs, AccountImportSubcommand, AccountListArgs, AccountNewArgs,
-        AccountRenameArgs, AccountSubcommand,
+        AccountExportArgs, AccountImportGenesisArgs, AccountImportSubcommand, AccountListArgs,
+        AccountNewArgs, AccountRenameArgs, AccountSubcommand,
     },
     commands::ui::{
         ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
@@ -26,12 +26,13 @@ use ccd_wallet_core::{
 use ccd_wallet_identity_provider::client::{self, PollResult};
 use cliclack::{input, password, select, spinner};
 use concordium_rust_sdk::{
+    common::types::{AccountAddress, KeyIndex, KeyPair},
     id::{
         constants::{ArCurve, IpPairing},
-        types::{ArIdentity, ArInfo, IpInfo},
+        types::{AccountKeys, ArIdentity, ArInfo, CredentialData, IpInfo, SignatureThreshold},
     },
     types::{
-        BlockItemSummaryDetails,
+        BlockItemSummaryDetails, WalletAccount,
         transactions::{BlockItem, Payload},
     },
     v2,
@@ -41,7 +42,9 @@ use rusqlite::Connection;
 use std::{
     collections::BTreeMap,
     fs,
-    path::Path,
+    io::Write,
+    path::{Path, PathBuf},
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -69,6 +72,7 @@ impl AccountListStatus {
 
 pub async fn run(conn: &mut Connection, command: AccountSubcommand) -> Result<()> {
     match command {
+        AccountSubcommand::Export(args) => export_account(conn, args).await,
         AccountSubcommand::Import(command) => match command.command {
             AccountImportSubcommand::Genesis(args) => import_genesis(conn, args).await,
         },
@@ -130,6 +134,39 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
             )
         );
     }
+    Ok(())
+}
+
+async fn export_account(conn: &mut Connection, args: AccountExportArgs) -> Result<()> {
+    let (network_name, network_entry, network_source) = resolve_export_network(
+        conn,
+        args.network.as_deref(),
+        args.non_interactive,
+        args.no_defaults,
+    )?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: network_name.clone(),
+        source: network_source,
+    }])?;
+
+    let account = resolve_export_account(
+        conn,
+        &network_name,
+        &network_entry.genesis_hash,
+        args.label.as_deref(),
+        args.non_interactive,
+    )?;
+    let output_path =
+        resolve_export_output_path(args.output, &account.label, args.non_interactive)?;
+    let signer = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
+    let signer_json = serialize_wallet_account_minimal(&signer)?;
+    write_export_file(&output_path, &signer_json)?;
+    cliclack::log::success(format!(
+        "Exported account '{}' to {}.",
+        account.label,
+        output_path.display()
+    ))?;
     Ok(())
 }
 
@@ -683,8 +720,9 @@ fn load_account_addresses(
         let seed_label = seeds_by_id
             .get(&seed_id)
             .context("account references unknown seed")?;
-        let password: String =
-            password(format!("Password for seed '{}': ", seed_label)).interact()?;
+        let password: String = password(format!("Password for seed '{}': ", seed_label))
+            .allow_empty()
+            .interact()?;
         let unlocked = seeds::unlock_context(conn, seed_label, &password)?;
         for record in seed_records {
             let payload = accounts::decrypt_private_payload(conn, record.id, &unlocked.dek)?;
@@ -806,6 +844,294 @@ fn choose_account_match(
             seed_scope,
         )
     }
+}
+
+fn resolve_export_network(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(String, NetworkEntry, ResolutionSource)> {
+    let (scope, source) =
+        resolve_network_scope(conn, explicit, non_interactive, no_defaults, false)?;
+    let ScopeSelection::One(network_name) = scope else {
+        bail!("account export requires a concrete network")
+    };
+    let app_config = load()?;
+    let entry = app_config
+        .networks
+        .get(&network_name)
+        .cloned()
+        .with_context(|| format!("network '{}' is not registered", network_name))?;
+    Ok((network_name, entry, source))
+}
+
+fn resolve_export_account(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+    explicit_label: Option<&str>,
+    non_interactive: bool,
+) -> Result<accounts::AccountRecord> {
+    let seeds_by_id = seed_labels_by_id(conn)?;
+    let networks_by_hash = network_names_by_genesis_hash()?;
+    let candidates = exportable_accounts_for_network(conn, network_genesis_hash)?;
+    match explicit_label {
+        Some(label) => {
+            let matches = candidates
+                .into_iter()
+                .filter(|record| record.label == label)
+                .collect::<Vec<_>>();
+            if matches.is_empty() {
+                bail!(
+                    "finalized account '{}' is not configured on network '{}'",
+                    label,
+                    network_name
+                );
+            }
+            choose_account_match(
+                matches,
+                &seeds_by_id,
+                &networks_by_hash,
+                false,
+                None,
+                conn,
+                non_interactive,
+            )
+        }
+        None if non_interactive => {
+            bail!("account label must be provided in --non-interactive mode")
+        }
+        None => select_account_fuzzy(
+            conn,
+            candidates,
+            &seeds_by_id,
+            &networks_by_hash,
+            false,
+            None,
+        ),
+    }
+}
+
+fn exportable_accounts_for_network(
+    conn: &Connection,
+    network_genesis_hash: &str,
+) -> Result<Vec<accounts::AccountRecord>> {
+    let mut records = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == network_genesis_hash)
+        .filter(|record| record.status == accounts::AccountStatus::Finalized)
+        .collect::<Vec<_>>();
+    records.sort_by(|a, b| a.label.cmp(&b.label));
+    if records.is_empty() {
+        bail!(
+            "no finalized accounts are available on network '{}'",
+            network_genesis_hash
+        );
+    }
+    Ok(records)
+}
+
+fn resolve_export_output_path(
+    explicit: Option<PathBuf>,
+    account_label: &str,
+    non_interactive: bool,
+) -> Result<PathBuf> {
+    match explicit {
+        Some(path) => expand_tilde_path(&path),
+        None if non_interactive => {
+            bail!("output path must be provided with `--out <FILE>` in --non-interactive mode")
+        }
+        None => {
+            let suggested = format!("{account_label}.json");
+            let path: String = input("Output file:")
+                .default_input(&suggested)
+                .validate(|value: &String| {
+                    if value.is_empty() {
+                        Err("Output file is required.")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            expand_tilde_path(Path::new(&path))
+        }
+    }
+}
+
+fn expand_tilde_path(path: &Path) -> Result<PathBuf> {
+    let text = path.to_string_lossy();
+    if text == "~" || text.starts_with("~/") {
+        let home = std::env::var("HOME")
+            .context("could not determine home directory: $HOME is not set")?;
+        if text == "~" {
+            return Ok(PathBuf::from(home));
+        }
+        let suffix = text.trim_start_matches("~/");
+        return Ok(PathBuf::from(home).join(suffix));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn build_export_wallet_account(
+    conn: &Connection,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    account: &accounts::AccountRecord,
+) -> Result<WalletAccount> {
+    match account.source_kind {
+        accounts::AccountSourceKind::Derived => {
+            build_derived_export_wallet_account(conn, network_name, network_entry, account)
+        }
+        accounts::AccountSourceKind::Imported => {
+            build_imported_export_wallet_account(conn, network_name, account)
+        }
+    }
+}
+
+fn build_derived_export_wallet_account(
+    conn: &Connection,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    account: &accounts::AccountRecord,
+) -> Result<WalletAccount> {
+    let seed = seeds::list(conn)?
+        .into_iter()
+        .find(|seed| seed.id == account.seed_id)
+        .context("selected account references unknown seed")?;
+    let password: String = password(format!("Password for seed '{}':", seed.label))
+        .allow_empty()
+        .interact()?;
+    let unlocked = seeds::unlock_context(conn, &seed.label, &password)?;
+    let payload = accounts::decrypt_private_payload(conn, account.id, &unlocked.dek)?;
+    let seed_phrase =
+        std::str::from_utf8(&unlocked.secret).context("seed phrase is not valid UTF-8")?;
+    let net = infer_net(
+        network_name,
+        &network_entry.node_endpoint,
+        &network_entry.node_endpoint,
+    );
+    wallet_account_from_derived_parts(payload.account_address, seed_phrase, account, net)
+}
+
+fn wallet_account_from_derived_parts(
+    account_address: String,
+    seed_phrase: &str,
+    account: &accounts::AccountRecord,
+    net: Net,
+) -> Result<WalletAccount> {
+    let wallet = ConcordiumHdWallet::from_seed_phrase(seed_phrase, net)?;
+    let signing_key = wallet.get_account_signing_key(
+        account.ip_identity,
+        account.identity_index,
+        account.credential_counter,
+    )?;
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        KeyIndex(0),
+        KeyPair::from(ed25519_dalek::SigningKey::from_bytes(&signing_key)),
+    );
+    Ok(WalletAccount {
+        address: AccountAddress::from_str(&account_address)?,
+        keys: AccountKeys::from(CredentialData {
+            keys,
+            threshold: SignatureThreshold::ONE,
+        }),
+    })
+}
+
+fn build_imported_export_wallet_account(
+    conn: &Connection,
+    network_name: &str,
+    account: &accounts::AccountRecord,
+) -> Result<WalletAccount> {
+    let vault_password: String = password(format!(
+        "Imported accounts vault password for '{}':",
+        network_name
+    ))
+    .allow_empty()
+    .interact()?;
+    let unlocked =
+        accounts::unlock_imported_vault(conn, &account.network_genesis_hash, &vault_password)?;
+    let payload = accounts::decrypt_imported_payload(conn, account.id, &unlocked.dek)?;
+    wallet_account_from_imported_payload(&payload)
+}
+
+fn wallet_account_from_imported_payload(
+    payload: &accounts::ImportedAccountSecretPayload,
+) -> Result<WalletAccount> {
+    WalletAccount::from_json_value(serde_json::json!({
+        "address": payload.account_address,
+        "accountKeys": payload.account_keys,
+    }))
+    .context("failed to build signer for imported account")
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinimalWalletAccountJson<'a> {
+    address: AccountAddress,
+    account_keys: &'a AccountKeys,
+}
+
+fn serialize_wallet_account_minimal(account: &WalletAccount) -> Result<String> {
+    serde_json::to_string_pretty(&MinimalWalletAccountJson {
+        address: account.address,
+        account_keys: &account.keys,
+    })
+    .context("failed to serialise wallet account export")
+}
+
+fn write_export_file(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        bail!("refusing to overwrite existing file {}", path.display());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.exists() {
+        bail!("output directory does not exist: {}", parent.display());
+    }
+    let temp_path = export_temp_path(path)?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .with_context(|| {
+            format!(
+                "failed to create temporary export file {}",
+                temp_path.display()
+            )
+        })?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write export file {}", temp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to flush export file {}", temp_path.display()))?;
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed to move temporary export file {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn export_temp_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("output file name must be valid UTF-8")?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_nanos();
+    Ok(parent.join(format!(".{file_name}.tmp-{}-{unique}", std::process::id())))
 }
 
 fn prompt_imported_vault_password(
@@ -1404,6 +1730,8 @@ mod tests {
     use super::*;
     use ccd_wallet_core::store::migrations;
 
+    const TEST_SEED_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         migrations::run(&conn).unwrap();
@@ -1421,6 +1749,58 @@ mod tests {
             status,
             created_at: 0,
             expires_at,
+        }
+    }
+
+    fn derived_record() -> accounts::AccountRecord {
+        accounts::AccountRecord {
+            id: 1,
+            seed_id: "seed-id".to_owned(),
+            network_genesis_hash: "genesis".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
+            label: "account".to_owned(),
+            status: accounts::AccountStatus::Finalized,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn imported_payload(address: &str) -> accounts::ImportedAccountSecretPayload {
+        accounts::ImportedAccountSecretPayload {
+            account_address: address.to_owned(),
+            account_keys: serde_json::json!({
+                "keys": {
+                    "0": {
+                        "keys": {
+                            "0": {
+                                "signKey": hex::encode([7u8; 32]),
+                                "verifyKey": hex::encode(
+                                    ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                                        .verifying_key()
+                                        .to_bytes()
+                                )
+                            }
+                        },
+                        "threshold": 1
+                    }
+                },
+                "threshold": 1
+            }),
+            credentials: serde_json::json!({}),
+            encryption_public_key: None,
+            encryption_secret_key: None,
+            credential_holder_info: None,
+            source: accounts::ImportedAccountSourceMetadata {
+                import_kind: "genesis".to_owned(),
+                original_filename: Some("import.json".to_owned()),
+            },
         }
     }
 
@@ -1624,5 +2004,138 @@ mod tests {
             err.to_string()
                 .contains("`--seed <LABEL>` is required with `--show-addresses`")
         );
+    }
+
+    #[test]
+    fn export_output_requires_explicit_path_in_noninteractive_mode() {
+        let err = resolve_export_output_path(None, "alice", true).unwrap_err();
+        assert!(err.to_string().contains("--out <FILE>"));
+    }
+
+    #[test]
+    fn export_output_expands_tilde_to_home_directory() {
+        let path = resolve_export_output_path(
+            Some(PathBuf::from("~/Downloads/export.json")),
+            "alice",
+            true,
+        )
+        .unwrap();
+        assert!(path.is_absolute());
+        assert!(path.ends_with("Downloads/export.json"));
+    }
+
+    #[test]
+    fn exportable_accounts_only_include_finalized_records_for_selected_network() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let finalized_id = accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis-a",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "finalized-a",
+            },
+        )
+        .unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        accounts::set_finalized(
+            &mut conn,
+            finalized_id,
+            &unlocked.dek,
+            None,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        )
+        .unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis-a",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 1,
+                label: "pending-a",
+            },
+        )
+        .unwrap();
+        let other_network_id = accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis-b",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 2,
+                label: "finalized-b",
+            },
+        )
+        .unwrap();
+        accounts::set_finalized(
+            &mut conn,
+            other_network_id,
+            &unlocked.dek,
+            None,
+            "3AiAikM6wKghQ8cKfscQEfRdcfExsVMSzY4R1W3pG6f4R7k2aT",
+        )
+        .unwrap();
+
+        let records = exportable_accounts_for_network(&conn, "genesis-a").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].label, "finalized-a");
+    }
+
+    #[test]
+    fn serialised_minimal_wallet_account_is_sdk_compatible() {
+        let wallet = wallet_account_from_derived_parts(
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a".to_owned(),
+            TEST_SEED_PHRASE,
+            &derived_record(),
+            Net::Testnet,
+        )
+        .unwrap();
+        let json = serialize_wallet_account_minimal(&wallet).unwrap();
+        let reparsed = WalletAccount::from_json_str(&json).unwrap();
+        assert_eq!(reparsed.address, wallet.address);
+        let reparsed_json = serde_json::to_value(&reparsed.keys).unwrap();
+        let original_json = serde_json::to_value(&wallet.keys).unwrap();
+        assert_eq!(reparsed_json, original_json);
+    }
+
+    #[test]
+    fn imported_payload_builds_sdk_compatible_wallet_account() {
+        let payload = imported_payload("4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a");
+        let wallet = wallet_account_from_imported_payload(&payload).unwrap();
+        let json = serialize_wallet_account_minimal(&wallet).unwrap();
+        let reparsed = WalletAccount::from_json_str(&json).unwrap();
+        assert_eq!(reparsed.address, wallet.address);
+        let reparsed_json = serde_json::to_value(&reparsed.keys).unwrap();
+        let original_json = serde_json::to_value(&wallet.keys).unwrap();
+        assert_eq!(reparsed_json, original_json);
+    }
+
+    #[test]
+    fn export_file_writer_refuses_existing_destination() {
+        let dir = std::env::temp_dir().join(format!(
+            "ccd-wallet-export-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("account.json");
+        fs::write(&path, "existing").unwrap();
+
+        let err = write_export_file(&path, "{}").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("refusing to overwrite existing file")
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
