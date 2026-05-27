@@ -5,6 +5,7 @@
 //! - `requestAccount`: acquire account authority for an existing paired session.
 //! - `requestContractInit`: request wallet approval for a smart contract init transaction.
 //! - `requestContractUpdate`: request wallet approval for a smart contract update transaction.
+//! - `requestDeployModule`: request wallet approval for a smart contract module deployment.
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -28,7 +29,9 @@ pub const PAIR_METHOD: &str = "pair";
 pub const REQUEST_ACCOUNT_METHOD: &str = "requestAccount";
 pub const REQUEST_CONTRACT_INIT_METHOD: &str = "requestContractInit";
 pub const REQUEST_CONTRACT_UPDATE_METHOD: &str = "requestContractUpdate";
+pub const REQUEST_DEPLOY_MODULE_METHOD: &str = "requestDeployModule";
 const MISSING_ACCOUNT_AUTHORITY_CODE: i64 = -32006;
+pub const DUPLICATE_MODULE_CODE: i64 = -32007;
 const MISSING_ACCOUNT_AUTHORITY_MESSAGE: &str =
     "session is missing account authority; call requestAccount first";
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -95,6 +98,15 @@ pub struct ContractUpdateRequest {
     pub validate: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeployModuleRequest {
+    pub origin: String,
+    pub network_genesis_hash: String,
+    pub account_address: String,
+    pub module_hex: String,
+    pub validate: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContractInitApproval {
     pub transaction_hash: String,
@@ -106,9 +118,15 @@ pub struct ContractUpdateApproval {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployModuleApproval {
+    pub transaction_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContractExecutionErrorKind {
     UserDeclined,
     SubmissionFailed,
+    DuplicateModule,
     Other,
 }
 
@@ -133,6 +151,13 @@ impl ContractExecutionRejection {
         }
     }
 
+    pub fn duplicate_module(message: impl Into<String>) -> Self {
+        Self {
+            kind: ContractExecutionErrorKind::DuplicateModule,
+            message: message.into(),
+        }
+    }
+
     pub fn other(message: impl Into<String>) -> Self {
         Self {
             kind: ContractExecutionErrorKind::Other,
@@ -144,6 +169,7 @@ impl ContractExecutionRejection {
         match self.kind {
             ContractExecutionErrorKind::UserDeclined => -32004,
             ContractExecutionErrorKind::SubmissionFailed => -32005,
+            ContractExecutionErrorKind::DuplicateModule => DUPLICATE_MODULE_CODE,
             ContractExecutionErrorKind::Other => -32000,
         }
     }
@@ -199,21 +225,33 @@ pub type ContractUpdateApprover = Arc<
         + Sync,
 >;
 
+pub type DeployModuleApprover = Arc<
+    dyn Fn(
+            DeployModuleRequest,
+        ) -> BoxFuture<
+            'static,
+            std::result::Result<DeployModuleApproval, ContractExecutionRejection>,
+        > + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct ConnectServer {
     approver: PairingApprover,
     account_requester: AccountRequester,
     contract_init_approver: ContractInitApprover,
     contract_update_approver: ContractUpdateApprover,
+    deploy_module_approver: DeployModuleApprover,
     state: Arc<Mutex<ServerState>>,
 }
 
 impl ConnectServer {
-    pub fn new<F, G, H, I>(
+    pub fn new<F, G, H, I, J>(
         approver: F,
         account_requester: G,
         contract_init_approver: H,
         contract_update_approver: I,
+        deploy_module_approver: J,
     ) -> Self
     where
         F: Fn(
@@ -246,12 +284,21 @@ impl ConnectServer {
             > + Send
             + Sync
             + 'static,
+        J: Fn(
+                DeployModuleRequest,
+            ) -> BoxFuture<
+                'static,
+                std::result::Result<DeployModuleApproval, ContractExecutionRejection>,
+            > + Send
+            + Sync
+            + 'static,
     {
         Self {
             approver: Arc::new(approver),
             account_requester: Arc::new(account_requester),
             contract_init_approver: Arc::new(contract_init_approver),
             contract_update_approver: Arc::new(contract_update_approver),
+            deploy_module_approver: Arc::new(deploy_module_approver),
             state: Arc::new(Mutex::new(ServerState::default())),
         }
     }
@@ -311,11 +358,31 @@ impl ConnectServer {
     }
 
     async fn handle_websocket(self, mut stream: TcpStream, origin: String) -> Result<()> {
+        let mut fragmented_text: Option<Vec<u8>> = None;
         loop {
             match read_frame(&mut stream).await? {
-                ClientFrame::Text(text) => {
-                    let response = self.handle_text_message(&origin, &text).await;
-                    write_text_frame(&mut stream, &response).await?;
+                ClientFrame::Text { fin, payload } => {
+                    if fin {
+                        let text = String::from_utf8(payload)
+                            .context("websocket text frame is not UTF-8")?;
+                        let response = self.handle_text_message(&origin, &text).await;
+                        write_text_frame(&mut stream, &response).await?;
+                    } else {
+                        fragmented_text = Some(payload);
+                    }
+                }
+                ClientFrame::Continuation { fin, payload } => {
+                    if let Some(mut accumulated) = fragmented_text.take() {
+                        accumulated.extend_from_slice(&payload);
+                        if fin {
+                            let text = String::from_utf8(accumulated)
+                                .context("websocket text frame is not UTF-8")?;
+                            let response = self.handle_text_message(&origin, &text).await;
+                            write_text_frame(&mut stream, &response).await?;
+                        } else {
+                            fragmented_text = Some(accumulated);
+                        }
+                    }
                 }
                 ClientFrame::Ping(payload) => {
                     write_control_frame(&mut stream, 0xA, &payload).await?
@@ -352,6 +419,9 @@ impl ConnectServer {
             REQUEST_CONTRACT_UPDATE_METHOD => {
                 self.handle_contract_update(id, origin, request.params)
                     .await
+            }
+            REQUEST_DEPLOY_MODULE_METHOD => {
+                self.handle_deploy_module(id, origin, request.params).await
             }
             _ => json_rpc_error(id, -32601, "method not found"),
         }
@@ -582,6 +652,60 @@ impl ConnectServer {
         }
     }
 
+    async fn handle_deploy_module(
+        &self,
+        id: Option<Value>,
+        origin: &str,
+        params: Option<Value>,
+    ) -> String {
+        let params = match params
+            .map(serde_json::from_value::<DeployModuleParams>)
+            .transpose()
+        {
+            Ok(Some(params)) => params,
+            Ok(None) => {
+                return json_rpc_error(id, -32602, "requestDeployModule params are required");
+            }
+            Err(err) => {
+                return json_rpc_error(
+                    id,
+                    -32602,
+                    format!("invalid requestDeployModule params: {err}"),
+                );
+            }
+        };
+        let Some(session) = self.active_session() else {
+            return json_rpc_error(id, -32002, "no active browser session");
+        };
+        if session.token != params.session_token {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        if session.origin != origin {
+            return json_rpc_error(id, -32003, "invalid session token");
+        }
+        let Some(account_authority) = session.authorities.account.as_ref() else {
+            return json_rpc_error(
+                id,
+                MISSING_ACCOUNT_AUTHORITY_CODE,
+                MISSING_ACCOUNT_AUTHORITY_MESSAGE,
+            );
+        };
+
+        let request = DeployModuleRequest {
+            origin: origin.to_owned(),
+            network_genesis_hash: session.network_genesis_hash,
+            account_address: account_authority.account_address.clone(),
+            module_hex: params.module_hex,
+            validate: params.validate.unwrap_or(false),
+        };
+        match (self.deploy_module_approver)(request).await {
+            Ok(approval) => {
+                json_rpc_result(id, json!({ "transactionHash": approval.transaction_hash }))
+            }
+            Err(rejection) => json_rpc_error(id, rejection.json_rpc_code(), rejection.message),
+        }
+    }
+
     fn active_session(&self) -> Option<ActiveSession> {
         self.state
             .lock()
@@ -650,7 +774,8 @@ struct HandshakeRequest {
 
 #[derive(Debug)]
 enum ClientFrame {
-    Text(String),
+    Text { fin: bool, payload: Vec<u8> },
+    Continuation { fin: bool, payload: Vec<u8> },
     Ping(Vec<u8>),
     Close,
     Other,
@@ -713,6 +838,15 @@ struct ContractUpdateParams {
     validate: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeployModuleParams {
+    #[serde(rename = "sessionToken")]
+    session_token: String,
+    #[serde(rename = "moduleHex")]
+    module_hex: String,
+    validate: Option<bool>,
+}
+
 async fn read_handshake_request(stream: &mut TcpStream) -> Result<HandshakeRequest> {
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 1024];
@@ -772,6 +906,7 @@ async fn read_frame(stream: &mut TcpStream) -> Result<ClientFrame> {
         .read_exact(&mut header)
         .await
         .context("failed to read websocket frame header")?;
+    let fin = header[0] & 0x80 != 0;
     let opcode = header[0] & 0x0F;
     let masked = header[1] & 0x80 != 0;
     let mut payload_len = u64::from(header[1] & 0x7F);
@@ -784,7 +919,7 @@ async fn read_frame(stream: &mut TcpStream) -> Result<ClientFrame> {
         stream.read_exact(&mut bytes).await?;
         payload_len = u64::from_be_bytes(bytes);
     }
-    if payload_len > 1024 * 1024 {
+    if payload_len > 16 * 1024 * 1024 {
         bail!("websocket frame payload is too large");
     }
     let mut mask = [0u8; 4];
@@ -800,9 +935,8 @@ async fn read_frame(stream: &mut TcpStream) -> Result<ClientFrame> {
     }
 
     match opcode {
-        0x1 => Ok(ClientFrame::Text(
-            String::from_utf8(payload).context("websocket text frame is not UTF-8")?,
-        )),
+        0x0 => Ok(ClientFrame::Continuation { fin, payload }),
+        0x1 => Ok(ClientFrame::Text { fin, payload }),
         0x8 => Ok(ClientFrame::Close),
         0x9 => Ok(ClientFrame::Ping(payload)),
         _ => Ok(ClientFrame::Other),
@@ -1020,6 +1154,14 @@ mod tests {
                 }
                 .boxed()
             },
+            |_| {
+                async move {
+                    Ok(DeployModuleApproval {
+                        transaction_hash: "deploy-hash".to_owned(),
+                    })
+                }
+                .boxed()
+            },
         )
     }
 
@@ -1231,6 +1373,164 @@ mod tests {
             .await;
         let value: Value = serde_json::from_str(&update_response).unwrap();
         assert_eq!(value["result"]["transactionHash"], "update-hash");
+
+        let deploy_response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": REQUEST_DEPLOY_MODULE_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "moduleHex": "000102",
+                        "validate": true
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&deploy_response).unwrap();
+        assert_eq!(value["result"]["transactionHash"], "deploy-hash");
+    }
+
+    #[tokio::test]
+    async fn deploy_module_rejects_invalid_session_token_and_parse_errors() {
+        let server = server();
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": REQUEST_DEPLOY_MODULE_METHOD,
+                    "params": {
+                        "sessionToken": "missing",
+                        "moduleHex": "00"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32002);
+
+        let _ = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":2,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": REQUEST_DEPLOY_MODULE_METHOD,
+                    "params": { "sessionToken": "wrong" }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32602);
+
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": REQUEST_DEPLOY_MODULE_METHOD,
+                    "params": {
+                        "sessionToken": "wrong",
+                        "moduleHex": "00"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32003);
+    }
+
+    #[tokio::test]
+    async fn deploy_module_maps_duplicate_module_approver_errors_to_protocol_code() {
+        let server = ConnectServer::new(
+            |_| {
+                async move {
+                    Ok(PairingApproval {
+                        network_genesis_hash: "genesis".to_owned(),
+                    })
+                }
+                .boxed()
+            },
+            |_| {
+                async move {
+                    Ok(AccountRequestApproval {
+                        account_address: "addr".to_owned(),
+                    })
+                }
+                .boxed()
+            },
+            |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
+            |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
+            |_| {
+                async move {
+                    Err(ContractExecutionRejection::duplicate_module(
+                        "module already exists on chain for this network; deploy a different module or verify that you selected the intended network",
+                    ))
+                }
+                .boxed()
+            },
+        );
+        let pair_response = server
+            .handle_text_message(
+                "https://example.com",
+                r#"{"jsonrpc":"2.0","id":1,"method":"pair","params":{"challenge":"123456"}}"#,
+            )
+            .await;
+        let value: Value = serde_json::from_str(&pair_response).unwrap();
+        let token = value["result"]["sessionToken"].as_str().unwrap();
+        let _ = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": REQUEST_ACCOUNT_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "networkGenesisHash": "genesis"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+
+        let response = server
+            .handle_text_message(
+                "https://example.com",
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": REQUEST_DEPLOY_MODULE_METHOD,
+                    "params": {
+                        "sessionToken": token,
+                        "moduleHex": "00",
+                        "validate": true
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], DUPLICATE_MODULE_CODE);
+        assert_eq!(
+            value["error"]["message"],
+            "module already exists on chain for this network; deploy a different module or verify that you selected the intended network"
+        );
     }
 
     #[tokio::test]
@@ -1370,6 +1670,7 @@ mod tests {
                 }
                 .boxed()
             },
+            |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
             |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
             |_| async move { Err(ContractExecutionRejection::other("unused")) }.boxed(),
         );

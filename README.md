@@ -103,9 +103,9 @@ pnpm --filter @ccd-wallet/connect-client build
 pnpm --filter @ccd-wallet/connect-client test
 ```
 
-The package lives at `packages/ccd-wallet-connect-client` and supports pairing, deferred session account-authority acquisition, and wallet-approved smart contract init/update requests.
+The package lives at `packages/ccd-wallet-connect-client` and supports pairing, deferred session account-authority acquisition, and wallet-approved smart contract deploy/init/update requests.
 
-The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React paired-session showcase showing how a web application can pair with the wallet first, request account authority later, and prepare schema-aware smart contract payloads with `@concordium/web-sdk`.
+The workspace also includes `packages/ccd-wallet-connect-example`, a Vite + React paired-session showcase showing how a web application can pair with the wallet first, request account authority later, upload deployable module files, and prepare schema-aware smart contract payloads with `@concordium/web-sdk`.
 
 ### Example: pair a browser dApp with the wallet
 
@@ -120,6 +120,7 @@ The browser API uses a single WebSocket channel with JSON-RPC 2.0 messages. It s
 
 - `pair`: challenge-confirmed browser pairing. During pairing the CLI asks you to select one network; that network is bound to the session.
 - `requestAccount`: acquires account authority for an already paired session, rejecting a mismatched `networkGenesisHash`.
+- `requestDeployModule`: prompts the wallet to review, sign, and submit a smart contract deploy-module transaction.
 - `requestContractInit`: prompts the wallet to review, sign, and submit a smart contract initialization transaction.
 - `requestContractUpdate`: prompts the wallet to review, sign, and submit a smart contract receive-function transaction.
 
@@ -127,7 +128,7 @@ A browser dApp begins pairing by sending a `pair` request that includes a six-di
 
 Applications later call `requestAccount(sessionToken, networkGenesisHash)` when a feature needs account-backed authority. The wallet validates that the requested network matches the session-bound network, prompts the user to select an account if authority has not been granted yet, and returns the approved account address. Repeated account requests for the same session can return the cached session authority.
 
-Contract execution requests always use the session-bound network and require previously granted session account authority; the browser cannot override either. If account authority has not been granted yet, the wallet rejects account-backed contract requests with an actionable error instructing the caller to invoke `requestAccount` first. The dApp supplies serialized parameter bytes as `parameterHex`, a caller-chosen `maxContractExecutionEnergy`, and optionally a base64-encoded versioned module schema for human-readable parameter display. If `validate: true` is set, the wallet runs a simulation before prompting; simulation failures are shown as warnings and do not block an explicit approval. On approval, the wallet unlocks the approved account, signs, submits, returns `{ transactionHash }`, and prints finalization locally in the terminal.
+Contract execution and deploy-module requests always use the session-bound network and require previously granted session account authority; the browser cannot override either. If account authority has not been granted yet, the wallet rejects account-backed contract requests with an actionable error instructing the caller to invoke `requestAccount` first. For init/update, the dApp supplies serialized parameter bytes as `parameterHex`, a caller-chosen `maxContractExecutionEnergy`, and optionally a base64-encoded versioned module schema for human-readable parameter display. If `validate: true` is set on init/update, the wallet runs a simulation before prompting; simulation failures are shown as warnings and do not block an explicit approval. For deploy-module requests, the dApp supplies serialized module bytes as `moduleHex`; `validate: true` checks whether the derived module reference already exists on chain and shows duplicate findings as wallet-side warnings rather than blocking the request in the browser. When the module already exists, the wallet explains that submitting again is expected to reuse the same module reference. On approval, the wallet unlocks the approved account, signs, submits, returns `{ transactionHash }`, and prints finalization locally in the terminal.
 
 Account labels, seed labels, and the full wallet inventory are not exposed through the browser API. Only one browser session can be paired at a time; additional pairing requests are rejected while a session is active.
 
@@ -136,6 +137,12 @@ Browser-side example:
 ```ts
 const pairing = await client.pair("123456");
 const account = await client.requestAccount(pairing.sessionToken, "network-genesis-hash");
+
+const deploy = await client.requestDeployModule({
+  sessionToken: pairing.sessionToken,
+  moduleHex: "0061736d...",
+  validate: true,
+});
 
 const init = await client.requestContractInit({
   sessionToken: pairing.sessionToken,
@@ -157,7 +164,7 @@ const update = await client.requestContractUpdate({
   validate: true,
 });
 
-console.log(account, init.transactionHash, update.transactionHash);
+console.log(account, deploy.transactionHash, init.transactionHash, update.transactionHash);
 ```
 
 ### Example: inspect transaction status and details

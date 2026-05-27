@@ -14,6 +14,8 @@ import {
   type ContractInitResult,
   type ContractUpdateParams,
   type ContractUpdateResult,
+  type DeployModuleParams,
+  type DeployModuleResult,
   type JsonRpcId,
   type WebSocketConstructor,
   type WebSocketLike,
@@ -26,6 +28,7 @@ import {
 import { requestAccount } from "./features/account.js";
 import { requestContractInit } from "./features/contract-init.js";
 import { requestContractUpdate } from "./features/contract-update.js";
+import { requestDeployModule } from "./features/deploy-module.js";
 import { pair } from "./features/pairing.js";
 
 interface PendingRequest {
@@ -249,6 +252,29 @@ export class ConnectClient {
    */
   requestContractUpdate(params: ContractUpdateParams): Promise<ContractUpdateResult> {
     return requestContractUpdate(this, params);
+  }
+
+  /**
+   * Requests wallet-approved smart contract module deployment.
+   *
+   * @param params - Deploy-module parameters, including the active session
+   * token, serialized module bytes encoded as hex, and optional validation flag
+   * for checking whether the module already exists on chain.
+   * @returns The submitted transaction hash returned by the wallet.
+   * @throws {ConnectClientError} If the socket is not open, the token is
+   * invalid, duplicate validation rejects, the user declines, or submission
+   * fails.
+   * @example
+   * ```ts
+   * const { transactionHash } = await client.requestDeployModule({
+   *   sessionToken,
+   *   moduleHex: "0061736d...",
+   *   validate: true,
+   * });
+   * ```
+   */
+  requestDeployModule(params: DeployModuleParams): Promise<DeployModuleResult> {
+    return requestDeployModule(this, params);
   }
 
   /**

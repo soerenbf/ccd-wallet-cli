@@ -9,6 +9,7 @@ import {
 import type {
   ContractInitParams,
   ContractUpdateParams,
+  DeployModuleParams,
 } from "@ccd-wallet/connect-client";
 import type {
   PreparedSmartContractParameters,
@@ -21,6 +22,7 @@ class FakeClient implements ConnectClientLike {
   accountCalls: Array<{ sessionToken: string; networkGenesisHash: string }> = [];
   initCalls: ContractInitParams[] = [];
   updateCalls: ContractUpdateParams[] = [];
+  deployCalls: DeployModuleParams[] = [];
   closeCalls = 0;
 
   async connect(): Promise<void> {
@@ -47,6 +49,11 @@ class FakeClient implements ConnectClientLike {
   async requestContractUpdate(params: ContractUpdateParams) {
     this.updateCalls.push(params);
     return { transactionHash: "tx-update" };
+  }
+
+  async requestDeployModule(params: DeployModuleParams) {
+    this.deployCalls.push(params);
+    return { transactionHash: "tx-deploy" };
   }
 
   close(): void {
@@ -139,6 +146,9 @@ test("pairing establishes a paired session shell with node lookup context before
     accountAuthority: null,
     smartContracts: {
       mode: "init",
+      deployModuleHex: "",
+      deployModuleFileName: "",
+      deployModuleSize: 0,
       moduleRef: "",
       initName: "init_my_contract",
       entrypointName: "set",
@@ -149,7 +159,7 @@ test("pairing establishes a paired session shell with node lookup context before
       parameterJson: "{}",
       validate: true,
       status:
-        "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
+        "Provide Smart Contracts request details. Deploy uploads module files; init and update derive embedded schema automatically.",
       preparedParameterHex: "",
       preparedSchema: null,
       preparedModuleRef: "",
@@ -321,6 +331,54 @@ test("smart-contract update flow derives embedded schema from the target instanc
   );
 });
 
+test("deploy-module flow submits uploaded module bytes through the connect client", async () => {
+  const fakeClient = new FakeClient();
+  const model = createExampleAppModel({
+    clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
+    challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
+  });
+
+  await model.pair();
+  await model.requestAccount();
+  model.updateSmartContracts({ mode: "deploy", validate: true });
+  model.setDeployModuleFile("contract.wasm.v1", new Uint8Array([0, 1, 255]));
+  await model.submitSmartContractRequest();
+
+  assert.deepEqual(fakeClient.deployCalls, [
+    {
+      sessionToken: "session-token",
+      moduleHex: "0001ff",
+      validate: true,
+    },
+  ]);
+  assert.equal(model.getState().smartContracts.deployModuleFileName, "contract.wasm.v1");
+  assert.equal(model.getState().smartContracts.deployModuleSize, 3);
+  assert.equal(model.getState().smartContracts.lastTransactionHash, "tx-deploy");
+});
+
+test("deploy-module flow rejects submission without a selected file", async () => {
+  const fakeClient = new FakeClient();
+  const model = createExampleAppModel({
+    clientFactory: (() => fakeClient) satisfies ConnectClientFactory,
+    challengeGenerator: () => "123456",
+    initialNetworkGenesisHash: "genesis",
+    initialNodeEndpoint: "http://127.0.0.1:20000",
+  });
+
+  await model.pair();
+  await model.requestAccount();
+  model.updateSmartContracts({ mode: "deploy" });
+  await model.submitSmartContractRequest();
+
+  assert.equal(fakeClient.deployCalls.length, 0);
+  assert.equal(
+    model.getState().smartContracts.status,
+    "Select a smart contract module file before submitting.",
+  );
+});
+
 test("string-like schema preparation errors are surfaced in app status", async () => {
   const fakeClient = new FakeClient();
   const fakeTools = new FakeSmartContractTools();
@@ -388,6 +446,9 @@ test("reset clears paired session state, authority state, and embedded-schema pr
     accountAuthority: null,
     smartContracts: {
       mode: "init",
+      deployModuleHex: "",
+      deployModuleFileName: "",
+      deployModuleSize: 0,
       moduleRef: "",
       initName: "init_my_contract",
       entrypointName: "set",
@@ -398,7 +459,7 @@ test("reset clears paired session state, authority state, and embedded-schema pr
       parameterJson: "{}",
       validate: true,
       status:
-        "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
+        "Provide Smart Contracts request details. Deploy uploads module files; init and update derive embedded schema automatically.",
       preparedParameterHex: "",
       preparedSchema: null,
       preparedModuleRef: "",

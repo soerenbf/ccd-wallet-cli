@@ -15,6 +15,8 @@ import {
   type ContractInitResult,
   type ContractUpdateParams,
   type ContractUpdateResult,
+  type DeployModuleParams,
+  type DeployModuleResult,
   type PairResult,
 } from "@ccd-wallet/connect-client";
 import {
@@ -31,7 +33,7 @@ export type ExamplePage = "smart-contracts" | "transactions" | "chain-updates";
 /**
  * Smart-contract request modes supported by the example app.
  */
-export type SmartContractMode = "init" | "update";
+export type SmartContractMode = "deploy" | "init" | "update";
 
 /**
  * Paired session context displayed globally once pairing succeeds.
@@ -59,6 +61,12 @@ export interface AccountAuthorityState {
 export interface SmartContractsState {
   /** Whether the form is preparing an init or update request. */
   mode: SmartContractMode;
+  /** Hex-encoded module bytes used for deploy requests. */
+  deployModuleHex: string;
+  /** Name of the selected deploy-module file, if any. */
+  deployModuleFileName: string;
+  /** Size in bytes of the selected deploy-module file, if any. */
+  deployModuleSize: number;
   /** Module reference used for init requests. */
   moduleRef: string;
   /** Init function name sent to the connect server. */
@@ -134,6 +142,8 @@ export interface ConnectClientLike {
   requestContractUpdate(
     params: ContractUpdateParams,
   ): Promise<ContractUpdateResult>;
+  /** Requests wallet-approved smart contract module deployment. */
+  requestDeployModule(params: DeployModuleParams): Promise<DeployModuleResult>;
   /** Closes the current WebSocket connection. */
   close(): void;
 }
@@ -170,6 +180,8 @@ export interface ExampleAppModel {
   setCurrentPage(page: ExamplePage): void;
   /** Replaces one or more Smart Contracts page fields. */
   updateSmartContracts(patch: Partial<SmartContractsState>): void;
+  /** Stores a selected deploy-module file as hex for later submission. */
+  setDeployModuleFile(fileName: string, bytes: Uint8Array): void;
   /** Requests pairing through the connect client package. */
   pair(): Promise<void>;
   /** Requests account authority for the active paired session. */
@@ -301,6 +313,13 @@ export function createExampleAppModel(
       update({ status: "No active session. Pair first." });
       return null;
     }
+    if (state.smartContracts.mode === "deploy") {
+      update({ status: "Deploy module requests do not use embedded-schema preparation." });
+      updateSmartContractsState({
+        status: "Select a module file and submit the deploy request.",
+      });
+      return null;
+    }
 
     update({ status: "Resolving embedded contract schema from the node..." });
     updateSmartContractsState({
@@ -387,6 +406,7 @@ export function createExampleAppModel(
     updateSmartContracts(patch: Partial<SmartContractsState>): void {
       const resetsPreparation =
         patch.mode !== undefined ||
+        patch.deployModuleHex !== undefined ||
         patch.moduleRef !== undefined ||
         patch.initName !== undefined ||
         patch.entrypointName !== undefined ||
@@ -484,6 +504,17 @@ export function createExampleAppModel(
       await prepareSmartContractRequest();
     },
 
+    setDeployModuleFile(fileName: string, bytes: Uint8Array): void {
+      updateSmartContractsState({
+        deployModuleFileName: fileName,
+        deployModuleSize: bytes.byteLength,
+        deployModuleHex: bytesToHex(bytes),
+        lastTransactionHash: "",
+        status: `Loaded deploy-module file ${fileName} (${bytes.byteLength} bytes).`,
+      });
+      update({ status: "Deploy-module file loaded. Submit when ready." });
+    },
+
     async submitSmartContractRequest(): Promise<void> {
       if (!client || !state.session) {
         update({ status: "No active session. Pair first." });
@@ -501,20 +532,49 @@ export function createExampleAppModel(
         return;
       }
 
-      const prepared = state.smartContracts.preparedParameterHex
-        ? {
-            parameterHex: state.smartContracts.preparedParameterHex,
-            schema: state.smartContracts.preparedSchema,
-            parameterJson: undefined,
-            contractName: state.smartContracts.preparedContractName,
-            moduleRef: state.smartContracts.preparedModuleRef,
-          }
-        : await prepareSmartContractRequest();
-      if (!prepared) {
-        return;
-      }
-
       try {
+        if (state.smartContracts.mode === "deploy") {
+          if (!state.smartContracts.deployModuleHex) {
+            update({ status: "Select a smart contract module file before submitting." });
+            updateSmartContractsState({
+              status: "Select a smart contract module file before submitting.",
+            });
+            return;
+          }
+          update({ status: "Submitting deploy-module request..." });
+          updateSmartContractsState({
+            status: "Submitting deploy-module request through @ccd-wallet/connect-client.",
+          });
+          const deployRequest: DeployModuleParams = {
+            sessionToken: state.session.sessionToken,
+            moduleHex: state.smartContracts.deployModuleHex,
+            validate: state.smartContracts.validate,
+          };
+          const result = await client.requestDeployModule(deployRequest);
+          update({
+            status:
+              "Deploy-module request approved. The wallet returned a transaction hash.",
+          });
+          updateSmartContractsState({
+            status: "Deploy-module request submitted through @ccd-wallet/connect-client.",
+            lastTransactionHash: result.transactionHash,
+          });
+          return;
+        }
+
+        const prepared = state.smartContracts.preparedParameterHex
+          ? {
+              parameterHex: state.smartContracts.preparedParameterHex,
+              schema: state.smartContracts.preparedSchema,
+              parameterJson: undefined,
+              contractName: state.smartContracts.preparedContractName,
+              moduleRef: state.smartContracts.preparedModuleRef,
+            }
+          : await prepareSmartContractRequest();
+        if (!prepared) {
+          return;
+        }
+
         if (state.smartContracts.mode === "init") {
           update({ status: "Submitting smart contract init request..." });
           const initRequest: ContractInitParams = {
@@ -614,6 +674,9 @@ export function createExampleAppModel(
 function createDefaultSmartContractsState(): SmartContractsState {
   return {
     mode: "init",
+    deployModuleHex: "",
+    deployModuleFileName: "",
+    deployModuleSize: 0,
     moduleRef: "",
     initName: "init_my_contract",
     entrypointName: "set",
@@ -624,7 +687,7 @@ function createDefaultSmartContractsState(): SmartContractsState {
     parameterJson: "{}",
     validate: true,
     status:
-      "Provide Smart Contracts request details and JSON input. The app will derive embedded schema automatically from the module or target contract instance.",
+      "Provide Smart Contracts request details. Deploy uploads module files; init and update derive embedded schema automatically.",
     preparedParameterHex: "",
     preparedSchema: null,
     preparedModuleRef: "",
@@ -659,6 +722,12 @@ function parseUnsignedInteger(value: string, fieldName: string): number {
     throw new Error(`${fieldName} must be a non-negative integer.`);
   }
   return parsed;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function formatErrorStatus(error: unknown): string {

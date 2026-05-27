@@ -212,6 +212,75 @@ test("requestContractUpdate sends JSON-RPC requestContractUpdate request", async
   assert.deepEqual(await result, { transactionHash: "tx-update" });
 });
 
+test("requestDeployModule sends JSON-RPC requestDeployModule request", async () => {
+  resetMockSockets();
+  const client = new ConnectClient({ WebSocket: MockWebSocket });
+  const connected = client.connect();
+  const socket = MockWebSocket.instances[0];
+  assert.ok(socket);
+  socket.open();
+  await connected;
+
+  const result = client.requestDeployModule({
+    sessionToken: "session-token",
+    moduleHex: "000102",
+    validate: true,
+  });
+  assert.deepEqual(JSON.parse(socket.sent[0] ?? "{}"), {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "requestDeployModule",
+    params: {
+      sessionToken: "session-token",
+      moduleHex: "000102",
+      validate: true,
+    },
+  });
+
+  socket.receive({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { transactionHash: "tx-deploy" },
+  });
+
+  assert.deepEqual(await result, { transactionHash: "tx-deploy" });
+});
+
+test("deploy-module request server errors reject with ConnectClientError", async () => {
+  resetMockSockets();
+  const client = new ConnectClient({ WebSocket: MockWebSocket });
+  const connected = client.connect();
+  const socket = MockWebSocket.instances[0];
+  assert.ok(socket);
+  socket.open();
+  await connected;
+
+  const result = client.requestDeployModule({
+    sessionToken: "session-token",
+    moduleHex: "000102",
+    validate: true,
+  });
+  socket.receive({
+    jsonrpc: "2.0",
+    id: 1,
+    error: {
+      code: -32007,
+      message:
+        "module already exists on chain for this network; deploy a different module or verify that you selected the intended network",
+    },
+  });
+
+  await assert.rejects(result, (error: unknown) => {
+    assert.equal(error instanceof ConnectClientError, true);
+    assert.equal(
+      (error as ConnectClientError).message,
+      "module already exists on chain for this network; deploy a different module or verify that you selected the intended network",
+    );
+    assert.equal((error as ConnectClientError).code, -32007);
+    return true;
+  });
+});
+
 test("contract request server errors reject with ConnectClientError", async () => {
   resetMockSockets();
   const client = new ConnectClient({ WebSocket: MockWebSocket });

@@ -23,6 +23,14 @@ export function ExampleApp() {
 
   useEffect(() => model.subscribe(setState), [model]);
 
+  const handleDeployModuleFile = async (file: File | undefined): Promise<void> => {
+    if (!file) {
+      return;
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    model.setDeployModuleFile(file.name, bytes);
+  };
+
   return (
     <main className="example-app">
       <header className="hero panel">
@@ -216,6 +224,19 @@ export function ExampleApp() {
                     <button
                       type="button"
                       className={
+                        state.smartContracts.mode === "deploy"
+                          ? "nav-button active"
+                          : "nav-button"
+                      }
+                      onClick={() =>
+                        model.updateSmartContracts({ mode: "deploy" })
+                      }
+                    >
+                      Deploy Module
+                    </button>
+                    <button
+                      type="button"
+                      className={
                         state.smartContracts.mode === "init"
                           ? "nav-button active"
                           : "nav-button"
@@ -239,149 +260,203 @@ export function ExampleApp() {
                     </button>
                   </div>
 
-                  <div className="form-grid two-columns">
-                    {state.smartContracts.mode === "init" ? (
-                      <>
+                  {state.smartContracts.mode === "deploy" ? (
+                    <>
+                      <div className="form-grid two-columns">
                         <label>
-                          <span>Module reference</span>
+                          <span>Module file</span>
                           <input
-                            type="text"
-                            value={state.smartContracts.moduleRef}
+                            type="file"
                             onChange={(event) =>
-                              model.updateSmartContracts({
-                                moduleRef: event.target.value,
-                              })
+                              void handleDeployModuleFile(
+                                event.currentTarget.files?.[0],
+                              )
                             }
                           />
                         </label>
+                      </div>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={state.smartContracts.validate}
+                          onChange={(event) =>
+                            model.updateSmartContracts({
+                              validate: event.target.checked,
+                            })
+                          }
+                        />
+                        <span>Ask wallet to check whether the module already exists</span>
+                      </label>
+                      <div className="button-row">
+                        <button
+                          type="button"
+                          onClick={() => void model.submitSmartContractRequest()}
+                        >
+                          Submit Deploy Request
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="form-grid two-columns">
+                        {state.smartContracts.mode === "init" ? (
+                          <>
+                            <label>
+                              <span>Module reference</span>
+                              <input
+                                type="text"
+                                value={state.smartContracts.moduleRef}
+                                onChange={(event) =>
+                                  model.updateSmartContracts({
+                                    moduleRef: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>Init name</span>
+                              <input
+                                type="text"
+                                value={state.smartContracts.initName}
+                                onChange={(event) =>
+                                  model.updateSmartContracts({
+                                    initName: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                          </>
+                        ) : (
+                          <>
+                            <label>
+                              <span>Contract index</span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={state.smartContracts.contractIndex}
+                                onChange={(event) =>
+                                  model.updateSmartContracts({
+                                    contractIndex: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>Contract subindex</span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={state.smartContracts.contractSubindex}
+                                onChange={(event) =>
+                                  model.updateSmartContracts({
+                                    contractSubindex: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                            <label>
+                              <span>Entrypoint name</span>
+                              <input
+                                type="text"
+                                value={state.smartContracts.entrypointName}
+                                onChange={(event) =>
+                                  model.updateSmartContracts({
+                                    entrypointName: event.target.value,
+                                  })
+                                }
+                              />
+                            </label>
+                          </>
+                        )}
+
                         <label>
-                          <span>Init name</span>
-                          <input
-                            type="text"
-                            value={state.smartContracts.initName}
-                            onChange={(event) =>
-                              model.updateSmartContracts({
-                                initName: event.target.value,
-                              })
-                            }
-                          />
-                        </label>
-                      </>
-                    ) : (
-                      <>
-                        <label>
-                          <span>Contract index</span>
+                          <span>Amount (microCCD)</span>
                           <input
                             type="text"
                             inputMode="numeric"
-                            value={state.smartContracts.contractIndex}
+                            value={state.smartContracts.amountMicroCcd}
                             onChange={(event) =>
                               model.updateSmartContracts({
-                                contractIndex: event.target.value,
+                                amountMicroCcd: event.target.value,
                               })
                             }
                           />
                         </label>
+
                         <label>
-                          <span>Contract subindex</span>
+                          <span>Max contract execution energy</span>
                           <input
                             type="text"
                             inputMode="numeric"
-                            value={state.smartContracts.contractSubindex}
+                            value={state.smartContracts.maxContractExecutionEnergy}
                             onChange={(event) =>
                               model.updateSmartContracts({
-                                contractSubindex: event.target.value,
+                                maxContractExecutionEnergy: event.target.value,
                               })
                             }
                           />
                         </label>
-                        <label>
-                          <span>Entrypoint name</span>
-                          <input
-                            type="text"
-                            value={state.smartContracts.entrypointName}
-                            onChange={(event) =>
-                              model.updateSmartContracts({
-                                entrypointName: event.target.value,
-                              })
-                            }
-                          />
-                        </label>
-                      </>
-                    )}
+                      </div>
 
-                    <label>
-                      <span>Amount (microCCD)</span>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={state.smartContracts.amountMicroCcd}
-                        onChange={(event) =>
-                          model.updateSmartContracts({
-                            amountMicroCcd: event.target.value,
-                          })
-                        }
-                      />
-                    </label>
+                      <label>
+                        <span>Parameter JSON</span>
+                        <textarea
+                          rows={8}
+                          value={state.smartContracts.parameterJson}
+                          onChange={(event) =>
+                            model.updateSmartContracts({
+                              parameterJson: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
 
-                    <label>
-                      <span>Max contract execution energy</span>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={state.smartContracts.maxContractExecutionEnergy}
-                        onChange={(event) =>
-                          model.updateSmartContracts({
-                            maxContractExecutionEnergy: event.target.value,
-                          })
-                        }
-                      />
-                    </label>
-                  </div>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={state.smartContracts.validate}
+                          onChange={(event) =>
+                            model.updateSmartContracts({
+                              validate: event.target.checked,
+                            })
+                          }
+                        />
+                        <span>Request wallet-side simulation before prompting</span>
+                      </label>
 
-                  <label>
-                    <span>Parameter JSON</span>
-                    <textarea
-                      rows={8}
-                      value={state.smartContracts.parameterJson}
-                      onChange={(event) =>
-                        model.updateSmartContracts({
-                          parameterJson: event.target.value,
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={state.smartContracts.validate}
-                      onChange={(event) =>
-                        model.updateSmartContracts({
-                          validate: event.target.checked,
-                        })
-                      }
-                    />
-                    <span>Request wallet-side simulation before prompting</span>
-                  </label>
-
-                  <div className="button-row">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      onClick={() => void model.prepareSmartContractRequest()}
-                    >
-                      Derive Embedded Schema
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void model.submitSmartContractRequest()}
-                    >
-                      Submit {state.smartContracts.mode === "init" ? "Init" : "Update"} Request
-                    </button>
-                  </div>
+                      <div className="button-row">
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => void model.prepareSmartContractRequest()}
+                        >
+                          Derive Embedded Schema
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void model.submitSmartContractRequest()}
+                        >
+                          Submit {state.smartContracts.mode === "init" ? "Init" : "Update"} Request
+                        </button>
+                      </div>
+                    </>
+                  )}
 
                   <div className="output-grid">
+                    <InfoCard
+                      title="Deploy module file"
+                      value={state.smartContracts.deployModuleFileName || "No file selected"}
+                      testId="deploy-module-file"
+                    />
+                    <InfoCard
+                      title="Deploy module size"
+                      value={
+                        state.smartContracts.deployModuleSize
+                          ? `${state.smartContracts.deployModuleSize} bytes`
+                          : "No file selected"
+                      }
+                      testId="deploy-module-size"
+                    />
                     <InfoCard
                       title="Prepared parameter hex"
                       value={state.smartContracts.preparedParameterHex || "Not prepared yet"}

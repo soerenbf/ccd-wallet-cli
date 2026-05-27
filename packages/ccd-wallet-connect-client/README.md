@@ -10,6 +10,7 @@ The package wraps the current connect protocol:
 - `requestAccount` to acquire account authority for that paired session when a capability needs it
 - `requestContractInit` for wallet-approved smart contract initialization
 - `requestContractUpdate` for wallet-approved smart contract receive-function execution
+- `requestDeployModule` for wallet-approved smart contract module deployment
 
 The wallet signs and submits approved contract transactions and returns the submitted transaction hash. Finalization is displayed locally by the CLI wallet.
 
@@ -69,6 +70,13 @@ const update = await client.requestContractUpdate({
 });
 console.log(update.transactionHash);
 
+const deploy = await client.requestDeployModule({
+  sessionToken: pairing.sessionToken,
+  moduleHex: "0061736d...",
+  validate: true,
+});
+console.log(deploy.transactionHash);
+
 client.close();
 ```
 
@@ -80,11 +88,15 @@ Successful pairing returns only a session token. Pairing binds browser trust and
 
 Call `requestAccount(sessionToken, networkGenesisHash)` when your feature needs account-backed authority. The wallet validates that the requested network matches the session-bound network, may prompt the user to approve an account, and returns the approved account address. The wallet can cache that granted authority for the rest of the active session.
 
-Account-backed methods such as `requestContractInit` and `requestContractUpdate` depend on previously granted session account authority. If the session does not have account authority yet, the server rejects those requests with an actionable error telling the caller to invoke `requestAccount` first.
+Account-backed methods such as `requestContractInit`, `requestContractUpdate`, and `requestDeployModule` depend on previously granted session account authority. If the session does not have account authority yet, the server rejects those requests with an actionable error telling the caller to invoke `requestAccount` first.
 
 ## Contract parameter display
 
 Contract parameters are serialized by the dApp and passed as `parameterHex`. Optionally pass a base64-encoded versioned module schema (or an object containing it in `base64`, `moduleSchema`, or `schema`) to let the wallet render human-readable parameters; otherwise the wallet displays hex.
+
+## Module deployment
+
+Deploy-module requests pass serialized module bytes as `moduleHex`. When `validate: true` is set, the wallet checks whether the derived module reference already exists on the session-bound chain before prompting. Duplicate findings and transient validation failures are shown as warnings in the wallet prompt so the user can still choose whether to proceed. When the module already exists, the warning explains that submitting again is expected to reuse the same module reference.
 
 ## Runtime compatibility
 

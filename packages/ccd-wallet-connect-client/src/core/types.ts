@@ -33,6 +33,11 @@ export const REQUEST_CONTRACT_INIT_METHOD = "requestContractInit";
 export const REQUEST_CONTRACT_UPDATE_METHOD = "requestContractUpdate";
 
 /**
+ * JSON-RPC method name for requesting smart contract module deployment.
+ */
+export const REQUEST_DEPLOY_MODULE_METHOD = "requestDeployModule";
+
+/**
  * JSON-RPC 2.0 request identifier type used by the connect protocol.
  */
 export type JsonRpcId = string | number | null;
@@ -200,6 +205,26 @@ export interface ContractUpdateParams {
  * Successful result of the `requestContractUpdate` method.
  */
 export interface ContractUpdateResult {
+  /** Submitted transaction hash. */
+  transactionHash: string;
+}
+
+/**
+ * Parameters for the `requestDeployModule` method.
+ */
+export interface DeployModuleParams {
+  /** Session token returned by a successful pairing request. */
+  sessionToken: string;
+  /** Serialized smart contract module bytes encoded as hex. */
+  moduleHex: string;
+  /** Whether the wallet should check if the module already exists before prompting. */
+  validate?: boolean;
+}
+
+/**
+ * Successful result of the `requestDeployModule` method.
+ */
+export interface DeployModuleResult {
   /** Submitted transaction hash. */
   transactionHash: string;
 }

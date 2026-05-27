@@ -12,7 +12,7 @@ This example app demonstrates the staged authority model introduced by the conne
 - enter a paired application shell with global session context and feature navigation
 - request account authority explicitly only when a feature needs it
 - use `@concordium/web-sdk` in the Smart Contracts page to derive embedded schema automatically from the referenced module or target contract instance
-- submit smart contract init/update requests through `@ccd-wallet/connect-client`
+- submit smart contract deploy/init/update requests through `@ccd-wallet/connect-client`
 - keep placeholder navigation for Transactions and Chain Updates while those areas are still pending
 - reset local example state
 
@@ -42,13 +42,17 @@ The Smart Contracts section is the first fully implemented capability area in th
 It uses:
 
 - `@concordium/web-sdk` for node-backed embedded-schema lookup and JSON-to-parameter serialization
-- `@ccd-wallet/connect-client` for `requestAccount`, `requestContractInit`, and `requestContractUpdate`
+- `@ccd-wallet/connect-client` for `requestAccount`, `requestDeployModule`, `requestContractInit`, and `requestContractUpdate`
 
 The page deliberately gates account-backed forms behind an explicit account-authority action so integrators can see the staged flow clearly.
 
+### Deploy Module
+
+The Deploy Module flow accepts a smart contract module file upload, converts the file bytes to hex in the browser, and submits `requestDeployModule` through the connect client. When validation is enabled, the wallet checks whether the derived module reference already exists on chain before prompting.
+
 ### Embedded schema only
 
-The Smart Contracts showcase supports only contracts whose module exposes embedded schema.
+The init and update showcase flows support only contracts whose module exposes embedded schema.
 
 - **Init flows** derive schema from the supplied `moduleRef`
 - **Update flows** derive schema by querying the target contract instance and then reading the embedded schema from its `sourceModule`
