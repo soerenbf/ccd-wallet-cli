@@ -313,13 +313,13 @@ pub enum ContractParameterTemplateSubcommand {
 
 #[derive(Debug, Args)]
 pub struct ContractParameterTemplateInitArgs {
+    /// Init function name, for example `init_counter`.
+    #[arg(value_name = "INIT_NAME")]
+    pub init_name: String,
+
     /// Module reference that contains the embedded schema.
     #[arg(long = "module-ref", value_name = "REF")]
     pub module_ref: String,
-
-    /// Init function name, for example `init_counter`.
-    #[arg(long = "init-name", value_name = "NAME")]
-    pub init_name: String,
 
     /// Registered network name to resolve from the config store.
     #[arg(long = "network", value_name = "NAME")]
@@ -340,6 +340,10 @@ pub struct ContractParameterTemplateInitArgs {
 
 #[derive(Debug, Args)]
 pub struct ContractParameterTemplateReceiveArgs {
+    /// Fully-qualified receive function name, for example `counter.increment`.
+    #[arg(value_name = "RECEIVE_NAME")]
+    pub receive: String,
+
     /// Contract instance address to resolve the source module from.
     #[arg(
         long = "contract",
@@ -351,10 +355,6 @@ pub struct ContractParameterTemplateReceiveArgs {
     /// Module reference that contains the embedded schema.
     #[arg(long = "module-ref", conflicts_with = "contract", value_name = "REF")]
     pub module_ref: Option<String>,
-
-    /// Fully-qualified receive function name, for example `counter.increment`.
-    #[arg(long = "receive", value_name = "NAME")]
-    pub receive: String,
 
     /// Registered network name to resolve from the config store.
     #[arg(long = "network", value_name = "NAME")]
@@ -1158,16 +1158,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_contract_parameter_template_init_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "parameter-template",
+            "init",
+            "init_counter",
+            "--module-ref",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::ParameterTemplate(args) => match args.command {
+                    ContractParameterTemplateSubcommand::Init(args) => {
+                        assert_eq!(args.init_name, "init_counter");
+                        assert_eq!(
+                            args.module_ref,
+                            "0000000000000000000000000000000000000000000000000000000000000000"
+                        );
+                    }
+                    other => panic!("expected init parameter-template command, got {other:?}"),
+                },
+                other => panic!("expected contract parameter-template command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_contract_parameter_template_receive_command() {
         let cli = Cli::parse_from([
             "ccd-wallet",
             "contract",
             "parameter-template",
             "receive",
+            "counter.increment",
             "--contract",
             "42,0",
-            "--receive",
-            "counter.increment",
         ]);
 
         match cli.command {

@@ -14,3 +14,4 @@
 - For connect API interaction logging, prefer `cliclack::log::{info, warning, success, error}` over `println!` / `eprintln!`. Reserve plain terminal printing for end-of-program output rather than interactive connect flow messages.
 - For connect transaction submission and finalization progress, prefer `cliclack` spinners so interactive users can see that node-backed work is ongoing.
 - Keep the command surface and `docs/commands.md` in sync. When changing clap command definitions, top-level command spaces, nested subcommand structure, or command taxonomy intent, update the code and `docs/commands.md` in the same change.
+- Keep the database structure and encryption model in sync with `docs/db-structure.md` and `docs/encryption-model.md`. When changing persisted schema/layout, stored payload semantics, or encryption/key-management behavior, update the code and those docs in the same change.

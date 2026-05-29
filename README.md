@@ -171,9 +171,9 @@ console.log(account, deploy.transactionHash, init.transactionHash, update.transa
 
 ```bash
 cargo run -p ccd-wallet -- contract deploy-module ./counter.wasm.v1 --network testnet
-cargo run -p ccd-wallet -- contract parameter-template init --module-ref <MODULE_REF> --init-name init_counter --network testnet > init-params.json
+cargo run -p ccd-wallet -- contract parameter-template init init_counter --module-ref <MODULE_REF> --network testnet > init-params.json
 cargo run -p ccd-wallet -- contract init --module-ref <MODULE_REF> --init-name init_counter --amount 0 --parameter-json-file init-params.json --network testnet
-cargo run -p ccd-wallet -- contract parameter-template receive --contract 42,0 --receive counter.increment --network testnet > update-params.json
+cargo run -p ccd-wallet -- contract parameter-template receive counter.increment --contract 42,0 --network testnet > update-params.json
 cargo run -p ccd-wallet -- contract update --contract 42,0 --receive counter.increment --amount 0.1 --parameter-json '{"delta": 1}' --network testnet
 cargo run -p ccd-wallet -- contract invoke --contract 42,0 --receive counter.view --network testnet
 cargo run -p ccd-wallet -- contract show --contract 42,0 --network testnet
@@ -182,7 +182,7 @@ cargo run -p ccd-wallet -- contract download-module --contract 42,0 --out counte
 
 `contract init` and `contract update` accept CCD decimal `--amount` values and convert them to exact microCCD chain amounts internally. Their `--energy` flag is optional in interactive mode; when omitted, the wallet simulates the call when possible and prompts for an energy amount using the simulation estimate as the default. Non-interactive init/update calls must supply `--energy` explicitly.
 
-Contract parameters can be supplied as raw serialized bytes with `--parameter-hex`, inline JSON with `--parameter-json`, or a JSON file with `--parameter-json-file`. JSON parameters require an embedded schema in the on-chain module source. Use `contract parameter-template init` or `contract parameter-template receive` to generate the JSON shape expected by embedded init/receive parameter schemas. Read-only commands such as `invoke`, `show`, `parameter-template`, and `download-module` do not unlock accounts or submit transactions. `contract invoke` defaults to the node's synthetic zero-account invoker context unless `--invoker <ADDRESS>` is supplied.
+Contract parameters can be supplied as raw serialized bytes with `--parameter-hex`, inline JSON with `--parameter-json`, or a JSON file with `--parameter-json-file`. JSON parameters require an embedded schema in the on-chain module source. Use `contract parameter-template init <INIT_NAME>` or `contract parameter-template receive <CONTRACT.FUNCTION>` to generate the JSON shape expected by embedded init/receive parameter schemas. Read-only commands such as `invoke`, `show`, `parameter-template`, and `download-module` do not unlock accounts or submit transactions. `contract invoke` defaults to the node's synthetic zero-account invoker context unless `--invoker <ADDRESS>` is supplied.
 
 ### Example: inspect transaction status and details
 
