@@ -13,3 +13,4 @@
   - When adding a new connect capability, mirror the capability split across the TypeScript client and Rust connect server where practical so the architecture stays easy to navigate.
 - For connect API interaction logging, prefer `cliclack::log::{info, warning, success, error}` over `println!` / `eprintln!`. Reserve plain terminal printing for end-of-program output rather than interactive connect flow messages.
 - For connect transaction submission and finalization progress, prefer `cliclack` spinners so interactive users can see that node-backed work is ongoing.
+- Keep the command surface and `docs/commands.md` in sync. When changing clap command definitions, top-level command spaces, nested subcommand structure, or command taxonomy intent, update the code and `docs/commands.md` in the same change.
