@@ -23,6 +23,8 @@ pub enum Command {
     Network(Box<NetworkCommand>),
     /// Transaction inspection commands.
     Transaction(Box<TransactionCommand>),
+    /// Smart contract transaction commands.
+    Contract(Box<ContractCommand>),
     /// Seed phrase commands.
     Seed(SeedCommand),
     /// Identity issuance commands.
@@ -67,6 +69,380 @@ pub struct TransactionShowArgs {
     pub node: Option<v2::Endpoint>,
 
     /// Disable silent use of the active network and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractCommand {
+    #[command(subcommand)]
+    pub command: ContractSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContractSubcommand {
+    /// Deploy a smart contract module from a local module file.
+    DeployModule(Box<ContractDeployModuleArgs>),
+    /// Initialize a smart contract instance.
+    Init(Box<ContractInitArgs>),
+    /// Update a smart contract instance by invoking a receive function.
+    Update(Box<ContractUpdateArgs>),
+    /// Invoke a smart contract entrypoint without submitting a transaction.
+    Invoke(Box<ContractInvokeArgs>),
+    /// Show smart contract instance information.
+    Show(Box<ContractShowArgs>),
+    /// Print a JSON parameter template from an embedded module schema.
+    ParameterTemplate(Box<ContractParameterTemplateArgs>),
+    /// Download smart contract module source bytes.
+    DownloadModule(Box<ContractDownloadModuleArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct ContractInitArgs {
+    /// Module reference to initialize from.
+    #[arg(long = "module-ref", value_name = "REF")]
+    pub module_ref: String,
+
+    /// Init function name, for example `init_counter`.
+    #[arg(long = "init-name", value_name = "NAME")]
+    pub init_name: String,
+
+    /// CCD amount to transfer to the new instance, as a decimal value.
+    #[arg(long = "amount", value_name = "CCD")]
+    pub amount: Option<String>,
+
+    /// Maximum contract execution energy. If omitted interactively, the CLI prompts with a simulation-derived default when available.
+    #[arg(long = "energy", value_name = "ENERGY")]
+    pub energy: Option<u64>,
+
+    /// Serialized parameter bytes encoded as hex.
+    #[arg(long = "parameter-hex", conflicts_with_all = ["parameter_json", "parameter_json_file"], value_name = "HEX")]
+    pub parameter_hex: Option<String>,
+
+    /// Parameter JSON string encoded using the embedded module schema.
+    #[arg(long = "parameter-json", conflicts_with_all = ["parameter_hex", "parameter_json_file"], value_name = "JSON")]
+    pub parameter_json: Option<String>,
+
+    /// Path to a parameter JSON file encoded using the embedded module schema.
+    #[arg(long = "parameter-json-file", conflicts_with_all = ["parameter_hex", "parameter_json"], value_name = "FILE")]
+    pub parameter_json_file: Option<PathBuf>,
+
+    /// Run a simulation before approval and show the result.
+    #[arg(long = "validate")]
+    pub validate: bool,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractUpdateArgs {
+    /// Contract instance address as `<index,subindex>`, `index,subindex`, or `index`.
+    #[arg(long = "contract", value_name = "ADDRESS")]
+    pub contract: String,
+
+    /// Fully-qualified receive function name, for example `counter.increment`.
+    #[arg(long = "receive", value_name = "NAME")]
+    pub receive: String,
+
+    /// CCD amount to transfer to the instance, as a decimal value.
+    #[arg(long = "amount", value_name = "CCD")]
+    pub amount: Option<String>,
+
+    /// Maximum contract execution energy. If omitted interactively, the CLI prompts with a simulation-derived default when available.
+    #[arg(long = "energy", value_name = "ENERGY")]
+    pub energy: Option<u64>,
+
+    /// Serialized parameter bytes encoded as hex.
+    #[arg(long = "parameter-hex", conflicts_with_all = ["parameter_json", "parameter_json_file"], value_name = "HEX")]
+    pub parameter_hex: Option<String>,
+
+    /// Parameter JSON string encoded using the embedded module schema.
+    #[arg(long = "parameter-json", conflicts_with_all = ["parameter_hex", "parameter_json_file"], value_name = "JSON")]
+    pub parameter_json: Option<String>,
+
+    /// Path to a parameter JSON file encoded using the embedded module schema.
+    #[arg(long = "parameter-json-file", conflicts_with_all = ["parameter_hex", "parameter_json"], value_name = "FILE")]
+    pub parameter_json_file: Option<PathBuf>,
+
+    /// Run a simulation before approval and show the result.
+    #[arg(long = "validate")]
+    pub validate: bool,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractInvokeArgs {
+    /// Contract instance address as `<index,subindex>`, `index,subindex`, or `index`.
+    #[arg(long = "contract", value_name = "ADDRESS")]
+    pub contract: String,
+
+    /// Fully-qualified receive function name, for example `counter.view`.
+    #[arg(long = "receive", value_name = "NAME")]
+    pub receive: String,
+
+    /// CCD amount to use for the invocation context, as a decimal value.
+    #[arg(long = "amount", value_name = "CCD")]
+    pub amount: Option<String>,
+
+    /// Maximum contract execution energy for the query.
+    #[arg(long = "energy", value_name = "ENERGY")]
+    pub energy: Option<u64>,
+
+    /// Account address to use as explicit invoker. Defaults to the node's synthetic zero-account context.
+    #[arg(long = "invoker", value_name = "ADDRESS")]
+    pub invoker: Option<String>,
+
+    /// Serialized parameter bytes encoded as hex.
+    #[arg(long = "parameter-hex", conflicts_with_all = ["parameter_json", "parameter_json_file"], value_name = "HEX")]
+    pub parameter_hex: Option<String>,
+
+    /// Parameter JSON string encoded using the embedded module schema.
+    #[arg(long = "parameter-json", conflicts_with_all = ["parameter_hex", "parameter_json_file"], value_name = "JSON")]
+    pub parameter_json: Option<String>,
+
+    /// Path to a parameter JSON file encoded using the embedded module schema.
+    #[arg(long = "parameter-json-file", conflicts_with_all = ["parameter_hex", "parameter_json"], value_name = "FILE")]
+    pub parameter_json_file: Option<PathBuf>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Query block selector. Supports `best` and `last-final`.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Print machine-readable JSON output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractShowArgs {
+    /// Contract instance address as `<index,subindex>`, `index,subindex`, or `index`.
+    #[arg(long = "contract", value_name = "ADDRESS")]
+    pub contract: String,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Query block selector. Supports `best` and `last-final`.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Print machine-readable JSON output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractParameterTemplateArgs {
+    #[command(subcommand)]
+    pub command: ContractParameterTemplateSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ContractParameterTemplateSubcommand {
+    /// Print an init parameter JSON template.
+    Init(Box<ContractParameterTemplateInitArgs>),
+    /// Print a receive parameter JSON template.
+    Receive(Box<ContractParameterTemplateReceiveArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct ContractParameterTemplateInitArgs {
+    /// Module reference that contains the embedded schema.
+    #[arg(long = "module-ref", value_name = "REF")]
+    pub module_ref: String,
+
+    /// Init function name, for example `init_counter`.
+    #[arg(long = "init-name", value_name = "NAME")]
+    pub init_name: String,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Query block selector. Supports `best` and `last-final`.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractParameterTemplateReceiveArgs {
+    /// Contract instance address to resolve the source module from.
+    #[arg(
+        long = "contract",
+        conflicts_with = "module_ref",
+        value_name = "ADDRESS"
+    )]
+    pub contract: Option<String>,
+
+    /// Module reference that contains the embedded schema.
+    #[arg(long = "module-ref", conflicts_with = "contract", value_name = "REF")]
+    pub module_ref: Option<String>,
+
+    /// Fully-qualified receive function name, for example `counter.increment`.
+    #[arg(long = "receive", value_name = "NAME")]
+    pub receive: String,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Query block selector. Supports `best` and `last-final`.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractDownloadModuleArgs {
+    /// Module reference to download. Omit when using `--contract`.
+    #[arg(value_name = "MODULE_REF", conflicts_with = "contract")]
+    pub module_ref: Option<String>,
+
+    /// Contract instance address to resolve the source module from.
+    #[arg(
+        long = "contract",
+        conflicts_with = "module_ref",
+        value_name = "ADDRESS"
+    )]
+    pub contract: Option<String>,
+
+    /// Output file path.
+    #[arg(long = "out", value_name = "FILE")]
+    pub out: PathBuf,
+
+    /// Overwrite the output file if it already exists.
+    #[arg(long = "force")]
+    pub force: bool,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Query block selector. Supports `best` and `last-final`.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ContractDeployModuleArgs {
+    /// Path to the Concordium smart contract module file to deploy.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Skip the default check for whether the derived module reference already exists before approval.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
 }
@@ -653,6 +1029,182 @@ mod tests {
                 }
             },
             other => panic!("expected transaction command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_deploy_module_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "deploy-module",
+            "contract.wasm.v1",
+            "--account",
+            "alice",
+            "--network",
+            "testnet",
+            "--no-validate",
+            "--no-wait",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::DeployModule(args) => {
+                    assert_eq!(args.file, std::path::PathBuf::from("contract.wasm.v1"));
+                    assert_eq!(args.account.as_deref(), Some("alice"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.no_validate);
+                    assert!(args.no_wait);
+                }
+                other => panic!("expected contract deploy-module command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_init_command_with_json_file_and_optional_energy() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "init",
+            "--module-ref",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--init-name",
+            "init_counter",
+            "--amount",
+            "1.25",
+            "--parameter-json-file",
+            "init.json",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::Init(args) => {
+                    assert_eq!(args.init_name, "init_counter");
+                    assert_eq!(args.amount.as_deref(), Some("1.25"));
+                    assert!(args.energy.is_none());
+                    assert_eq!(
+                        args.parameter_json_file.as_deref(),
+                        Some(std::path::Path::new("init.json"))
+                    );
+                    assert_eq!(args.account.as_deref(), Some("alice"));
+                }
+                other => panic!("expected contract init command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_update_command_with_inline_json() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "update",
+            "--contract",
+            "42,0",
+            "--receive",
+            "counter.increment",
+            "--energy",
+            "30000",
+            "--parameter-json",
+            "{\"delta\":1}",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::Update(args) => {
+                    assert_eq!(args.contract, "42,0");
+                    assert_eq!(args.receive, "counter.increment");
+                    assert_eq!(args.energy, Some(30000));
+                    assert_eq!(args.parameter_json.as_deref(), Some("{\"delta\":1}"));
+                }
+                other => panic!("expected contract update command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_invoke_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "invoke",
+            "--contract",
+            "42,0",
+            "--receive",
+            "counter.view",
+            "--invoker",
+            "3ZfgcQpwewR6Lw7fn6QW3D5nm3mtAWNQKCPUSmWoEUL5H3qE3r",
+            "--json",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::Invoke(args) => {
+                    assert_eq!(args.contract, "42,0");
+                    assert_eq!(args.receive, "counter.view");
+                    assert!(args.json);
+                    assert!(args.invoker.is_some());
+                }
+                other => panic!("expected contract invoke command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_parameter_template_receive_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "parameter-template",
+            "receive",
+            "--contract",
+            "42,0",
+            "--receive",
+            "counter.increment",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::ParameterTemplate(args) => match args.command {
+                    ContractParameterTemplateSubcommand::Receive(args) => {
+                        assert_eq!(args.contract.as_deref(), Some("42,0"));
+                        assert_eq!(args.receive, "counter.increment");
+                    }
+                    other => panic!("expected receive parameter-template command, got {other:?}"),
+                },
+                other => panic!("expected contract parameter-template command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_download_module_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "download-module",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "--out",
+            "module.wasm.v1",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::DownloadModule(args) => {
+                    assert!(args.module_ref.is_some());
+                    assert_eq!(args.out, std::path::PathBuf::from("module.wasm.v1"));
+                }
+                other => panic!("expected contract download-module command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
         }
     }
 

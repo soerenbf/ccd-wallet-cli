@@ -1,91 +1,15 @@
-use crate::{
-    cli::{TransactionShowArgs, TransactionSubcommand},
-    commands::node::{ResolvedEndpoint, resolve_endpoint_context},
-};
+//! Shared human-oriented transaction summary rendering.
+
 use anyhow::{Context, Result, anyhow, bail};
-use ccd_wallet_core::config;
 use chrono::{DateTime, SecondsFormat, Utc};
 use concordium_rust_sdk::types::{
     AccountCreationDetails, AccountTransactionDetails, BlockItemSummary, BlockItemSummaryDetails,
     TokenCreationDetails, TransactionStatus, UpdateDetails,
     hashes::{BlockHash, TransactionHash},
 };
-use rusqlite::Connection;
 use std::collections::BTreeMap;
 
-pub async fn run(conn: &Connection, command: TransactionSubcommand) -> Result<()> {
-    match command {
-        TransactionSubcommand::Show(args) => show(conn, *args).await,
-    }
-}
-
-async fn show(conn: &Connection, args: TransactionShowArgs) -> Result<()> {
-    let resolved = resolve_endpoint_context(conn, args.network, args.node, args.no_defaults)?;
-    let endpoint_label = resolved.endpoint_label.clone();
-    let query_context = query_context_label(&resolved);
-
-    let mut client = config::connect_v2_client(resolved.endpoint)
-        .await
-        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
-
-    let status = match client.get_block_item_status(&args.hash).await {
-        Ok(status) => Some(status),
-        Err(err) if err.is_not_found() => None,
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!("failed to query transaction status from {endpoint_label}")
-            });
-        }
-    };
-
-    let block_times = fetch_block_times(&mut client, status.as_ref(), &endpoint_label).await?;
-
-    println!(
-        "{}",
-        render_transaction_status(&args.hash, &query_context, status.as_ref(), &block_times)?
-    );
-    Ok(())
-}
-
-async fn fetch_block_times(
-    client: &mut concordium_rust_sdk::v2::Client,
-    status: Option<&TransactionStatus>,
-    endpoint_label: &str,
-) -> Result<BTreeMap<BlockHash, String>> {
-    let mut block_times = BTreeMap::new();
-    let blocks = match status {
-        Some(TransactionStatus::Finalized(blocks)) | Some(TransactionStatus::Committed(blocks)) => {
-            Some(blocks)
-        }
-        _ => None,
-    };
-
-    if let Some(blocks) = blocks {
-        for block_hash in blocks.keys() {
-            let block_info = client.get_block_info(*block_hash).await.with_context(|| {
-                format!("failed to query block information for {block_hash} from {endpoint_label}")
-            })?;
-            block_times.insert(
-                *block_hash,
-                block_info
-                    .response
-                    .block_slot_time
-                    .to_rfc3339_opts(SecondsFormat::Secs, true),
-            );
-        }
-    }
-
-    Ok(block_times)
-}
-
-fn query_context_label(resolved: &ResolvedEndpoint) -> String {
-    match &resolved.network_name {
-        Some(network_name) => format!("{network_name} @ {}", resolved.endpoint_label),
-        None => resolved.endpoint_label.clone(),
-    }
-}
-
-fn render_transaction_status(
+pub(crate) fn render_transaction_status(
     hash: &TransactionHash,
     query_context: &str,
     status: Option<&TransactionStatus>,
@@ -152,7 +76,26 @@ fn single_block_summary<'a>(
     Ok(first)
 }
 
-fn render_block_summary_sections(
+pub(crate) fn render_finalized_summary(
+    transaction_hash: &TransactionHash,
+    query_context: &str,
+    block_hash: &BlockHash,
+    summary: &BlockItemSummary,
+    block_time: Option<&String>,
+) -> Result<String> {
+    let mut lines = vec![
+        "Metadata:".to_owned(),
+        format!("  Transaction: {transaction_hash}"),
+        format!("  Queried via: {query_context}"),
+        "  Status: finalized".to_owned(),
+    ];
+    lines.extend(render_block_summary_sections(
+        block_hash, summary, block_time, false,
+    )?);
+    Ok(lines.join("\n"))
+}
+
+pub(crate) fn render_block_summary_sections(
     block_hash: &BlockHash,
     summary: &BlockItemSummary,
     block_time: Option<&String>,

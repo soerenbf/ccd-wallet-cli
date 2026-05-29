@@ -1,6 +1,7 @@
 pub mod account;
 pub mod config;
 pub mod connect;
+pub mod contract;
 pub mod governance;
 pub mod identity;
 pub mod node;

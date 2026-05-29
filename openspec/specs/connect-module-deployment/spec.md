@@ -42,7 +42,7 @@ The network and account used for signing and submitting a deploy-module request 
 ### Requirement: Deploy validation checks whether the module already exists on chain
 When `validate: true` is set on a deploy request, the wallet SHALL derive the module reference from `moduleHex` and check whether that module already exists on chain before prompting for approval.
 
-If the module is confirmed to already exist on chain, the wallet SHALL show that result as a warning in the approval prompt and SHALL still allow the user to approve or decline. If the validation check cannot be completed because of node unavailability or another transient failure, the wallet SHALL show that result as a warning in the approval prompt and SHALL still allow the user to approve or decline.
+If the module is confirmed to already exist on chain, the wallet SHALL show that result as a warning in the approval prompt, using the message `Validation warning: module already exists on chain for this network.`, and SHALL still allow the user to approve or decline. If the validation check cannot be completed because of node unavailability or another transient failure, the wallet SHALL show that result as a warning in the approval prompt and SHALL still allow the user to approve or decline.
 
 #### Scenario: Validation succeeds and module is not already deployed
 - **WHEN** a browser sends `requestDeployModule` with `validate: true`
@@ -53,7 +53,7 @@ If the module is confirmed to already exist on chain, the wallet SHALL show that
 - **WHEN** a browser sends `requestDeployModule` with `validate: true`
 - **AND** the wallet confirms that the derived module reference already exists on chain
 - **THEN** the wallet shows that finding as a warning in the approval prompt
-- **AND** explains that submitting again is expected to reuse the same module reference
+- **AND** uses the warning message `Validation warning: module already exists on chain for this network.`
 - **AND** still lets the user choose whether to proceed
 
 #### Scenario: Validation cannot complete due to node failure
@@ -69,7 +69,6 @@ The wallet approval prompt for `requestDeployModule` SHALL display:
 - the session-bound account address
 - the derived module reference
 - the module size in bytes
-- whether validation was requested
 - any validation warning or duplicate-module finding
 
 The approval prompt SHALL NOT display a second hash summary beyond the derived module reference.

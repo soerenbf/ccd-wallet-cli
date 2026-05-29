@@ -566,6 +566,7 @@ dependencies = [
  "clap",
  "cliclack",
  "concordium-rust-sdk",
+ "concordium-smart-contract-engine",
  "console 0.15.11",
  "ed25519-dalek",
  "futures-util",

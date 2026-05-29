@@ -1,6 +1,7 @@
 //! Contract-update approval, submission, and finalization flow.
 
 use super::shared;
+use crate::smart_contracts::update as update_core;
 use anyhow::{Result, bail};
 use ccd_wallet_connect::{
     ContractExecutionRejection, ContractUpdateApproval, ContractUpdateRequest,
@@ -8,13 +9,9 @@ use ccd_wallet_connect::{
 use ccd_wallet_core::config as node_config;
 use cliclack::{input, spinner};
 use concordium_rust_sdk::{
-    common::types::{AccountAddress, TransactionTime},
+    common::types::AccountAddress,
     smart_contracts::common::{ContractAddress as SdkContractAddress, OwnedReceiveName},
-    types::{
-        Energy,
-        smart_contracts::ContractContext,
-        transactions::{UpdateContractPayload, send},
-    },
+    types::{Energy, transactions::UpdateContractPayload},
     v2,
 };
 use rusqlite::Connection;
@@ -82,24 +79,16 @@ pub(super) async fn submit_request(
     let mut client = node_config::connect_v2_client(prepared.endpoint.clone())
         .await
         .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let prepared_core = update_core::PreparedContractUpdate {
+        sender: prepared.sender,
+        payload: prepared.payload.clone(),
+        energy: prepared.energy,
+    };
     let simulation = if prepared.request.validate {
-        let context = ContractContext::new_from_payload(
-            prepared.sender,
-            prepared.energy,
-            prepared.payload.clone(),
-        );
         Some(
-            match client
-                .invoke_instance(v2::BlockIdentifier::Best, &context)
+            update_core::simulate_contract_update(&mut client, &prepared_core)
                 .await
-            {
-                Ok(response) => format!(
-                    "Simulation: {:?} (used energy: {})",
-                    response.response,
-                    response.response.used_energy().energy
-                ),
-                Err(err) => format!("Simulation warning: {err}"),
-            },
+                .message,
         )
     } else {
         None
@@ -135,26 +124,12 @@ pub(super) async fn submit_request(
         )
         .map_err(|err| ContractExecutionRejection::other(err.to_string()))?
     };
-    let nonce = client
-        .get_next_account_sequence_number(&wallet.address)
-        .await
-        .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?
-        .nonce;
-    let expiry = TransactionTime::from_seconds((chrono::Utc::now().timestamp() + 300) as u64);
-    let tx = send::update_contract(
-        &wallet,
-        wallet.address,
-        nonce,
-        expiry,
-        prepared.payload,
-        prepared.energy,
-    );
     let spin = spinner();
     spin.start("Submitting contract update transaction...");
-    let transaction_hash = client
-        .send_account_transaction(tx)
+    let submitted = update_core::submit_contract_update(&mut client, &wallet, prepared_core)
         .await
         .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?;
+    let transaction_hash = submitted.transaction_hash;
     spin.clear();
     let transaction_hash_label = transaction_hash.to_string();
     cliclack::log::success(format!(

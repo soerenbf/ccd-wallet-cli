@@ -866,7 +866,7 @@ fn resolve_export_network(
     Ok((network_name, entry, source))
 }
 
-fn resolve_export_account(
+pub(crate) fn resolve_export_account(
     conn: &Connection,
     network_name: &str,
     network_genesis_hash: &str,
@@ -973,7 +973,7 @@ fn expand_tilde_path(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-fn build_export_wallet_account(
+pub(crate) fn build_export_wallet_account(
     conn: &Connection,
     network_name: &str,
     network_entry: &NetworkEntry,
@@ -1495,7 +1495,7 @@ async fn resolve_import_network_context(
     ))
 }
 
-async fn resolve_account_network_context(
+pub(crate) async fn resolve_account_network_context(
     conn: &Connection,
     network: Option<&str>,
     node_override: Option<v2::Endpoint>,

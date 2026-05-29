@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod smart_contracts;
 
 use anyhow::Result;
 use ccd_wallet_core::store;
@@ -18,6 +19,7 @@ async fn main() -> Result<()> {
         Command::Node(command) => commands::node::run(&conn, command.command).await,
         Command::Network(command) => commands::config::run(&conn, *command).await,
         Command::Transaction(command) => commands::transaction::run(&conn, command.command).await,
+        Command::Contract(command) => commands::contract::run(&conn, command.command).await,
         Command::Seed(command) => commands::seed::run(&mut conn, command.command).await,
         Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,

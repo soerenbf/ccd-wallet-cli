@@ -1,18 +1,15 @@
 //! Contract-initialization approval, submission, and finalization flow.
 
 use super::shared;
+use crate::smart_contracts::init as init_core;
 use anyhow::Result;
 use ccd_wallet_connect::{ContractExecutionRejection, ContractInitApproval, ContractInitRequest};
 use ccd_wallet_core::config as node_config;
 use cliclack::{input, spinner};
 use concordium_rust_sdk::{
-    common::types::{AccountAddress, TransactionTime},
-    contract_client::ContractInitBuilder,
+    common::types::AccountAddress,
     smart_contracts::common::{ModuleReference, OwnedContractName},
-    types::{
-        Energy,
-        transactions::{InitContractPayload, send},
-    },
+    types::{Energy, transactions::InitContractPayload},
     v2,
 };
 use rusqlite::Connection;
@@ -76,29 +73,20 @@ pub(super) async fn submit_request(
     let mut client = node_config::connect_v2_client(prepared.endpoint.clone())
         .await
         .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
+    let prepared_core = init_core::prepare_contract_init(
+        prepared.sender,
+        prepared.payload.mod_ref,
+        &prepared.request.init_name,
+        prepared.payload.amount,
+        prepared.payload.param.clone(),
+        prepared.energy,
+    )
+    .map_err(|err| ContractExecutionRejection::other(err.to_string()))?;
     let simulation = if prepared.request.validate {
-        let contract_name = prepared
-            .request
-            .init_name
-            .strip_prefix("init_")
-            .unwrap_or(&prepared.request.init_name);
         Some(
-            match ContractInitBuilder::<()>::dry_run_new_instance_raw(
-                client.clone(),
-                prepared.sender,
-                prepared.payload.mod_ref,
-                contract_name,
-                prepared.payload.amount,
-                prepared.payload.param.clone(),
-            )
-            .await
-            {
-                Ok(builder) => format!(
-                    "Simulation: contract init succeeded (estimated energy: {})",
-                    builder.current_energy().energy
-                ),
-                Err(err) => format!("Simulation warning: {err}"),
-            },
+            init_core::simulate_contract_init(client.clone(), &prepared_core)
+                .await
+                .message,
         )
     } else {
         None
@@ -134,26 +122,12 @@ pub(super) async fn submit_request(
         )
         .map_err(|err| ContractExecutionRejection::other(err.to_string()))?
     };
-    let nonce = client
-        .get_next_account_sequence_number(&wallet.address)
-        .await
-        .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?
-        .nonce;
-    let expiry = TransactionTime::from_seconds((chrono::Utc::now().timestamp() + 300) as u64);
-    let tx = send::init_contract(
-        &wallet,
-        wallet.address,
-        nonce,
-        expiry,
-        prepared.payload,
-        prepared.energy,
-    );
     let spin = spinner();
     spin.start("Submitting contract init transaction...");
-    let transaction_hash = client
-        .send_account_transaction(tx)
+    let submitted = init_core::submit_contract_init(&mut client, &wallet, prepared_core)
         .await
         .map_err(|err| ContractExecutionRejection::submission_failed(err.to_string()))?;
+    let transaction_hash = submitted.transaction_hash;
     spin.clear();
     let transaction_hash_label = transaction_hash.to_string();
     cliclack::log::success(format!(
