@@ -4,8 +4,8 @@ use crate::{
         AccountNewArgs, AccountRenameArgs, AccountSubcommand,
     },
     commands::ui::{
-        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
-        log_resolved_context, select_or_single,
+        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_always,
+        fuzzy_select_or_single, log_resolved_context, select_or_single,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -156,6 +156,7 @@ async fn export_account(conn: &mut Connection, args: AccountExportArgs) -> Resul
         &network_entry.genesis_hash,
         args.label.as_deref(),
         args.non_interactive,
+        false,
     )?;
     let output_path =
         resolve_export_output_path(args.output, &account.label, args.non_interactive)?;
@@ -279,6 +280,7 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
                 &networks_by_hash,
                 args.show_addresses,
                 seed_scope.as_ref(),
+                false,
             )?
         }
     };
@@ -773,6 +775,7 @@ fn select_account_fuzzy(
     networks_by_hash: &BTreeMap<String, String>,
     show_addresses: bool,
     seed_scope: Option<&ScopeSelection>,
+    always_prompt: bool,
 ) -> Result<accounts::AccountRecord> {
     if candidates.is_empty() {
         bail!("no matching accounts are available")
@@ -812,7 +815,11 @@ fn select_account_fuzzy(
             }
         })
         .collect::<Vec<_>>();
-    let id = fuzzy_select_or_single("Select account", &items)?;
+    let id = if always_prompt {
+        fuzzy_select_always("Select account", &items)?
+    } else {
+        fuzzy_select_or_single("Select account", &items)?
+    };
     candidates
         .into_iter()
         .find(|record| record.id == id)
@@ -842,6 +849,7 @@ fn choose_account_match(
             networks_by_hash,
             show_addresses,
             seed_scope,
+            false,
         )
     }
 }
@@ -872,6 +880,7 @@ pub(crate) fn resolve_export_account(
     network_genesis_hash: &str,
     explicit_label: Option<&str>,
     non_interactive: bool,
+    always_prompt: bool,
 ) -> Result<accounts::AccountRecord> {
     let seeds_by_id = seed_labels_by_id(conn)?;
     let networks_by_hash = network_names_by_genesis_hash()?;
@@ -909,6 +918,7 @@ pub(crate) fn resolve_export_account(
             &networks_by_hash,
             false,
             None,
+            always_prompt,
         ),
     }
 }

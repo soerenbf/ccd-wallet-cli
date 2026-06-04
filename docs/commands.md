@@ -74,59 +74,37 @@ ccd-wallet
 │  │  ├─ list
 │  │  └─ remove
 │  └─ update
+├─ token                        [Implemented]
+│  ├─ show
+│  ├─ transfer
+│  ├─ mint
+│  ├─ burn
+│  ├─ allow-list
+│  │  ├─ add
+│  │  └─ remove
+│  ├─ deny-list
+│  │  ├─ add
+│  │  └─ remove
+│  ├─ pause
+│  ├─ unpause
+│  ├─ admin-roles
+│  │  ├─ assign
+│  │  └─ revoke
+│  ├─ metadata
+│  │  └─ update
+│  └─ lock
+│     ├─ create
+│     ├─ fund
+│     ├─ send
+│     ├─ return
+│     ├─ cancel
+│     └─ show
 └─ connect                      [Implemented]
 ```
 
 ## Planned command spaces
 
 The following command spaces are planned taxonomy targets. They are documented here so future implementation work stays consistent with the intended CLI structure.
-
-### `token` [Planned]
-
-The `token` space is the user-facing home for protocol-level token operations.
-It covers token-holder actions, token policy changes, token admin-role changes, token metadata updates, and protocol-level lock operations.
-
-Protocol payload names such as `TokenUpdate` and `MetaUpdate` are implementation details and SHALL NOT become required user-facing command namespaces.
-
-```text
-token
-├─ send
-├─ mint
-├─ burn
-├─ allow-list
-│  ├─ add
-│  └─ remove
-├─ deny-list
-│  ├─ add
-│  └─ remove
-├─ pause
-├─ unpause
-├─ roles
-│  ├─ grant
-│  └─ revoke
-├─ metadata
-│  └─ update
-└─ lock
-   ├─ create
-   ├─ fund
-   ├─ send
-   ├─ return
-   ├─ cancel
-   └─ show
-```
-
-#### Notes
-
-- `token metadata update` is the intended user-facing shape, not `token metaupdate update`.
-- `token lock ...` remains inside the token namespace because the SDK and protocol model locks as part of protocol-level token workflows.
-- The future implementation MAY internally encode some or all of these commands as `MetaUpdate` transactions.
-- That internal choice MUST NOT require exposing `metaupdate` as a command path.
-
-#### Future composition
-
-Future multi-operation token composition should remain inside the `token` namespace.
-This document intentionally reserves that direction without freezing a final syntax.
-Examples of possible future shapes include builder-style subcommands such as `token op ...` plus a submission command, but this change does **not** standardize one composition interface yet.
 
 ### `stake` [Planned]
 
@@ -157,6 +135,6 @@ Some future transaction authoring areas remain intentionally unresolved in this 
 In particular:
 - this document does not define a dedicated top-level `ccd` command space
 - this document does not finalize where miscellaneous non-token account transaction authoring will live
-- this document does not define the exact future token-composition syntax
+- this document does not define the exact future token-composition syntax beyond the implemented single-command token workflows
 
-These areas can be added later, but they should not conflict with the `token` and `stake` taxonomy defined here.
+These areas can be added later, but they should not conflict with the implemented `token` taxonomy and planned `stake` taxonomy defined here.

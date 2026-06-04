@@ -6,5 +6,6 @@ pub mod governance;
 pub mod identity;
 pub mod node;
 pub mod seed;
+pub mod token;
 pub mod transaction;
 pub(crate) mod ui;

@@ -33,6 +33,8 @@ pub enum Command {
     Account(Box<AccountCommand>),
     /// Governance key management commands.
     Governance(Box<GovernanceCommand>),
+    /// Protocol-level token commands.
+    Token(Box<TokenCommand>),
     /// Start a temporary browser pairing session.
     Connect(ConnectArgs),
 }
@@ -826,6 +828,573 @@ pub struct AccountRenameArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct TokenCommand {
+    #[command(subcommand)]
+    pub command: TokenSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenSubcommand {
+    /// Show protocol-level token information.
+    Show(Box<TokenShowArgs>),
+    /// Transfer protocol-level tokens.
+    Transfer(Box<TokenTransferArgs>),
+    /// Mint protocol-level tokens.
+    Mint(Box<TokenAmountArgs>),
+    /// Burn protocol-level tokens.
+    Burn(Box<TokenAmountArgs>),
+    /// Manage token allow-list entries.
+    AllowList(Box<TokenListCommand>),
+    /// Manage token deny-list entries.
+    DenyList(Box<TokenListCommand>),
+    /// Pause balance-changing token operations.
+    Pause(Box<TokenPauseArgs>),
+    /// Resume balance-changing token operations.
+    Unpause(Box<TokenPauseArgs>),
+    /// Manage token admin roles.
+    AdminRoles(Box<TokenAdminRolesCommand>),
+    /// Update token metadata.
+    Metadata(Box<TokenMetadataCommand>),
+    /// Manage token locks.
+    Lock(Box<TokenLockCommand>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenShowArgs {
+    /// Token identifier to inspect.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: concordium_rust_sdk::protocol_level_tokens::TokenId,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(
+        long = "node",
+        env = config::NODE_ENDPOINT_ENV,
+        conflicts_with = "network",
+        value_name = "ENDPOINT"
+    )]
+    pub node: Option<v2::Endpoint>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenTransferArgs {
+    /// Token identifier to transfer. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Recipient account address. If omitted interactively, the CLI prompts.
+    #[arg(long = "recipient", value_name = "ADDRESS")]
+    pub recipient: Option<String>,
+
+    /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the available balance.
+    #[arg(long = "amount", value_name = "AMOUNT")]
+    pub amount: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenAmountArgs {
+    /// Token identifier to operate on. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts.
+    #[arg(long = "amount", value_name = "AMOUNT")]
+    pub amount: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenListCommand {
+    #[command(subcommand)]
+    pub command: TokenListSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenListSubcommand {
+    /// Add accounts to the token list.
+    Add(Box<TokenListMutationArgs>),
+    /// Remove accounts from the token list.
+    Remove(Box<TokenListMutationArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenListMutationArgs {
+    /// Token identifier to update. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Target account addresses to add or remove. If omitted interactively, the CLI prompts.
+    #[arg(long = "target", value_name = "ADDRESS")]
+    pub targets: Vec<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenPauseArgs {
+    /// Token identifier to operate on. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenAdminRolesCommand {
+    #[command(subcommand)]
+    pub command: TokenAdminRolesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenAdminRolesSubcommand {
+    /// Assign token admin roles to an account.
+    Assign(Box<TokenAdminRolesArgs>),
+    /// Revoke token admin roles from an account.
+    Revoke(Box<TokenAdminRolesArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenAdminRolesArgs {
+    /// Token identifier to update. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Target account address. If omitted interactively, the CLI prompts.
+    #[arg(long = "target", value_name = "ADDRESS")]
+    pub target: Option<String>,
+
+    /// Token admin roles to assign or revoke. If omitted interactively, the CLI presents a multi-select.
+    #[arg(long = "role", value_name = "ROLE")]
+    pub roles: Vec<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenMetadataCommand {
+    #[command(subcommand)]
+    pub command: TokenMetadataSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenMetadataSubcommand {
+    /// Update token metadata.
+    Update(Box<TokenMetadataUpdateArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenMetadataUpdateArgs {
+    /// Token identifier to update. If omitted interactively, the CLI prompts.
+    #[arg(value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Metadata URL. If omitted interactively, the CLI prompts.
+    #[arg(long = "url", value_name = "URL")]
+    pub url: Option<String>,
+
+    /// Optional SHA-256 checksum for the metadata payload as hex.
+    #[arg(long = "checksum-sha256", value_name = "HEX")]
+    pub checksum_sha_256: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockCommand {
+    #[command(subcommand)]
+    pub command: TokenLockSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenLockSubcommand {
+    /// Create a new protocol-level token lock.
+    Create(Box<TokenLockCreateArgs>),
+    /// Fund an existing lock.
+    Fund(Box<TokenLockFundArgs>),
+    /// Send locked funds to a configured recipient.
+    Send(Box<TokenLockSendArgs>),
+    /// Return locked funds to the source account.
+    Return(Box<TokenLockReturnArgs>),
+    /// Cancel an existing lock.
+    Cancel(Box<TokenLockCancelArgs>),
+    /// Show protocol-level lock information.
+    Show(Box<TokenLockShowArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockCreateArgs {
+    /// Accounts that can receive funds from the lock. Repeat to add multiple recipients.
+    #[arg(long = "recipient", value_name = "ADDRESS", required = true)]
+    pub recipients: Vec<String>,
+
+    /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds.
+    #[arg(long = "expiry", value_name = "TIME")]
+    pub expiry: String,
+
+    /// Controller grant in the form `<ACCOUNT:ROLE[,ROLE...]>`. Repeat for multiple grants.
+    #[arg(long = "grant", value_name = "GRANT", required = true)]
+    pub grants: Vec<String>,
+
+    /// Token identifiers governed by the lock controller. Repeat to add multiple tokens.
+    #[arg(long = "token", value_name = "TOKEN_ID", required = true)]
+    pub tokens: Vec<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Keep the lock alive after all funds have been returned.
+    #[arg(long = "keep-alive")]
+    pub keep_alive: bool,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockFundArgs {
+    /// Lock identifier to fund. If omitted interactively, the CLI prompts for it.
+    #[arg(value_name = "LOCK_ID")]
+    pub lock_id: Option<concordium_rust_sdk::protocol_level_tokens::LockId>,
+
+    /// Token identifier to fund the lock with. If omitted interactively, the CLI prompts from the lock's configured tokens.
+    #[arg(long = "token", value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the available balance.
+    #[arg(long = "amount", value_name = "AMOUNT")]
+    pub amount: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockSendArgs {
+    /// Lock identifier to use. If omitted interactively, the CLI prompts for it.
+    #[arg(value_name = "LOCK_ID")]
+    pub lock_id: Option<concordium_rust_sdk::protocol_level_tokens::LockId>,
+
+    /// Token identifier whose locked funds are being sent. If omitted interactively, the CLI prompts from the lock's configured tokens.
+    #[arg(long = "token", value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Source account whose funds are currently locked.
+    #[arg(long = "source", value_name = "ADDRESS")]
+    pub source: Option<String>,
+
+    /// Recipient account that must be configured on the lock.
+    #[arg(long = "recipient", value_name = "ADDRESS")]
+    pub recipient: Option<String>,
+
+    /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
+    #[arg(long = "amount", value_name = "AMOUNT")]
+    pub amount: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockReturnArgs {
+    /// Lock identifier to use. If omitted interactively, the CLI prompts for it.
+    #[arg(value_name = "LOCK_ID")]
+    pub lock_id: Option<concordium_rust_sdk::protocol_level_tokens::LockId>,
+
+    /// Token identifier whose locked funds are being returned. If omitted interactively, the CLI prompts from the lock's configured tokens.
+    #[arg(long = "token", value_name = "TOKEN_ID")]
+    pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
+
+    /// Source account whose funds are currently locked.
+    #[arg(long = "source", value_name = "ADDRESS")]
+    pub source: Option<String>,
+
+    /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
+    #[arg(long = "amount", value_name = "AMOUNT")]
+    pub amount: Option<String>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockCancelArgs {
+    /// Lock identifier to cancel. If omitted interactively, the CLI prompts for it.
+    #[arg(value_name = "LOCK_ID")]
+    pub lock_id: Option<concordium_rust_sdk::protocol_level_tokens::LockId>,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenLockShowArgs {
+    /// Lock identifier to inspect.
+    #[arg(value_name = "LOCK_ID")]
+    pub lock_id: concordium_rust_sdk::protocol_level_tokens::LockId,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(
+        long = "node",
+        env = config::NODE_ENDPOINT_ENV,
+        conflicts_with = "network",
+        value_name = "ENDPOINT"
+    )]
+    pub node: Option<v2::Endpoint>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct ConnectArgs {
     /// Local WebSocket address for browser pairing.
     #[arg(long = "bind", default_value = "127.0.0.1:22771", value_name = "ADDR")]
@@ -1265,6 +1834,165 @@ mod tests {
                 other => panic!("expected account export command, got {other:?}"),
             },
             other => panic!("expected account command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_show_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "show", "CCD", "--network", "testnet"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Show(args) => {
+                    assert_eq!(args.token_id.to_string(), "CCD");
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                }
+                other => panic!("expected token show command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_admin_roles_assign_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "admin-roles",
+            "assign",
+            "CCD",
+            "--target",
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+            "--role",
+            "mint",
+            "--role",
+            "update-metadata",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::AdminRoles(command) => match command.command {
+                    TokenAdminRolesSubcommand::Assign(args) => {
+                        assert_eq!(
+                            args.token_id.as_ref().map(|t| t.to_string()).as_deref(),
+                            Some("CCD")
+                        );
+                        assert_eq!(args.roles, vec!["mint", "update-metadata"]);
+                        assert_eq!(args.account.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token admin-roles assign command, got {other:?}"),
+                },
+                other => panic!("expected token admin-roles command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_create_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--recipient",
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+            "--expiry",
+            "1h",
+            "--grant",
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd:fund,send,cancel",
+            "--token",
+            "CCD",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert_eq!(args.expiry, "1h");
+                        assert_eq!(args.tokens.len(), 1);
+                        assert_eq!(args.tokens[0].to_string(), "CCD");
+                        assert_eq!(args.account.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_show_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "show",
+            "W9EXVYXZJq",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Show(args) => {
+                        assert_eq!(args.lock_id.to_string(), "W9EXVYXZJq");
+                        assert_eq!(args.network.as_deref(), Some("testnet"));
+                    }
+                    other => panic!("expected token lock show command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_send_without_optional_promptable_details() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "lock", "send", "--account", "alice"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Send(args) => {
+                        assert!(args.lock_id.is_none());
+                        assert!(args.token_id.is_none());
+                        assert!(args.amount.is_none());
+                        assert!(args.source.is_none());
+                        assert!(args.recipient.is_none());
+                        assert_eq!(args.account.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token lock send command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_fund_without_optional_promptable_details() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "lock", "fund"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Fund(args) => {
+                        assert!(args.lock_id.is_none());
+                        assert!(args.token_id.is_none());
+                        assert!(args.amount.is_none());
+                    }
+                    other => panic!("expected token lock fund command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
         }
     }
 }

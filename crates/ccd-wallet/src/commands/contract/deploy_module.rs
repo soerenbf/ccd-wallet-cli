@@ -32,6 +32,7 @@ pub(super) async fn deploy_module(conn: &Connection, args: ContractDeployModuleA
         &network_entry.genesis_hash,
         args.account.as_deref(),
         args.non_interactive,
+        false,
     )?;
     let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
     let prepared = deploy_core::prepare_deploy_module(wallet.address, &module_bytes)?;

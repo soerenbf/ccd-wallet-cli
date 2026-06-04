@@ -85,6 +85,24 @@ where
     Ok(picker.interact()?)
 }
 
+/// Like [`select_or_single`] but always presents the interactive prompt
+/// even when there is only one item.
+pub(crate) fn select_always<T>(
+    prompt: &str,
+    items: &[SelectItem<T>],
+    initial: Option<&T>,
+) -> Result<T>
+where
+    T: Clone + Eq,
+{
+    let ordered = order_items(items, initial);
+    let mut picker = select(prompt);
+    for item in ordered {
+        picker = picker.item(item.value, item.label, item.hint);
+    }
+    Ok(picker.interact()?)
+}
+
 pub(crate) fn fuzzy_select_or_single<T>(prompt: &str, items: &[FuzzySelectItem<T>]) -> Result<T>
 where
     T: Clone + Eq,
@@ -93,6 +111,19 @@ where
         return Ok(items[0].value.clone());
     }
 
+    let mut picker = select(prompt).filter_mode().max_rows(10);
+    for item in items {
+        picker = picker.item(item.value.clone(), item.text.clone(), "");
+    }
+    Ok(picker.interact()?)
+}
+
+/// Like [`fuzzy_select_or_single`] but always presents the interactive prompt
+/// even when there is only one item.
+pub(crate) fn fuzzy_select_always<T>(prompt: &str, items: &[FuzzySelectItem<T>]) -> Result<T>
+where
+    T: Clone + Eq,
+{
     let mut picker = select(prompt).filter_mode().max_rows(10);
     for item in items {
         picker = picker.item(item.value.clone(), item.text.clone(), "");

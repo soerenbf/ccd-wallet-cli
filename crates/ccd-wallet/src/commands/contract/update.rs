@@ -32,6 +32,7 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
         &network_entry.genesis_hash,
         args.account.as_deref(),
         args.non_interactive,
+        false,
     )?;
     let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
     let mut client = node_config::connect_v2_client(endpoint.clone())

@@ -24,6 +24,7 @@ async fn main() -> Result<()> {
         Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,
         Command::Governance(command) => commands::governance::run(&mut conn, command.command).await,
+        Command::Token(command) => commands::token::run(&conn, command.command).await,
         Command::Connect(args) => commands::connect::run(conn, args).await,
     }
 }

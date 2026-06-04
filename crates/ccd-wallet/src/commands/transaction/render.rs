@@ -215,10 +215,13 @@ fn render_account_transaction(
         });
     }
 
-    let (count, json) = account_transaction_events_json(summary)?;
+    let event_lines = account_transaction_event_lines(summary)?;
     Ok(VariantRender {
         details: stable,
-        payload_section: Some((format!("Events: {count}"), json)),
+        payload_section: Some((
+            format!("Events: {}", event_lines.len()),
+            event_lines.join("\n"),
+        )),
     })
 }
 
@@ -272,21 +275,150 @@ fn render_token_creation(details: &TokenCreationDetails) -> Result<VariantRender
     })
 }
 
-fn account_transaction_events_json(summary: &BlockItemSummary) -> Result<(usize, String)> {
+fn account_transaction_event_lines(summary: &BlockItemSummary) -> Result<Vec<String>> {
     let summary_json = serde_json::to_value(summary)
         .context("failed to serialize successful transaction summary to JSON")?;
     let events = summary_json
         .get("result")
         .and_then(|result| result.get("events"))
-        .cloned()
         .ok_or_else(|| anyhow!("successful transaction result missing events"))?;
-    let count = events
+    let events = events
         .as_array()
-        .map(Vec::len)
         .ok_or_else(|| anyhow!("successful transaction events payload was not an array"))?;
-    let json = serde_json::to_string_pretty(&events)
-        .context("failed to pretty-print transaction events")?;
-    Ok((count, json))
+    events.iter().map(render_event_line).collect()
+}
+
+fn render_event_line(event: &serde_json::Value) -> Result<String> {
+    let tag = event
+        .get("tag")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Unknown");
+    match tag {
+        "TokenTransfer" => render_token_transfer_event_line(event),
+        "LockCreated" => Ok(format!(
+            "- Lock created: {}",
+            render_json_lock_id(event.get("lockId"))?
+        )),
+        "LockDestroyed" => Ok(format!(
+            "- Lock destroyed: {}",
+            render_json_lock_id(event.get("lockId"))?
+        )),
+        "TokenMint" => Ok(format!(
+            "- Mint {}: {} ({})",
+            event_string_field(event, "tokenId")?,
+            render_holder(event.get("target")),
+            render_json_token_amount(event.get("amount"))?
+        )),
+        "TokenBurn" => Ok(format!(
+            "- Burn {}: {} ({})",
+            event_string_field(event, "tokenId")?,
+            render_holder(event.get("target")),
+            render_json_token_amount(event.get("amount"))?
+        )),
+        "TokenModuleEvent" => Ok(format!(
+            "- Token module event {} on {}: {}",
+            event_string_field(event, "type")?,
+            event_string_field(event, "tokenId")?,
+            compact_json(event.get("details"))?
+        )),
+        _ => Ok(format!("- {}", compact_json(event)?)),
+    }
+}
+
+fn render_token_transfer_event_line(event: &serde_json::Value) -> Result<String> {
+    let token_id = event_string_field(event, "tokenId")?;
+    let from = render_holder_with_optional_lock(event.get("from"), event.get("fromLock"))?;
+    let to = render_holder_with_optional_lock(event.get("to"), event.get("toLock"))?;
+    let amount = render_json_token_amount(event.get("amount"))?;
+    Ok(format!("- Transfer {amount} {token_id}: {from} -> {to}"))
+}
+
+fn render_holder(holder: Option<&serde_json::Value>) -> String {
+    holder
+        .and_then(|holder| holder.get("address"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+fn render_holder_with_optional_lock(
+    holder: Option<&serde_json::Value>,
+    lock: Option<&serde_json::Value>,
+) -> Result<String> {
+    let mut rendered = render_holder(holder);
+    if let Some(lock) = lock {
+        rendered.push_str(" (locked @ ");
+        rendered.push_str(&render_json_lock_id(Some(lock))?);
+        rendered.push(')');
+    }
+    Ok(rendered)
+}
+
+fn render_json_lock_id(value: Option<&serde_json::Value>) -> Result<String> {
+    let Some(value) = value else {
+        return Ok("unknown".to_owned());
+    };
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_owned());
+    }
+    // Accept both camelCase (accountIndex) and snake_case (account_index) — the
+    // exact field names depend on the SDK version and which serde rename rule
+    // applies to LockId.
+    let account_index = value
+        .get("accountIndex")
+        .or_else(|| value.get("account_index"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("lock id missing accountIndex / account_index"))?;
+    let sequence_number = value
+        .get("sequenceNumber")
+        .or_else(|| value.get("sequence_number"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("lock id missing sequenceNumber / sequence_number"))?;
+    let creation_order = value
+        .get("creationOrder")
+        .or_else(|| value.get("creation_order"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("lock id missing creationOrder / creation_order"))?;
+    Ok(
+        concordium_rust_sdk::base::protocol_level_locks::LockId::new(
+            account_index,
+            sequence_number,
+            creation_order,
+        )
+        .to_string(),
+    )
+}
+
+fn render_json_token_amount(value: Option<&serde_json::Value>) -> Result<String> {
+    let Some(value) = value else {
+        return Ok("unknown".to_owned());
+    };
+    let decimals = value
+        .get("decimals")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow!("token amount missing decimals"))? as u8;
+    let raw = value
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow!("token amount missing value"))?
+        .parse::<u64>()
+        .context("token amount value was not an unsigned integer")?;
+    Ok(
+        concordium_rust_sdk::base::protocol_level_tokens::TokenAmount::from_raw(raw, decimals)
+            .to_string(),
+    )
+}
+
+fn event_string_field(event: &serde_json::Value, field: &str) -> Result<String> {
+    event
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("event missing string field '{field}'"))
+}
+
+fn compact_json(value: impl serde::Serialize) -> Result<String> {
+    serde_json::to_string(&value).context("failed to render event JSON")
 }
 
 fn format_transaction_time(seconds: u64) -> Option<String> {
@@ -301,7 +433,10 @@ mod tests {
     use concordium_rust_sdk::{
         common::types::Amount,
         id::types::AccountAddress,
-        protocol_level_tokens::{TokenId, TokenModuleRef},
+        protocol_level_tokens::{
+            LockCreateEvent, LockDestroyEvent, MetaEvent, TokenEvent, TokenEventDetails,
+            TokenHolder, TokenId, TokenModuleRef, TokenTransferEvent,
+        },
         types::{
             AccountCreationDetails, AccountTransactionDetails, AccountTransactionEffects,
             BlockItemSummaryDetails, CredentialRegistrationID, RejectReason, TokenCreationDetails,
@@ -504,7 +639,103 @@ mod tests {
         assert!(rendered.contains("Details:"));
         assert!(rendered.contains("Outcome: success"));
         assert!(rendered.contains("Events: 1"));
-        assert!(rendered.contains("\"tag\": \"Transferred\""));
+        assert!(rendered.contains("\"tag\":\"Transferred\""));
+    }
+
+    #[test]
+    fn finalized_meta_update_renders_lock_events_as_single_lines() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
+        let lock_id =
+            concordium_rust_sdk::base::protocol_level_locks::LockId::new(1u64, 2u64, 3u64);
+        let status = TransactionStatus::Finalized(BTreeMap::from([(
+            block,
+            BlockItemSummary {
+                index: TransactionIndex { index: 5 },
+                energy_cost: 116u64.into(),
+                hash: transaction_hash(&hash.to_string()),
+                details: Upward::Known(BlockItemSummaryDetails::AccountTransaction(
+                    AccountTransactionDetails {
+                        cost: Amount::from_micro_ccd(11_600),
+                        sender: account_address(),
+                        sponsor: None,
+                        effects: Upward::Known(AccountTransactionEffects::MetaUpdate {
+                            events: vec![
+                                MetaEvent::LockCreate(LockCreateEvent {
+                                    lock_id: lock_id.clone(),
+                                    lock_config: Vec::<u8>::new().into(),
+                                }),
+                                MetaEvent::LockDestroy(LockDestroyEvent {
+                                    lock_id: lock_id.clone(),
+                                }),
+                            ],
+                        }),
+                    },
+                )),
+            },
+        )]));
+
+        let rendered = render_transaction_status(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            Some(&status),
+            &BTreeMap::from([(block, "2026-05-19T14:23:11Z".to_owned())]),
+        )
+        .unwrap();
+
+        assert!(rendered.contains(&format!("- Lock created: {lock_id}")));
+        assert!(rendered.contains(&format!("- Lock destroyed: {lock_id}")));
+    }
+
+    #[test]
+    fn finalized_meta_update_renders_token_transfer_as_single_line() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
+        let status = TransactionStatus::Finalized(BTreeMap::from([(
+            block,
+            BlockItemSummary {
+                index: TransactionIndex { index: 6 },
+                energy_cost: 117u64.into(),
+                hash: transaction_hash(&hash.to_string()),
+                details: Upward::Known(BlockItemSummaryDetails::AccountTransaction(
+                    AccountTransactionDetails {
+                        cost: Amount::from_micro_ccd(11_700),
+                        sender: account_address(),
+                        sponsor: None,
+                        effects: Upward::Known(AccountTransactionEffects::MetaUpdate {
+                            events: vec![MetaEvent::Token(TokenEvent {
+                                token_id: TokenId::from_str("TEST").unwrap(),
+                                event: TokenEventDetails::Transfer(TokenTransferEvent {
+                                    from: TokenHolder::Account {
+                                        address: account_address(),
+                                    },
+                                    to: TokenHolder::Account {
+                                        address: account_address(),
+                                    },
+                                    amount: concordium_rust_sdk::base::protocol_level_tokens::TokenAmount::from_raw(1000, 2),
+                                    memo: None,
+                                    from_lock: None,
+                                    to_lock: None,
+                                }),
+                            })],
+                        }),
+                    },
+                )),
+            },
+        )]));
+
+        let rendered = render_transaction_status(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            Some(&status),
+            &BTreeMap::from([(block, "2026-05-19T14:23:11Z".to_owned())]),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("- Transfer 10.00 TEST:"));
+        assert!(!rendered.contains("("));
     }
 
     #[test]
