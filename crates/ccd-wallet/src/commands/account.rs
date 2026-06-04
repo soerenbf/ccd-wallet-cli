@@ -1,7 +1,7 @@
 use crate::{
     cli::{
         AccountExportArgs, AccountImportGenesisArgs, AccountImportSubcommand, AccountListArgs,
-        AccountNewArgs, AccountRenameArgs, AccountSubcommand,
+        AccountNewArgs, AccountRenameArgs, AccountShowArgs, AccountSubcommand,
     },
     commands::ui::{
         ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_always,
@@ -14,6 +14,7 @@ use ccd_wallet_core::{
         CredentialDeploymentInput, build_credential_deployment, credential_counter_to_u8,
         parse_identity_object,
     },
+    config as node_config,
     store::{
         accounts,
         config::{AppConfig, NetworkEntry, load},
@@ -31,14 +32,16 @@ use concordium_rust_sdk::{
         constants::{ArCurve, IpPairing},
         types::{AccountKeys, ArIdentity, ArInfo, CredentialData, IpInfo, SignatureThreshold},
     },
+    protocol_level_tokens::{AccountToken, TokenAmount},
     types::{
-        BlockItemSummaryDetails, WalletAccount,
+        AccountInfo, BlockItemSummaryDetails, WalletAccount,
         transactions::{BlockItem, Payload},
     },
-    v2,
+    v2::{self, AccountIdentifier, BlockIdentifier},
 };
 use futures_util::StreamExt;
 use rusqlite::Connection;
+use serde::Serialize;
 use std::{
     collections::BTreeMap,
     fs,
@@ -78,6 +81,7 @@ pub async fn run(conn: &mut Connection, command: AccountSubcommand) -> Result<()
         },
         AccountSubcommand::List(args) => list_accounts(conn, args).await,
         AccountSubcommand::New(args) => new(conn, *args).await,
+        AccountSubcommand::Show(args) => show_account(conn, *args).await,
         AccountSubcommand::Rename(args) => rename_account(conn, args).await,
     }
 }
@@ -135,6 +139,484 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
         );
     }
     Ok(())
+}
+
+async fn show_account(conn: &mut Connection, args: AccountShowArgs) -> Result<()> {
+    let context = resolve_account_show_network_context(
+        conn,
+        args.network.as_deref(),
+        args.node,
+        args.non_interactive,
+        args.no_defaults,
+    )
+    .await?;
+    let block = crate::smart_contracts::shared::parse_block_identifier(args.block.as_deref())?;
+    let target = resolve_account_show_target(conn, &context, &args.account)?;
+    let view = match target {
+        AccountShowTarget::RawAddress(address) => {
+            let info = query_account_info(
+                context.endpoint.clone(),
+                &context.endpoint_label,
+                address,
+                block,
+            )
+            .await?;
+            AccountShowView::from_info(context.display_name, None, &info)?
+        }
+        AccountShowTarget::LocalPending(metadata, transaction_hash) => {
+            AccountShowView::pending(context.display_name, metadata, transaction_hash)
+        }
+        AccountShowTarget::LocalFinalized(record, metadata) => {
+            let address = decrypt_local_account_address(conn, &context.display_name, &record)?;
+            let info = query_account_info(
+                context.endpoint.clone(),
+                &context.endpoint_label,
+                address,
+                block,
+            )
+            .await?;
+            AccountShowView::from_info(context.display_name, Some(metadata), &info)?
+        }
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        println!("{}", render_account_show(&view, args.verbose));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct AccountShowNetworkContext {
+    endpoint: v2::Endpoint,
+    endpoint_label: String,
+    display_name: String,
+    genesis_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowLocalMetadata {
+    label: String,
+    seed: Option<String>,
+    source: String,
+}
+
+#[derive(Debug)]
+enum AccountShowTarget {
+    RawAddress(AccountAddress),
+    LocalFinalized(accounts::AccountRecord, AccountShowLocalMetadata),
+    LocalPending(AccountShowLocalMetadata, Option<String>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowView {
+    network: String,
+    address: Option<String>,
+    local: Option<AccountShowLocalMetadata>,
+    status: String,
+    transaction_hash: Option<String>,
+    ccd: Option<AccountShowCcdView>,
+    tokens: Vec<AccountShowTokenView>,
+    protocol: Option<AccountShowProtocolView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowCcdView {
+    balance: String,
+    available: String,
+    locked: String,
+    release_schedule: Vec<AccountShowReleaseView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowReleaseView {
+    amount: String,
+    timestamp: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowTokenView {
+    id: String,
+    balance: String,
+    available: String,
+    locked: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountShowProtocolView {
+    account_index: String,
+    nonce: String,
+    credential_count: usize,
+    threshold: String,
+    staking: String,
+}
+
+impl AccountShowView {
+    fn pending(
+        network: String,
+        local: AccountShowLocalMetadata,
+        transaction_hash: Option<String>,
+    ) -> Self {
+        Self {
+            network,
+            address: None,
+            local: Some(local),
+            status: "pending".to_owned(),
+            transaction_hash,
+            ccd: None,
+            tokens: Vec::new(),
+            protocol: None,
+        }
+    }
+
+    fn from_info(
+        network: String,
+        local: Option<AccountShowLocalMetadata>,
+        info: &AccountInfo,
+    ) -> Result<Self> {
+        let ccd = AccountShowCcdView {
+            balance: format!("{} CCD", info.account_amount),
+            available: format!("{} CCD", info.available_balance),
+            locked: format!("{} CCD", ccd_locked_amount(info)),
+            release_schedule: info
+                .account_release_schedule
+                .schedule
+                .iter()
+                .map(|release| AccountShowReleaseView {
+                    amount: format!("{} CCD", release.amount),
+                    timestamp: release
+                        .timestamp
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                })
+                .collect(),
+        };
+        let tokens = info
+            .tokens
+            .iter()
+            .map(account_show_token_view)
+            .collect::<Result<Vec<_>>>()?;
+        let protocol = Some(AccountShowProtocolView {
+            account_index: format!("{}", info.account_index),
+            nonce: format!("{}", info.account_nonce),
+            credential_count: info.account_credentials.len(),
+            threshold: u8::from(info.account_threshold).to_string(),
+            staking: if info.account_stake.is_some() {
+                "configured".to_owned()
+            } else {
+                "none".to_owned()
+            },
+        });
+        Ok(Self {
+            network,
+            address: Some(format!("{}", info.account_address)),
+            local,
+            status: "finalized".to_owned(),
+            transaction_hash: None,
+            ccd: Some(ccd),
+            tokens,
+            protocol,
+        })
+    }
+}
+
+async fn resolve_account_show_network_context(
+    conn: &Connection,
+    network: Option<&str>,
+    node: Option<v2::Endpoint>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<AccountShowNetworkContext> {
+    if let Some(endpoint) = node {
+        let endpoint_label = node_config::endpoint_label(&endpoint);
+        let genesis_hash = fetch_node_genesis_hash(endpoint.clone(), &endpoint_label).await?;
+        if let Some(network_name) = network {
+            let app_config = load()?;
+            let entry = app_config
+                .networks
+                .get(network_name)
+                .with_context(|| format!("network '{}' is not registered", network_name))?;
+            if entry.genesis_hash != genesis_hash {
+                bail!(
+                    "node at {} belongs to genesis hash {}, which does not match configured network '{}' ({})",
+                    endpoint_label,
+                    genesis_hash,
+                    network_name,
+                    entry.genesis_hash
+                );
+            }
+            return Ok(AccountShowNetworkContext {
+                endpoint,
+                endpoint_label,
+                display_name: network_name.to_owned(),
+                genesis_hash,
+            });
+        }
+        let display_name =
+            network_name_for_genesis(&genesis_hash)?.unwrap_or(endpoint_label.clone());
+        return Ok(AccountShowNetworkContext {
+            endpoint,
+            endpoint_label,
+            display_name,
+            genesis_hash,
+        });
+    }
+
+    let (network_name, network_entry, endpoint, endpoint_label, _source) =
+        resolve_account_network_context(conn, network, None, non_interactive, no_defaults).await?;
+    Ok(AccountShowNetworkContext {
+        endpoint,
+        endpoint_label,
+        display_name: network_name,
+        genesis_hash: network_entry.genesis_hash,
+    })
+}
+
+fn resolve_account_show_target(
+    conn: &Connection,
+    context: &AccountShowNetworkContext,
+    target: &str,
+) -> Result<AccountShowTarget> {
+    if let Ok(address) = AccountAddress::from_str(target) {
+        return Ok(AccountShowTarget::RawAddress(address));
+    }
+
+    let record = accounts::find_by_network_and_label(conn, &context.genesis_hash, target)?
+        .with_context(|| {
+            format!(
+                "account '{}' is not configured for network '{}'",
+                target, context.display_name
+            )
+        })?;
+    let metadata = local_metadata_for_record(conn, &record)?;
+    match record.status {
+        accounts::AccountStatus::Pending => Ok(AccountShowTarget::LocalPending(
+            metadata,
+            record.transaction_hash.clone(),
+        )),
+        accounts::AccountStatus::Finalized => {
+            Ok(AccountShowTarget::LocalFinalized(record, metadata))
+        }
+    }
+}
+
+fn local_metadata_for_record(
+    conn: &Connection,
+    record: &accounts::AccountRecord,
+) -> Result<AccountShowLocalMetadata> {
+    let source = match record.source_kind {
+        accounts::AccountSourceKind::Derived => "derived",
+        accounts::AccountSourceKind::Imported => "imported",
+    };
+    let seed = if record.source_kind == accounts::AccountSourceKind::Derived {
+        Some(
+            seeds::list(conn)?
+                .into_iter()
+                .find(|seed| seed.id == record.seed_id)
+                .map(|seed| seed.label)
+                .context("selected account references unknown seed")?,
+        )
+    } else {
+        None
+    };
+    Ok(AccountShowLocalMetadata {
+        label: record.label.clone(),
+        seed,
+        source: source.to_owned(),
+    })
+}
+
+fn decrypt_local_account_address(
+    conn: &Connection,
+    network_name: &str,
+    record: &accounts::AccountRecord,
+) -> Result<AccountAddress> {
+    let address = match record.source_kind {
+        accounts::AccountSourceKind::Derived => {
+            let seed_label = seeds::list(conn)?
+                .into_iter()
+                .find(|seed| seed.id == record.seed_id)
+                .map(|seed| seed.label)
+                .context("selected account references unknown seed")?;
+            let password: String = password(format!("Password for seed '{}':", seed_label))
+                .allow_empty()
+                .interact()?;
+            let unlocked = seeds::unlock_context(conn, &seed_label, &password)?;
+            accounts::decrypt_private_payload(conn, record.id, &unlocked.dek)?.account_address
+        }
+        accounts::AccountSourceKind::Imported => {
+            let vault_password: String = password(format!(
+                "Imported accounts vault password for '{}':",
+                network_name
+            ))
+            .allow_empty()
+            .interact()?;
+            let unlocked = accounts::unlock_imported_vault(
+                conn,
+                &record.network_genesis_hash,
+                &vault_password,
+            )?;
+            accounts::decrypt_imported_payload(conn, record.id, &unlocked.dek)?.account_address
+        }
+    };
+    AccountAddress::from_str(&address).context("stored account address is invalid")
+}
+
+async fn query_account_info(
+    endpoint: v2::Endpoint,
+    endpoint_label: &str,
+    address: AccountAddress,
+    block: BlockIdentifier,
+) -> Result<AccountInfo> {
+    let mut client = node_config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+    Ok(client
+        .get_account_info(&AccountIdentifier::from(address), block)
+        .await
+        .with_context(|| format!("failed to query account information from {endpoint_label}"))?
+        .response)
+}
+
+fn account_show_token_view(token: &AccountToken) -> Result<AccountShowTokenView> {
+    let module_state = token
+        .state
+        .decode_module_state()
+        .context("failed to decode token account state")?;
+    let available = module_state.available.unwrap_or(token.state.balance);
+    let locked = token_locked_amount(token.state.balance, available)?;
+    Ok(AccountShowTokenView {
+        id: token.token_id.to_string(),
+        balance: token.state.balance.to_string(),
+        available: available.to_string(),
+        locked: locked.to_string(),
+    })
+}
+
+fn ccd_locked_amount(info: &AccountInfo) -> concordium_rust_sdk::common::types::Amount {
+    ccd_locked_from_amounts(info.account_amount, info.available_balance)
+}
+
+fn ccd_locked_from_amounts(
+    balance: concordium_rust_sdk::common::types::Amount,
+    available: concordium_rust_sdk::common::types::Amount,
+) -> concordium_rust_sdk::common::types::Amount {
+    balance
+        .checked_sub(available)
+        .unwrap_or_else(concordium_rust_sdk::common::types::Amount::zero)
+}
+
+fn token_locked_amount(balance: TokenAmount, available: TokenAmount) -> Result<TokenAmount> {
+    if balance.decimals() != available.decimals() {
+        bail!("token balance and available balance use different decimal precision")
+    }
+    let locked = balance
+        .value()
+        .checked_sub(available.value())
+        .with_context(|| "token available balance exceeds total balance")?;
+    Ok(TokenAmount::from_raw(locked, balance.decimals()))
+}
+
+fn network_name_for_genesis(genesis_hash: &str) -> Result<Option<String>> {
+    Ok(load()?
+        .networks
+        .into_iter()
+        .find(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .map(|(name, _)| name))
+}
+
+fn render_account_show(view: &AccountShowView, verbose: bool) -> String {
+    if view.status == "pending" {
+        return render_pending_account_show(view);
+    }
+
+    let mut lines = vec![render_account_show_header(view), String::new()];
+    if let Some(ccd) = &view.ccd {
+        lines.push(format!("CCD balance: {}", ccd.balance));
+        lines.push(format!("  available: {}", ccd.available));
+        if ccd.locked != "0.0 CCD" {
+            lines.push(format!("  locked: {}", ccd.locked));
+        }
+        if !ccd.release_schedule.is_empty() {
+            lines.push("  release schedule:".to_owned());
+            lines.extend(
+                ccd.release_schedule.iter().map(|release| {
+                    format!("    {} unlocks at {}", release.amount, release.timestamp)
+                }),
+            );
+        }
+    }
+
+    for token in &view.tokens {
+        lines.push(String::new());
+        lines.push(format!("{} balance: {}", token.id, token.balance));
+        if token.locked != token_zero_with_same_decimals(&token.locked) {
+            lines.push(format!("  available: {}", token.available));
+            lines.push(format!("  locked: {}", token.locked));
+        }
+    }
+
+    if verbose {
+        if let Some(protocol) = &view.protocol {
+            lines.push(String::new());
+            lines.push("Protocol details:".to_owned());
+            lines.push(format!("  account index: {}", protocol.account_index));
+            lines.push(format!("  next nonce: {}", protocol.nonce));
+            lines.push(format!("  credentials: {}", protocol.credential_count));
+            lines.push(format!("  signature threshold: {}", protocol.threshold));
+            lines.push(format!("  staking: {}", protocol.staking));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_pending_account_show(view: &AccountShowView) -> String {
+    let mut lines = vec![
+        render_account_show_header(view),
+        String::new(),
+        "Status: pending".to_owned(),
+    ];
+    if let Some(transaction_hash) = &view.transaction_hash {
+        lines.push(format!("Transaction: {transaction_hash}"));
+        lines.push(String::new());
+        lines.push(format!(
+            "Account has not finalized yet. Run `ccd-wallet transaction show {transaction_hash}` for submission status."
+        ));
+    } else {
+        lines.push(String::new());
+        lines.push("Finalized on-chain account state is not available yet.".to_owned());
+    }
+    lines.join("\n")
+}
+
+fn render_account_show_header(view: &AccountShowView) -> String {
+    let subject = view.address.as_deref().unwrap_or(&view.network);
+    let base = if view.address.is_some() {
+        format!("{} @ {}", subject, view.network)
+    } else {
+        view.network.clone()
+    };
+    match &view.local {
+        Some(local) => match local.seed.as_deref() {
+            Some(seed) => format!("[{seed} : {}] {base}", local.label),
+            None => format!("[{}] {base}", local.label),
+        },
+        None => base,
+    }
+}
+
+fn token_zero_with_same_decimals(value: &str) -> String {
+    match value.split_once('.') {
+        Some((_, fraction)) => format!("0.{:0<width$}", "", width = fraction.len()),
+        None => "0".to_owned(),
+    }
 }
 
 async fn export_account(conn: &mut Connection, args: AccountExportArgs) -> Result<()> {
@@ -2004,6 +2486,181 @@ mod tests {
         let (scope, source) = resolve_account_list_seed_scope(&conn, None).unwrap();
         assert_eq!(scope, ScopeSelection::All);
         assert_eq!(source, ResolutionSource::Inferred);
+    }
+
+    #[test]
+    fn account_show_raw_address_target_resolves_without_local_lookup() {
+        let conn = conn();
+        let context = account_show_test_context("genesis");
+        let target = resolve_account_show_target(
+            &conn,
+            &context,
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+        )
+        .unwrap();
+        assert!(matches!(target, AccountShowTarget::RawAddress(_)));
+    }
+
+    #[test]
+    fn account_show_local_label_is_constrained_by_network() {
+        let conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis-1",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "alice",
+            },
+        )
+        .unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis-2",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 1,
+                label: "alice",
+            },
+        )
+        .unwrap();
+
+        let target =
+            resolve_account_show_target(&conn, &account_show_test_context("genesis-2"), "alice")
+                .unwrap();
+        match target {
+            AccountShowTarget::LocalPending(metadata, _) => {
+                assert_eq!(metadata.label, "alice");
+                assert_eq!(metadata.seed.as_deref(), Some("seed"));
+            }
+            other => panic!("unexpected target: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_show_header_formats_local_metadata() {
+        let derived = AccountShowView::pending(
+            "testnet".to_owned(),
+            AccountShowLocalMetadata {
+                label: "alice".to_owned(),
+                seed: Some("main-seed".to_owned()),
+                source: "derived".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(
+            render_account_show_header(&derived),
+            "[main-seed : alice] testnet"
+        );
+
+        let imported = AccountShowView {
+            network: "local".to_owned(),
+            address: Some("addr".to_owned()),
+            local: Some(AccountShowLocalMetadata {
+                label: "genesis".to_owned(),
+                seed: None,
+                source: "imported".to_owned(),
+            }),
+            status: "finalized".to_owned(),
+            transaction_hash: None,
+            ccd: None,
+            tokens: Vec::new(),
+            protocol: None,
+        };
+        assert_eq!(
+            render_account_show_header(&imported),
+            "[genesis] addr @ local"
+        );
+    }
+
+    #[test]
+    fn account_show_balance_helpers_compute_locked_amounts() {
+        let ccd_locked = ccd_locked_from_amounts(
+            concordium_rust_sdk::common::types::Amount::from_micro_ccd(125),
+            concordium_rust_sdk::common::types::Amount::from_micro_ccd(100),
+        );
+        assert_eq!(ccd_locked.micro_ccd(), 25);
+
+        let token_locked = token_locked_amount(
+            TokenAmount::from_raw(1_000, 2),
+            TokenAmount::from_raw(750, 2),
+        )
+        .unwrap();
+        assert_eq!(token_locked.value(), 250);
+        assert_eq!(token_locked.decimals(), 2);
+    }
+
+    #[test]
+    fn account_show_renders_default_verbose_pending_and_json() {
+        let view = AccountShowView {
+            network: "testnet".to_owned(),
+            address: Some("addr".to_owned()),
+            local: Some(AccountShowLocalMetadata {
+                label: "alice".to_owned(),
+                seed: Some("seed".to_owned()),
+                source: "derived".to_owned(),
+            }),
+            status: "finalized".to_owned(),
+            transaction_hash: None,
+            ccd: Some(AccountShowCcdView {
+                balance: "10.0 CCD".to_owned(),
+                available: "7.0 CCD".to_owned(),
+                locked: "3.0 CCD".to_owned(),
+                release_schedule: vec![AccountShowReleaseView {
+                    amount: "3.0 CCD".to_owned(),
+                    timestamp: "2026-06-10T12:00:00Z".to_owned(),
+                }],
+            }),
+            tokens: vec![AccountShowTokenView {
+                id: "EUROe".to_owned(),
+                balance: "1000.00".to_owned(),
+                available: "750.00".to_owned(),
+                locked: "250.00".to_owned(),
+            }],
+            protocol: Some(AccountShowProtocolView {
+                account_index: "123".to_owned(),
+                nonce: "42".to_owned(),
+                credential_count: 1,
+                threshold: "1".to_owned(),
+                staking: "none".to_owned(),
+            }),
+        };
+        let default = render_account_show(&view, false);
+        assert!(default.contains("CCD balance: 10.0 CCD"));
+        assert!(default.contains("release schedule:"));
+        assert!(default.contains("EUROe balance: 1000.00"));
+        assert!(!default.contains("next nonce"));
+
+        let verbose = render_account_show(&view, true);
+        assert!(verbose.contains("next nonce: 42"));
+        assert!(verbose.contains("account index: 123"));
+
+        let pending = AccountShowView::pending(
+            "testnet".to_owned(),
+            AccountShowLocalMetadata {
+                label: "alice".to_owned(),
+                seed: Some("seed".to_owned()),
+                source: "derived".to_owned(),
+            },
+            Some("tx-hash".to_owned()),
+        );
+        assert!(render_account_show(&pending, false).contains("Status: pending"));
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains("tx-hash"));
+    }
+
+    fn account_show_test_context(genesis_hash: &str) -> AccountShowNetworkContext {
+        AccountShowNetworkContext {
+            endpoint: "http://localhost:20000".parse().unwrap(),
+            endpoint_label: "http://localhost:20000".to_owned(),
+            display_name: "testnet".to_owned(),
+            genesis_hash: genesis_hash.to_owned(),
+        }
     }
 
     #[test]

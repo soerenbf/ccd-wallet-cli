@@ -67,6 +67,7 @@ ccd-wallet
 │  │  └─ genesis
 │  ├─ list
 │  ├─ new
+│  ├─ show
 │  └─ rename
 ├─ governance                   [Implemented]
 │  ├─ keys

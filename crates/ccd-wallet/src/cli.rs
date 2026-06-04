@@ -680,6 +680,8 @@ pub enum AccountSubcommand {
     List(AccountListArgs),
     /// Create a new account from a stored identity.
     New(Box<AccountNewArgs>),
+    /// Show on-chain state for a local account label or account address.
+    Show(Box<AccountShowArgs>),
     /// Rename a stored account.
     Rename(AccountRenameArgs),
 }
@@ -767,6 +769,41 @@ pub struct AccountListArgs {
     /// Disable silent use of active seed/network defaults and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AccountShowArgs {
+    /// Local account label or Concordium account address to inspect.
+    #[arg(value_name = "ACCOUNT")]
+    pub account: String,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Block selector to query. Defaults to the last finalized block.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Emit machine-readable JSON output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Include low-level protocol details such as nonce and account index.
+    #[arg(long = "verbose")]
+    pub verbose: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1832,6 +1869,38 @@ mod tests {
                     assert!(args.non_interactive);
                 }
                 other => panic!("expected account export command, got {other:?}"),
+            },
+            other => panic!("expected account command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_account_show_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "account",
+            "show",
+            "alice",
+            "--network",
+            "testnet",
+            "--block",
+            "last-final",
+            "--json",
+            "--verbose",
+            "--non-interactive",
+        ]);
+
+        match cli.command {
+            Command::Account(command) => match command.command {
+                AccountSubcommand::Show(args) => {
+                    assert_eq!(args.account, "alice");
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert_eq!(args.block.as_deref(), Some("last-final"));
+                    assert!(args.json);
+                    assert!(args.verbose);
+                    assert!(args.non_interactive);
+                }
+                other => panic!("expected account show command, got {other:?}"),
             },
             other => panic!("expected account command, got {other:?}"),
         }
