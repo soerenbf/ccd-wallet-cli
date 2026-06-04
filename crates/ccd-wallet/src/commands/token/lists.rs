@@ -46,7 +46,8 @@ async fn submit_list_update(
     )
     .await?;
     let token_id = shared::resolve_token_id(args.token_id, args.non_interactive)?;
-    let targets = shared::resolve_target_addresses(&args.targets, args.non_interactive)?;
+    let targets =
+        shared::resolve_target_addresses(conn, &mut context, &args.targets, args.non_interactive)?;
     let mut token_client = shared::init_token_client(context.client.clone(), token_id).await?;
     let action = if add { "add" } else { "remove" };
     let target_summary = targets

@@ -33,8 +33,10 @@ async fn submit_admin_role_update(
     .await?;
     let token_id = shared::resolve_token_id(args.token_id, args.non_interactive)?;
     let target = shared::resolve_account_address(
+        conn,
+        &mut context,
         args.target.as_deref(),
-        "Target account address:",
+        "Target account address or local label:",
         "target",
         args.non_interactive,
     )?;

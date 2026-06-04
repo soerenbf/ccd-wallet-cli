@@ -50,6 +50,7 @@ use std::{
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ScopeSelection {
@@ -135,6 +136,7 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
                 &seed_label,
                 &network_name,
                 address_map.get(&record.id).map(String::as_str),
+                true,
             )
         );
     }
@@ -562,16 +564,14 @@ fn render_account_show(view: &AccountShowView, verbose: bool) -> String {
         }
     }
 
-    if verbose {
-        if let Some(protocol) = &view.protocol {
-            lines.push(String::new());
-            lines.push("Protocol details:".to_owned());
-            lines.push(format!("  account index: {}", protocol.account_index));
-            lines.push(format!("  next nonce: {}", protocol.nonce));
-            lines.push(format!("  credentials: {}", protocol.credential_count));
-            lines.push(format!("  signature threshold: {}", protocol.threshold));
-            lines.push(format!("  staking: {}", protocol.staking));
-        }
+    if verbose && let Some(protocol) = &view.protocol {
+        lines.push(String::new());
+        lines.push("Protocol details:".to_owned());
+        lines.push(format!("  account index: {}", protocol.account_index));
+        lines.push(format!("  next nonce: {}", protocol.nonce));
+        lines.push(format!("  credentials: {}", protocol.credential_count));
+        lines.push(format!("  signature threshold: {}", protocol.threshold));
+        lines.push(format!("  staking: {}", protocol.staking));
     }
 
     lines.join("\n")
@@ -760,9 +760,12 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
                 candidates,
                 &seeds_by_id,
                 &networks_by_hash,
-                args.show_addresses,
-                seed_scope.as_ref(),
-                false,
+                AccountSelectConfig {
+                    show_addresses: args.show_addresses,
+                    seed_scope: seed_scope.as_ref(),
+                    always_prompt: false,
+                    show_network: true,
+                },
             )?
         }
     };
@@ -1224,6 +1227,7 @@ fn render_account_fuzzy_text(
     seed_label: &str,
     network_name: &str,
     address: Option<&str>,
+    show_network: bool,
 ) -> String {
     let status_prefix = match record.status {
         accounts::AccountStatus::Pending => "[pending] ",
@@ -1241,13 +1245,26 @@ fn render_account_fuzzy_text(
         ),
         None => format!("{}{} {}", status_prefix, owner_tag, record.label),
     };
+    let network_suffix = if show_network {
+        format!(" - {network_name}")
+    } else {
+        String::new()
+    };
     if record.source_kind == accounts::AccountSourceKind::Imported {
-        return format!("{} - {}", label, network_name);
+        return format!("{label}{network_suffix}");
     }
     format!(
-        "{} - {} • provider:{} • identity:{} • cred:{}",
-        label, network_name, record.ip_identity, record.identity_index, record.credential_counter
+        "{}{} • provider:{} • identity:{} • cred:{}",
+        label, network_suffix, record.ip_identity, record.identity_index, record.credential_counter
     )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccountSelectConfig<'a> {
+    show_addresses: bool,
+    seed_scope: Option<&'a ScopeSelection>,
+    always_prompt: bool,
+    show_network: bool,
 }
 
 fn select_account_fuzzy(
@@ -1255,15 +1272,14 @@ fn select_account_fuzzy(
     candidates: Vec<accounts::AccountRecord>,
     seeds_by_id: &BTreeMap<String, String>,
     networks_by_hash: &BTreeMap<String, String>,
-    show_addresses: bool,
-    seed_scope: Option<&ScopeSelection>,
-    always_prompt: bool,
+    config: AccountSelectConfig<'_>,
 ) -> Result<accounts::AccountRecord> {
     if candidates.is_empty() {
         bail!("no matching accounts are available")
     }
-    let addresses = if show_addresses {
-        let concrete_seed_scope = seed_scope
+    let addresses = if config.show_addresses {
+        let concrete_seed_scope = config
+            .seed_scope
             .cloned()
             .context("a seed must be resolved to show addresses")?;
         load_account_addresses(
@@ -1293,11 +1309,12 @@ fn select_account_fuzzy(
                     &seed_label,
                     &network_name,
                     addresses.get(&record.id).map(String::as_str),
+                    config.show_network,
                 ),
             }
         })
         .collect::<Vec<_>>();
-    let id = if always_prompt {
+    let id = if config.always_prompt {
         fuzzy_select_always("Select account", &items)?
     } else {
         fuzzy_select_or_single("Select account", &items)?
@@ -1329,9 +1346,12 @@ fn choose_account_match(
             matches,
             seeds_by_id,
             networks_by_hash,
-            show_addresses,
-            seed_scope,
-            false,
+            AccountSelectConfig {
+                show_addresses,
+                seed_scope,
+                always_prompt: false,
+                show_network: true,
+            },
         )
     }
 }
@@ -1398,9 +1418,12 @@ pub(crate) fn resolve_export_account(
             candidates,
             &seeds_by_id,
             &networks_by_hash,
-            false,
-            None,
-            always_prompt,
+            AccountSelectConfig {
+                show_addresses: false,
+                seed_scope: None,
+                always_prompt,
+                show_network: false,
+            },
         ),
     }
 }
@@ -1465,18 +1488,352 @@ fn expand_tilde_path(path: &Path) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
+/// In-memory cache of account-secret ownership domains unlocked during one command.
+#[derive(Debug, Default)]
+pub(crate) struct AccountReferenceUnlocks {
+    seed_deks: BTreeMap<String, Zeroizing<[u8; KEY_LEN]>>,
+    imported_vault_deks: BTreeMap<String, Zeroizing<[u8; KEY_LEN]>>,
+}
+
+impl AccountReferenceUnlocks {
+    /// Create an empty per-command account-reference unlock cache.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let mut unlocks = AccountReferenceUnlocks::new();
+    /// ```
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AccountReferenceContext<'a> {
+    pub(crate) network_name: &'a str,
+    pub(crate) network_genesis_hash: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AccountReferenceSuggestion {
+    pub(crate) label: String,
+    pub(crate) text: String,
+}
+
+/// Render autocomplete suggestions for finalized local accounts on a network.
+///
+/// # Arguments
+/// * `conn` - Open wallet store connection.
+/// * `network_genesis_hash` - Network partition whose finalized accounts should be suggested.
+///
+/// # Errors
+/// Returns an error if account or seed metadata cannot be read.
+///
+/// # Examples
+///
+/// ```ignore
+/// let suggestions = account_reference_suggestions(&conn, genesis_hash)?;
+/// ```
+pub(crate) fn account_reference_suggestions(
+    conn: &Connection,
+    network_genesis_hash: &str,
+) -> Result<Vec<AccountReferenceSuggestion>> {
+    let seeds_by_id = seed_labels_by_id(conn)?;
+    let mut suggestions = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.network_genesis_hash == network_genesis_hash)
+        .filter(|record| record.status == accounts::AccountStatus::Finalized)
+        .map(|record| {
+            let owner = match record.source_kind {
+                accounts::AccountSourceKind::Derived => seeds_by_id
+                    .get(&record.seed_id)
+                    .map(|seed_label| format!("[{seed_label}]"))
+                    .unwrap_or_else(|| "[<unknown-seed>]".to_owned()),
+                accounts::AccountSourceKind::Imported => "[imported]".to_owned(),
+            };
+            AccountReferenceSuggestion {
+                text: format!("{owner} {}", record.label),
+                label: record.label,
+            }
+        })
+        .collect::<Vec<_>>();
+    suggestions.sort_by(|a, b| a.text.cmp(&b.text));
+    Ok(suggestions)
+}
+
+/// Resolve a non-sender account reference from explicit input or an interactive prompt.
+///
+/// # Arguments
+/// * `conn` - Open wallet store connection.
+/// * `context` - Network context used for local label lookup and prompts.
+/// * `explicit` - Optional CLI-supplied account reference.
+/// * `prompt` - Prompt text used when interactive fallback is required.
+/// * `label` - Human-readable field label used in errors.
+/// * `non_interactive` - Whether prompt fallback is disabled.
+/// * `unlocks` - Per-command cache of unlocked account-secret domains.
+///
+/// # Errors
+/// Returns an error if input is missing in non-interactive mode, if the value is neither a raw
+/// address nor a finalized local account label, or if local account payload decryption fails.
+///
+/// # Examples
+///
+/// ```ignore
+/// let address = resolve_account_reference(
+///     &conn,
+///     AccountReferenceContext { network_name: "testnet", network_genesis_hash: genesis_hash },
+///     Some("alice"),
+///     "Recipient account:",
+///     "recipient",
+///     false,
+///     &mut unlocks,
+/// )?;
+/// ```
+pub(crate) fn resolve_account_reference(
+    conn: &Connection,
+    context: AccountReferenceContext<'_>,
+    explicit: Option<&str>,
+    prompt: &str,
+    label: &str,
+    non_interactive: bool,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<AccountAddress> {
+    match explicit {
+        Some(value) => resolve_account_reference_value(
+            conn,
+            context.network_name,
+            context.network_genesis_hash,
+            value,
+            label,
+            unlocks,
+            &[],
+        ),
+        None if non_interactive => {
+            bail!(
+                "{label} account address or local account label must be provided in --non-interactive mode"
+            )
+        }
+        None => {
+            let suggestions = account_reference_suggestions(conn, context.network_genesis_hash)?;
+            let value: String = input(prompt)
+                .autocomplete(
+                    suggestions
+                        .iter()
+                        .map(|suggestion| suggestion.text.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .interact()?;
+            resolve_account_reference_value(
+                conn,
+                context.network_name,
+                context.network_genesis_hash,
+                &value,
+                label,
+                unlocks,
+                &suggestions,
+            )
+        }
+    }
+}
+
+/// Resolve repeated explicit account references.
+///
+/// # Arguments
+/// * `conn` - Open wallet store connection.
+/// * `context` - Network context used for local label lookup and prompts.
+/// * `values` - Explicit account references to resolve.
+/// * `label` - Human-readable field label used in errors.
+/// * `unlocks` - Per-command cache of unlocked account-secret domains.
+///
+/// # Errors
+/// Returns an error if any value is neither a raw address nor a finalized local account label.
+///
+/// # Examples
+///
+/// ```ignore
+/// let targets = resolve_account_references(&conn, AccountReferenceContext { network_name: "testnet", network_genesis_hash: genesis_hash }, &args.targets, "target", &mut unlocks)?;
+/// ```
+pub(crate) fn resolve_account_references(
+    conn: &Connection,
+    context: AccountReferenceContext<'_>,
+    values: &[String],
+    label: &str,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<Vec<AccountAddress>> {
+    values
+        .iter()
+        .map(|value| {
+            resolve_account_reference_value(
+                conn,
+                context.network_name,
+                context.network_genesis_hash,
+                value,
+                label,
+                unlocks,
+                &[],
+            )
+        })
+        .collect()
+}
+
+fn resolve_account_reference_value(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+    value: &str,
+    label: &str,
+    unlocks: &mut AccountReferenceUnlocks,
+    suggestions: &[AccountReferenceSuggestion],
+) -> Result<AccountAddress> {
+    if let Some(suggestion) = suggestions
+        .iter()
+        .find(|suggestion| suggestion.text == value)
+    {
+        return resolve_local_account_reference(
+            conn,
+            network_name,
+            network_genesis_hash,
+            &suggestion.label,
+            label,
+            unlocks,
+        );
+    }
+
+    if let Ok(address) = AccountAddress::from_str(value) {
+        return Ok(address);
+    }
+
+    resolve_local_account_reference(
+        conn,
+        network_name,
+        network_genesis_hash,
+        value,
+        label,
+        unlocks,
+    )
+}
+
+fn resolve_local_account_reference(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+    account_label: &str,
+    label: &str,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<AccountAddress> {
+    let record = accounts::find_by_network_and_label(conn, network_genesis_hash, account_label)?
+        .with_context(|| {
+            format!(
+                "{label} account reference '{account_label}' is not a valid address or finalized local account label"
+            )
+        })?;
+    if record.status != accounts::AccountStatus::Finalized {
+        bail!("{label} account reference '{account_label}' is not finalized")
+    }
+    decrypt_local_account_reference_address(conn, network_name, &record, unlocks)
+}
+
+fn decrypt_local_account_reference_address(
+    conn: &Connection,
+    network_name: &str,
+    record: &accounts::AccountRecord,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<AccountAddress> {
+    let address = match record.source_kind {
+        accounts::AccountSourceKind::Derived => {
+            let seed = seeds::list(conn)?
+                .into_iter()
+                .find(|seed| seed.id == record.seed_id)
+                .context("selected account references unknown seed")?;
+            if !unlocks.seed_deks.contains_key(&seed.id) {
+                let password: String = password(format!("Password for seed '{}':", seed.label))
+                    .allow_empty()
+                    .interact()?;
+                let unlocked = seeds::unlock_context(conn, &seed.label, &password)?;
+                unlocks.seed_deks.insert(seed.id.clone(), unlocked.dek);
+            }
+            let dek = unlocks
+                .seed_deks
+                .get(&seed.id)
+                .context("unlocked seed was not cached")?;
+            accounts::decrypt_private_payload(conn, record.id, dek)?.account_address
+        }
+        accounts::AccountSourceKind::Imported => {
+            let key = record
+                .imported_vault_id
+                .clone()
+                .unwrap_or_else(|| record.network_genesis_hash.clone());
+            if !unlocks.imported_vault_deks.contains_key(&key) {
+                let vault_password: String = password(format!(
+                    "Imported accounts vault password for '{}':",
+                    network_name
+                ))
+                .allow_empty()
+                .interact()?;
+                let unlocked = accounts::unlock_imported_vault(
+                    conn,
+                    &record.network_genesis_hash,
+                    &vault_password,
+                )?;
+                unlocks
+                    .imported_vault_deks
+                    .insert(key.clone(), unlocked.dek);
+            }
+            let dek = unlocks
+                .imported_vault_deks
+                .get(&key)
+                .context("unlocked imported account vault was not cached")?;
+            accounts::decrypt_imported_payload(conn, record.id, dek)?.account_address
+        }
+    };
+    AccountAddress::from_str(&address).context("stored account address is invalid")
+}
+
 pub(crate) fn build_export_wallet_account(
     conn: &Connection,
     network_name: &str,
     network_entry: &NetworkEntry,
     account: &accounts::AccountRecord,
 ) -> Result<WalletAccount> {
+    build_export_wallet_account_with_unlocks(
+        conn,
+        network_name,
+        network_entry,
+        account,
+        &mut AccountReferenceUnlocks::new(),
+    )
+}
+
+/// Build a signer wallet while recording unlocked ownership domains for this command.
+///
+/// # Arguments
+/// * `conn` - Open wallet store connection.
+/// * `network_name` - Human-readable network name for prompts and network inference.
+/// * `network_entry` - Resolved network configuration.
+/// * `account` - Finalized local account record to sign with.
+/// * `unlocks` - Per-command cache updated with the signer's ownership domain.
+///
+/// # Errors
+/// Returns an error if the account cannot be unlocked or converted into a signer wallet.
+///
+/// # Examples
+///
+/// ```ignore
+/// let wallet = build_export_wallet_account_with_unlocks(&conn, "testnet", &entry, &account, &mut unlocks)?;
+/// ```
+pub(crate) fn build_export_wallet_account_with_unlocks(
+    conn: &Connection,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    account: &accounts::AccountRecord,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<WalletAccount> {
     match account.source_kind {
         accounts::AccountSourceKind::Derived => {
-            build_derived_export_wallet_account(conn, network_name, network_entry, account)
+            build_derived_export_wallet_account(conn, network_name, network_entry, account, unlocks)
         }
         accounts::AccountSourceKind::Imported => {
-            build_imported_export_wallet_account(conn, network_name, account)
+            build_imported_export_wallet_account(conn, network_name, account, unlocks)
         }
     }
 }
@@ -1486,6 +1843,7 @@ fn build_derived_export_wallet_account(
     network_name: &str,
     network_entry: &NetworkEntry,
     account: &accounts::AccountRecord,
+    unlocks: &mut AccountReferenceUnlocks,
 ) -> Result<WalletAccount> {
     let seed = seeds::list(conn)?
         .into_iter()
@@ -1496,14 +1854,16 @@ fn build_derived_export_wallet_account(
         .interact()?;
     let unlocked = seeds::unlock_context(conn, &seed.label, &password)?;
     let payload = accounts::decrypt_private_payload(conn, account.id, &unlocked.dek)?;
-    let seed_phrase =
-        std::str::from_utf8(&unlocked.secret).context("seed phrase is not valid UTF-8")?;
+    let seed_phrase = std::str::from_utf8(&unlocked.secret)
+        .context("seed phrase is not valid UTF-8")?
+        .to_owned();
+    unlocks.seed_deks.insert(seed.id.clone(), unlocked.dek);
     let net = infer_net(
         network_name,
         &network_entry.node_endpoint,
         &network_entry.node_endpoint,
     );
-    wallet_account_from_derived_parts(payload.account_address, seed_phrase, account, net)
+    wallet_account_from_derived_parts(payload.account_address, &seed_phrase, account, net)
 }
 
 fn wallet_account_from_derived_parts(
@@ -1536,6 +1896,7 @@ fn build_imported_export_wallet_account(
     conn: &Connection,
     network_name: &str,
     account: &accounts::AccountRecord,
+    unlocks: &mut AccountReferenceUnlocks,
 ) -> Result<WalletAccount> {
     let vault_password: String = password(format!(
         "Imported accounts vault password for '{}':",
@@ -1546,6 +1907,11 @@ fn build_imported_export_wallet_account(
     let unlocked =
         accounts::unlock_imported_vault(conn, &account.network_genesis_hash, &vault_password)?;
     let payload = accounts::decrypt_imported_payload(conn, account.id, &unlocked.dek)?;
+    let key = account
+        .imported_vault_id
+        .clone()
+        .unwrap_or_else(|| account.network_genesis_hash.clone());
+    unlocks.imported_vault_deks.insert(key, unlocked.dek);
     wallet_account_from_imported_payload(&payload)
 }
 
@@ -2296,6 +2662,244 @@ mod tests {
         }
     }
 
+    fn finalized_derived_account(
+        conn: &mut Connection,
+        seed_id: &str,
+        dek: &[u8; KEY_LEN],
+        network_genesis_hash: &str,
+        label: &str,
+        credential_counter: u32,
+        address: &str,
+    ) -> i64 {
+        let id = accounts::insert_pending(
+            conn,
+            accounts::PendingAccount {
+                network_genesis_hash,
+                seed_id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter,
+                label,
+            },
+        )
+        .unwrap();
+        accounts::set_finalized(conn, id, dek, None, address).unwrap();
+        id
+    }
+
+    #[test]
+    fn account_reference_prefers_raw_address_over_matching_label() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        let address_label = "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a";
+        let stored_address = "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd";
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            address_label,
+            0,
+            stored_address,
+        );
+
+        let resolved = resolve_account_reference(
+            &conn,
+            AccountReferenceContext {
+                network_name: "testnet",
+                network_genesis_hash: "genesis",
+            },
+            Some(address_label),
+            "Recipient account address or local label:",
+            "recipient",
+            true,
+            &mut AccountReferenceUnlocks::new(),
+        )
+        .unwrap();
+
+        assert_eq!(resolved, AccountAddress::from_str(address_label).unwrap());
+    }
+
+    #[test]
+    fn account_reference_resolves_finalized_local_label() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        let address = "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a";
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "alice",
+            0,
+            address,
+        );
+        let mut unlocks = AccountReferenceUnlocks::new();
+        unlocks
+            .seed_deks
+            .insert(seed.id.clone(), unlocked.dek.clone());
+
+        let resolved = resolve_account_reference(
+            &conn,
+            AccountReferenceContext {
+                network_name: "testnet",
+                network_genesis_hash: "genesis",
+            },
+            Some("alice"),
+            "Recipient account address or local label:",
+            "recipient",
+            true,
+            &mut unlocks,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, AccountAddress::from_str(address).unwrap());
+    }
+
+    #[test]
+    fn account_reference_rejects_missing_and_pending_labels() {
+        let conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 0,
+                label: "pending",
+            },
+        )
+        .unwrap();
+
+        let missing = resolve_account_reference(
+            &conn,
+            AccountReferenceContext {
+                network_name: "testnet",
+                network_genesis_hash: "genesis",
+            },
+            Some("missing"),
+            "Recipient account address or local label:",
+            "recipient",
+            true,
+            &mut AccountReferenceUnlocks::new(),
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("not a valid address"));
+
+        let pending = resolve_account_reference(
+            &conn,
+            AccountReferenceContext {
+                network_name: "testnet",
+                network_genesis_hash: "genesis",
+            },
+            Some("pending"),
+            "Recipient account address or local label:",
+            "recipient",
+            true,
+            &mut AccountReferenceUnlocks::new(),
+        )
+        .unwrap_err();
+        assert!(pending.to_string().contains("not finalized"));
+    }
+
+    #[test]
+    fn account_reference_reuses_cached_seed_dek_for_multiple_labels() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        let alice = "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a";
+        let bob = "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd";
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "alice",
+            0,
+            alice,
+        );
+        finalized_derived_account(&mut conn, &seed.id, &unlocked.dek, "genesis", "bob", 1, bob);
+        let mut unlocks = AccountReferenceUnlocks::new();
+        unlocks
+            .seed_deks
+            .insert(seed.id.clone(), unlocked.dek.clone());
+
+        let resolved = resolve_account_references(
+            &conn,
+            AccountReferenceContext {
+                network_name: "testnet",
+                network_genesis_hash: "genesis",
+            },
+            &["alice".to_owned(), "bob".to_owned()],
+            "recipient",
+            &mut unlocks,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            vec![
+                AccountAddress::from_str(alice).unwrap(),
+                AccountAddress::from_str(bob).unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn account_reference_suggestions_show_seed_and_imported_owners() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "main-seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "main-seed", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "alice",
+            0,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        );
+        accounts::insert_pending(
+            &conn,
+            accounts::PendingAccount {
+                network_genesis_hash: "genesis",
+                seed_id: &seed.id,
+                ip_identity: 0,
+                identity_index: 0,
+                credential_counter: 1,
+                label: "pending",
+            },
+        )
+        .unwrap();
+        let vault =
+            accounts::create_or_unlock_imported_vault(&conn, "genesis", "password").unwrap();
+        accounts::import_imported_account(
+            &mut conn,
+            &vault.dek,
+            &vault.record,
+            accounts::ImportedAccount {
+                network_genesis_hash: "genesis",
+                label: "baker-0",
+                import_kind: "genesis",
+                source_metadata_json: None,
+                payload: &imported_payload("4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd"),
+            },
+        )
+        .unwrap();
+
+        let suggestions = account_reference_suggestions(&conn, "genesis").unwrap();
+        let texts = suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(texts, vec!["[imported] baker-0", "[main-seed] alice"]);
+    }
+
     #[test]
     fn done_identity_requires_future_expiry_to_be_selectable() {
         assert!(is_identity_selectable(
@@ -2457,12 +3061,16 @@ mod tests {
         };
 
         assert_eq!(
-            render_account_fuzzy_text(&pending, "test", "testnet", None),
+            render_account_fuzzy_text(&pending, "test", "testnet", None, true),
             "[pending] [test] pending-account - testnet • provider:0 • identity:0 • cred:0"
         );
         assert_eq!(
-            render_account_fuzzy_text(&finalized, "test", "testnet", Some("addr-test")),
+            render_account_fuzzy_text(&finalized, "test", "testnet", Some("addr-test"), true),
             "[test] finalized-account (addr-test) - testnet • provider:0 • identity:0 • cred:0"
+        );
+        assert_eq!(
+            render_account_fuzzy_text(&finalized, "test", "testnet", None, false),
+            "[test] finalized-account • provider:0 • identity:0 • cred:0"
         );
 
         let imported = accounts::AccountRecord {
@@ -2475,8 +3083,12 @@ mod tests {
             ..finalized
         };
         assert_eq!(
-            render_account_fuzzy_text(&imported, "", "local", None),
+            render_account_fuzzy_text(&imported, "", "local", None, true),
             "[imported] baker-0 - local"
+        );
+        assert_eq!(
+            render_account_fuzzy_text(&imported, "", "local", None, false),
+            "[imported] baker-0"
         );
     }
 

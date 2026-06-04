@@ -2,7 +2,9 @@
 
 use crate::commands::{
     account::{
-        build_export_wallet_account, resolve_account_network_context, resolve_export_account,
+        AccountReferenceContext, AccountReferenceUnlocks, build_export_wallet_account_with_unlocks,
+        resolve_account_network_context, resolve_account_reference, resolve_account_references,
+        resolve_export_account,
     },
     transaction::render::render_finalized_summary,
     ui::{
@@ -37,9 +39,11 @@ use std::{collections::HashMap, str::FromStr};
 /// Resolved context for a token mutation command.
 pub(super) struct MutationContext {
     pub(super) network_name: String,
+    pub(super) network_genesis_hash: String,
     pub(super) endpoint_label: String,
     pub(super) client: v2::Client,
     pub(super) wallet: WalletAccount,
+    pub(super) account_unlocks: AccountReferenceUnlocks,
 }
 
 /// Resolve a client for a read-only token or lock query.
@@ -87,15 +91,24 @@ pub(super) async fn resolve_mutation_context(
         value: format!("{network_name} @ {endpoint_label}"),
         source: network_source,
     }])?;
-    let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
+    let mut account_unlocks = AccountReferenceUnlocks::new();
+    let wallet = build_export_wallet_account_with_unlocks(
+        conn,
+        &network_name,
+        &network_entry,
+        &account,
+        &mut account_unlocks,
+    )?;
     let client = node_config::connect_v2_client(endpoint.clone())
         .await
         .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
     Ok(MutationContext {
         network_name,
+        network_genesis_hash: network_entry.genesis_hash,
         endpoint_label,
         client,
         wallet,
+        account_unlocks,
     })
 }
 
@@ -230,17 +243,38 @@ pub(super) fn resolve_admin_roles(
 
 /// Resolve one or more target addresses from explicit CLI input or an interactive prompt.
 pub(super) fn resolve_target_addresses(
+    conn: &Connection,
+    context: &mut MutationContext,
     explicit: &[String],
     non_interactive: bool,
 ) -> Result<Vec<AccountAddress>> {
     if !explicit.is_empty() {
-        return parse_account_addresses(explicit, "target");
+        return resolve_account_references(
+            conn,
+            AccountReferenceContext {
+                network_name: &context.network_name,
+                network_genesis_hash: &context.network_genesis_hash,
+            },
+            explicit,
+            "target",
+            &mut context.account_unlocks,
+        );
     }
     if non_interactive {
         bail!("at least one --target must be provided in --non-interactive mode");
     }
-    let value: String = input("Target account address:").interact()?;
-    Ok(vec![parse_account_address(&value, "target")?])
+    Ok(vec![resolve_account_reference(
+        conn,
+        AccountReferenceContext {
+            network_name: &context.network_name,
+            network_genesis_hash: &context.network_genesis_hash,
+        },
+        None,
+        "Target account address or local label:",
+        "target",
+        false,
+        &mut context.account_unlocks,
+    )?])
 }
 
 /// Resolve a lock identifier from explicit input or an interactive prompt.
@@ -446,40 +480,46 @@ pub(super) fn build_metadata_url(url: String, checksum: Option<&str>) -> Result<
     })
 }
 
-/// Parse an account address from text.
-pub(super) fn parse_account_address(input: &str, label: &str) -> Result<AccountAddress> {
-    AccountAddress::from_str(input)
-        .with_context(|| format!("invalid {label} account address '{input}'"))
-}
-
-/// Resolve an account address from explicit input or an interactive prompt.
+/// Resolve an account address or local account label from explicit input or a prompt.
 pub(super) fn resolve_account_address(
+    conn: &Connection,
+    context: &mut MutationContext,
     explicit: Option<&str>,
     prompt: &str,
     label: &str,
     non_interactive: bool,
 ) -> Result<AccountAddress> {
-    match explicit {
-        Some(value) => parse_account_address(value, label),
-        None if non_interactive => {
-            bail!("{label} account address must be provided in --non-interactive mode")
-        }
-        None => {
-            let value: String = input(prompt).interact()?;
-            parse_account_address(&value, label)
-        }
-    }
+    resolve_account_reference(
+        conn,
+        AccountReferenceContext {
+            network_name: &context.network_name,
+            network_genesis_hash: &context.network_genesis_hash,
+        },
+        explicit,
+        prompt,
+        label,
+        non_interactive,
+        &mut context.account_unlocks,
+    )
 }
 
-/// Parse a list of account addresses.
+/// Resolve a list of account addresses or local account labels.
 pub(super) fn parse_account_addresses(
+    conn: &Connection,
+    context: &mut MutationContext,
     values: &[String],
     label: &str,
 ) -> Result<Vec<AccountAddress>> {
-    values
-        .iter()
-        .map(|value| parse_account_address(value, label))
-        .collect()
+    resolve_account_references(
+        conn,
+        AccountReferenceContext {
+            network_name: &context.network_name,
+            network_genesis_hash: &context.network_genesis_hash,
+        },
+        values,
+        label,
+        &mut context.account_unlocks,
+    )
 }
 
 /// Prompt for an approval confirmation.
@@ -692,11 +732,37 @@ fn format_transaction_time(value: TransactionTime) -> Result<String> {
 }
 
 /// Parse a lock create grant in the form `<ACCOUNT:ROLE[,ROLE...]>`.
-pub(super) fn parse_lock_grant(input: &str) -> Result<LockControllerSimpleV0Grant> {
+pub(super) fn parse_lock_grant(
+    conn: &Connection,
+    context: &mut MutationContext,
+    input: &str,
+) -> Result<LockControllerSimpleV0Grant> {
     let (account, roles) = input
         .split_once(':')
         .with_context(|| format!("invalid grant '{input}'; expected <ACCOUNT:ROLE[,ROLE...]>"))?;
-    let account = parse_account_address(account, "grant")?;
+    let account = resolve_account_reference(
+        conn,
+        AccountReferenceContext {
+            network_name: &context.network_name,
+            network_genesis_hash: &context.network_genesis_hash,
+        },
+        Some(account),
+        "Grant account address or local label:",
+        "grant",
+        true,
+        &mut context.account_unlocks,
+    )?;
+    let roles = parse_lock_grant_roles(input, roles)?;
+    Ok(LockControllerSimpleV0Grant {
+        account: concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from(account),
+        roles,
+    })
+}
+
+fn parse_lock_grant_roles(
+    input: &str,
+    roles: &str,
+) -> Result<Vec<LockControllerSimpleV0Capability>> {
     let roles = roles
         .split(',')
         .map(str::trim)
@@ -706,10 +772,7 @@ pub(super) fn parse_lock_grant(input: &str) -> Result<LockControllerSimpleV0Gran
     if roles.is_empty() {
         bail!("grant '{input}' must include at least one capability");
     }
-    Ok(LockControllerSimpleV0Grant {
-        account: concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from(account),
-        roles,
-    })
+    Ok(roles)
 }
 
 fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV0Capability> {
@@ -807,7 +870,7 @@ fn now_unix_seconds() -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_lock_grant, parse_token_admin_role, parse_token_amount};
+    use super::{parse_lock_grant_roles, parse_token_admin_role, parse_token_amount};
     use concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Capability;
     use concordium_rust_sdk::base::protocol_level_tokens::TokenAdminRole;
 
@@ -836,12 +899,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_lock_grant_syntax() {
-        let grant =
-            parse_lock_grant("4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd:fund,send")
-                .unwrap();
-        assert_eq!(grant.roles.len(), 2);
-        assert_eq!(grant.roles[0], LockControllerSimpleV0Capability::Fund);
-        assert_eq!(grant.roles[1], LockControllerSimpleV0Capability::Send);
+    fn parses_lock_grant_roles() {
+        let roles = parse_lock_grant_roles("account:fund,send", "fund,send").unwrap();
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles[0], LockControllerSimpleV0Capability::Fund);
+        assert_eq!(roles[1], LockControllerSimpleV0Capability::Send);
     }
 }

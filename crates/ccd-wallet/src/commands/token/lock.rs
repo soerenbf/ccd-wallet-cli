@@ -26,13 +26,14 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         false,
     )
     .await?;
-    let recipients = shared::parse_account_addresses(&args.recipients, "recipient")?;
+    let recipients =
+        shared::parse_account_addresses(conn, &mut context, &args.recipients, "recipient")?;
     let expiry = shared::parse_expiry_time(&args.expiry)?;
     let grants = args
         .grants
         .iter()
         .map(String::as_str)
-        .map(shared::parse_lock_grant)
+        .map(|grant| shared::parse_lock_grant(conn, &mut context, grant))
         .collect::<Result<Vec<_>>>()?;
     let token_summary = args
         .tokens
@@ -190,8 +191,10 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
     let source = shared::resolve_account_address(
+        conn,
+        &mut context,
         args.source.as_deref(),
-        "Source account address:",
+        "Source account address or local label:",
         "source",
         args.non_interactive,
     )?;
@@ -208,8 +211,10 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
         token_id: token_id.clone(),
         source,
         recipient: shared::resolve_account_address(
+            conn,
+            &mut context,
             args.recipient.as_deref(),
-            "Recipient account address:",
+            "Recipient account address or local label:",
             "recipient",
             args.non_interactive,
         )?,
@@ -284,8 +289,10 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
     let source = shared::resolve_account_address(
+        conn,
+        &mut context,
         args.source.as_deref(),
-        "Source account address:",
+        "Source account address or local label:",
         "source",
         args.non_interactive,
     )?;

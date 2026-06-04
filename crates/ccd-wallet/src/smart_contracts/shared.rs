@@ -2,10 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use concordium_rust_sdk::{
-    common::{
-        Serial,
-        types::{AccountAddress, Amount},
-    },
+    common::{Serial, types::Amount},
     smart_contracts::common::{
         ContractAddress, ModuleReference, OwnedParameter, OwnedReceiveName,
         schema::VersionedModuleSchema,
@@ -286,11 +283,6 @@ pub(crate) fn serialize_module(module: &WasmModule) -> Vec<u8> {
     let mut bytes = Vec::new();
     module.serial(&mut bytes);
     bytes
-}
-
-/// Parse an account address.
-pub(crate) fn parse_account_address(value: &str) -> Result<AccountAddress> {
-    AccountAddress::from_str(value).with_context(|| format!("invalid account address '{value}'"))
 }
 
 #[cfg(test)]

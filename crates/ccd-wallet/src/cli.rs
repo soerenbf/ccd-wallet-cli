@@ -235,8 +235,8 @@ pub struct ContractInvokeArgs {
     #[arg(long = "energy", value_name = "ENERGY")]
     pub energy: Option<u64>,
 
-    /// Account address to use as explicit invoker. Defaults to the node's synthetic zero-account context.
-    #[arg(long = "invoker", value_name = "ADDRESS")]
+    /// Account address or finalized local account label to use as explicit invoker. Defaults to the node's synthetic zero-account context.
+    #[arg(long = "invoker", value_name = "ADDRESS_OR_LABEL")]
     pub invoker: Option<String>,
 
     /// Serialized parameter bytes encoded as hex.
@@ -926,8 +926,8 @@ pub struct TokenTransferArgs {
     #[arg(value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
-    /// Recipient account address. If omitted interactively, the CLI prompts.
-    #[arg(long = "recipient", value_name = "ADDRESS")]
+    /// Recipient account address or finalized local account label. If omitted interactively, the CLI prompts.
+    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
     pub recipient: Option<String>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the available balance.
@@ -1014,8 +1014,8 @@ pub struct TokenListMutationArgs {
     #[arg(value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
-    /// Target account addresses to add or remove. If omitted interactively, the CLI prompts.
-    #[arg(long = "target", value_name = "ADDRESS")]
+    /// Target account addresses or finalized local account labels to add or remove. If omitted interactively, the CLI prompts.
+    #[arg(long = "target", value_name = "ADDRESS_OR_LABEL")]
     pub targets: Vec<String>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
@@ -1094,8 +1094,8 @@ pub struct TokenAdminRolesArgs {
     #[arg(value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
-    /// Target account address. If omitted interactively, the CLI prompts.
-    #[arg(long = "target", value_name = "ADDRESS")]
+    /// Target account address or finalized local account label. If omitted interactively, the CLI prompts.
+    #[arg(long = "target", value_name = "ADDRESS_OR_LABEL")]
     pub target: Option<String>,
 
     /// Token admin roles to assign or revoke. If omitted interactively, the CLI presents a multi-select.
@@ -1202,15 +1202,15 @@ pub enum TokenLockSubcommand {
 
 #[derive(Debug, Args)]
 pub struct TokenLockCreateArgs {
-    /// Accounts that can receive funds from the lock. Repeat to add multiple recipients.
-    #[arg(long = "recipient", value_name = "ADDRESS", required = true)]
+    /// Accounts that can receive funds from the lock. Accepts raw addresses or finalized local account labels. Repeat to add multiple recipients.
+    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL", required = true)]
     pub recipients: Vec<String>,
 
     /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds.
     #[arg(long = "expiry", value_name = "TIME")]
     pub expiry: String,
 
-    /// Controller grant in the form `<ACCOUNT:ROLE[,ROLE...]>`. Repeat for multiple grants.
+    /// Controller grant in the form `<ACCOUNT_OR_LABEL:ROLE[,ROLE...]>`. Repeat for multiple grants.
     #[arg(long = "grant", value_name = "GRANT", required = true)]
     pub grants: Vec<String>,
 
@@ -1296,12 +1296,12 @@ pub struct TokenLockSendArgs {
     #[arg(long = "token", value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
-    /// Source account whose funds are currently locked.
-    #[arg(long = "source", value_name = "ADDRESS")]
+    /// Source account address or finalized local account label whose funds are currently locked.
+    #[arg(long = "source", value_name = "ADDRESS_OR_LABEL")]
     pub source: Option<String>,
 
-    /// Recipient account that must be configured on the lock.
-    #[arg(long = "recipient", value_name = "ADDRESS")]
+    /// Recipient account address or finalized local account label that must be configured on the lock.
+    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
     pub recipient: Option<String>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
@@ -1343,8 +1343,8 @@ pub struct TokenLockReturnArgs {
     #[arg(long = "token", value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
-    /// Source account whose funds are currently locked.
-    #[arg(long = "source", value_name = "ADDRESS")]
+    /// Source account address or finalized local account label whose funds are currently locked.
+    #[arg(long = "source", value_name = "ADDRESS_OR_LABEL")]
     pub source: Option<String>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
@@ -2062,6 +2062,170 @@ mod tests {
                 other => panic!("expected token lock command, got {other:?}"),
             },
             other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_transfer_with_recipient_label() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "transfer",
+            "CCD",
+            "--recipient",
+            "treasury",
+            "--amount",
+            "1",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Transfer(args) => {
+                    assert_eq!(args.recipient.as_deref(), Some("treasury"));
+                    assert_eq!(args.account.as_deref(), Some("alice"));
+                }
+                other => panic!("expected token transfer command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_list_update_with_mixed_targets() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "allow-list",
+            "add",
+            "CCD",
+            "--target",
+            "treasury",
+            "--target",
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::AllowList(command) => match command.command {
+                    TokenListSubcommand::Add(args) => {
+                        assert_eq!(
+                            args.targets,
+                            vec![
+                                "treasury".to_owned(),
+                                "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd".to_owned(),
+                            ]
+                        );
+                    }
+                    other => panic!("expected allow-list add command, got {other:?}"),
+                },
+                other => panic!("expected token allow-list command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_create_with_label_references() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--recipient",
+            "treasury",
+            "--expiry",
+            "1h",
+            "--grant",
+            "operator:fund,send,cancel",
+            "--token",
+            "CCD",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert_eq!(args.recipients, vec!["treasury"]);
+                        assert_eq!(args.grants, vec!["operator:fund,send,cancel"]);
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_send_and_return_with_label_references() {
+        let send = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "send",
+            "--source",
+            "alice",
+            "--recipient",
+            "treasury",
+        ]);
+        match send.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Send(args) => {
+                        assert_eq!(args.source.as_deref(), Some("alice"));
+                        assert_eq!(args.recipient.as_deref(), Some("treasury"));
+                    }
+                    other => panic!("expected token lock send command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+
+        let return_funds =
+            Cli::parse_from(["ccd-wallet", "token", "lock", "return", "--source", "alice"]);
+        match return_funds.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Return(args) => {
+                        assert_eq!(args.source.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token lock return command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_contract_invoke_with_invoker_label() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "contract",
+            "invoke",
+            "--contract",
+            "42,0",
+            "--receive",
+            "counter.view",
+            "--invoker",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Contract(command) => match command.command {
+                ContractSubcommand::Invoke(args) => {
+                    assert_eq!(args.invoker.as_deref(), Some("alice"));
+                }
+                other => panic!("expected contract invoke command, got {other:?}"),
+            },
+            other => panic!("expected contract command, got {other:?}"),
         }
     }
 }

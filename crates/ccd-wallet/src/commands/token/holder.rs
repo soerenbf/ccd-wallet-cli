@@ -33,8 +33,10 @@ pub(super) async fn transfer(conn: &Connection, args: TokenTransferArgs) -> Resu
     )?;
     let mut token_client = shared::init_token_client(context.client.clone(), token_id).await?;
     let recipient = shared::resolve_account_address(
+        conn,
+        &mut context,
         args.recipient.as_deref(),
-        "Recipient account address:",
+        "Recipient account address or local label:",
         "recipient",
         args.non_interactive,
     )?;

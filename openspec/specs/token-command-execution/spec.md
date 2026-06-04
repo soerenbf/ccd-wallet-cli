@@ -49,6 +49,33 @@ The CLI SHALL let a user submit protocol-level token holder and token-admin oper
 - **THEN** the CLI builds and submits a protocol-level token metadata update transaction for that token
 - **AND** the CLI reports the submitted transaction hash
 
+### Requirement: Token commands accept local account references for non-sender account inputs
+Token and lock commands SHALL accept finalized local account labels anywhere they currently accept non-sender account-address inputs, while continuing to accept raw account addresses. Each such input SHALL use the shared account-reference resolution behavior in the already resolved network context.
+
+Covered inputs include recipient, target, source, repeated target and recipient lists, and account-reference segments embedded inside lock grant arguments.
+
+#### Scenario: Token transfer accepts recipient local account label
+- **WHEN** a user runs `ccd-wallet token transfer` with `--recipient <local-account-label>`
+- **AND** that label matches a finalized local account on the resolved network
+- **THEN** the CLI resolves the recipient from the local account label
+- **AND** submits the transfer using the resolved account address
+
+#### Scenario: Token list update accepts mixed target labels and raw addresses
+- **WHEN** a user runs `ccd-wallet token allow-list add` or `ccd-wallet token deny-list add` with repeated `--target` values
+- **AND** some values are finalized local account labels and others are raw account addresses
+- **THEN** the CLI resolves each value independently through the shared account-reference behavior
+- **AND** submits the list update using the resulting account addresses
+
+#### Scenario: Token lock create accepts local labels in recipients and grants
+- **WHEN** a user runs `ccd-wallet token lock create` with recipient values or lock grant account references expressed as finalized local account labels
+- **THEN** the CLI resolves those labels within the resolved network context
+- **AND** submits the lock creation using the resulting account addresses
+
+#### Scenario: Token lock send reuses an already unlocked sender seed for another local account reference
+- **WHEN** `ccd-wallet token lock send` has already unlocked the signer account's derived seed
+- **AND** a later `--source` or `--recipient` local account label is owned by that same seed
+- **THEN** the CLI resolves the later local account reference without prompting again for the same seed password
+
 ### Requirement: Token lock commands manage protocol-level locks
 The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, returns, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For fund, send, return, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and return SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted.
 

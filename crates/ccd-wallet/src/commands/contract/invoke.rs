@@ -2,7 +2,10 @@
 
 use crate::{
     cli::ContractInvokeArgs,
-    commands::account::resolve_account_network_context,
+    commands::account::{
+        AccountReferenceContext, AccountReferenceUnlocks, resolve_account_network_context,
+        resolve_account_reference,
+    },
     smart_contracts::{query as query_core, shared},
 };
 use anyhow::{Context, Result};
@@ -11,7 +14,7 @@ use concordium_rust_sdk::types::Energy;
 use rusqlite::Connection;
 
 pub(super) async fn invoke(conn: &Connection, args: ContractInvokeArgs) -> Result<()> {
-    let (_network_name, _network_entry, endpoint, endpoint_label, _network_source) =
+    let (network_name, network_entry, endpoint, endpoint_label, _network_source) =
         resolve_account_network_context(
             conn,
             args.network.as_deref(),
@@ -40,11 +43,21 @@ pub(super) async fn invoke(conn: &Connection, args: ContractInvokeArgs) -> Resul
         },
     )
     .await?;
-    let invoker = args
-        .invoker
-        .as_deref()
-        .map(shared::parse_account_address)
-        .transpose()?;
+    let invoker = match args.invoker.as_deref() {
+        Some(invoker) => Some(resolve_account_reference(
+            conn,
+            AccountReferenceContext {
+                network_name: &network_name,
+                network_genesis_hash: &network_entry.genesis_hash,
+            },
+            Some(invoker),
+            "Invoker account address or local label:",
+            "invoker",
+            true,
+            &mut AccountReferenceUnlocks::new(),
+        )?),
+        None => None,
+    };
     let prepared = query_core::prepare_contract_invoke(
         contract,
         receive_name,
