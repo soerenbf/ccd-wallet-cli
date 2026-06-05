@@ -1,0 +1,19 @@
+[package]
+name = "ccd-wallet-ledger-governance"
+version.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[features]
+default = ["hid"]
+sdk = ["dep:concordium-rust-sdk", "dep:hex", "dep:serde_json"]
+hid = ["dep:hidapi"]
+
+[dependencies]
+concordium-rust-sdk = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+hidapi = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true

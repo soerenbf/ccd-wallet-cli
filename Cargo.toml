@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet-connect", "crates/ccd-wallet-ledger", "crates/ccd-wallet"]
+members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet-connect", "crates/ccd-wallet-ledger", "crates/ccd-wallet-ledger-governance", "crates/ccd-wallet"]
 resolver = "2"
 
 [workspace.package]
@@ -23,6 +23,7 @@ ed25519-dalek = "2.2.0"
 either = "1.15.0"
 futures-util = "0.3.31"
 hex = "0.4.3"
+hidapi = "2.6.3"
 hkdf = "0.12.4"
 hmac = "0.12.1"
 open = "5.3.2"

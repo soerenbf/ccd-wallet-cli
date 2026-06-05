@@ -10,6 +10,7 @@ The Concordium Ledger app repository contains a distinct `governance-app` applic
 
 **Goals:**
 - Provide a low-level Rust protocol client for the Concordium Governance Ledger app.
+- Ship concrete HID transport support in the initial version alongside mock transport support.
 - Expose one public client type with typed methods for public-key retrieval and the full Governance Ledger app signing command surface.
 - Own APDU request construction, update-family-specific sequencing, P1/P2 selection, chunking, and response parsing.
 - Return raw device outputs such as governance public keys and raw signatures.
@@ -74,7 +75,7 @@ The Concordium Ledger app repository contains a distinct `governance-app` applic
 
 ### 6. Use crate-local request types with feature-gated SDK conversions, matching `ccd-wallet-ledger`
 
-**Decision:** The crate defines its own public request types and enables selected `concordium-rust-sdk` conversions behind an optional feature, following the same SDK-optional pattern already established by `ccd-wallet-ledger`.
+**Decision:** The crate defines its own public request types and ships selected `concordium-rust-sdk` conversions in the initial version behind an optional feature, following the same SDK-optional pattern already established by `ccd-wallet-ledger`.
 
 **Rationale:** Crate-local types keep the stable API shaped around Ledger protocol needs. Feature-gated conversions make the crate ergonomic for this repository without coupling all users to the SDK, and consistency with `ccd-wallet-ledger` keeps the two Ledger crates aligned in dependency and API expectations.
 
@@ -82,7 +83,17 @@ The Concordium Ledger app repository contains a distinct `governance-app` applic
 - Accepting SDK types directly everywhere. Rejected because SDK shape and Ledger protocol shape are not identical.
 - Accepting only serialized bytes. Rejected because many governance app flows require field-level staging and device review semantics.
 
-### 7. Treat source and tests as primary protocol references
+### 7. Ship HID support immediately while keeping command logic transport-abstracted
+
+**Decision:** The first version will include concrete HID transport support because direct Ledger communication is the primary purpose of the crate, while also shipping a mock transport from the start for easy testing and onboarding.
+
+**Rationale:** A Governance Ledger client without usable hardware transport would not satisfy the main consumer need. At the same time, keeping command logic behind a transport trait preserves testability and keeps the crate approachable for consumers who want to start with mocks.
+
+**Alternatives considered:**
+- Deferring HID support to a later change. Rejected because it would delay the main value of the crate.
+- Embedding HID details directly into command code. Rejected because it would weaken testability and make protocol logic harder to validate.
+
+### 8. Treat source and tests as primary protocol references
 
 **Decision:** Instruction constants, P1/P2 values, and staging rules should be validated against the governance app source and end-to-end tests, using markdown docs as supporting references.
 
@@ -99,14 +110,12 @@ The Concordium Ledger app repository contains a distinct `governance-app` applic
 
 ## Migration Plan
 
-- Add the new crate and workspace manifest entry without wiring it into existing CLI commands.
-- Implement the transport abstraction, APDU helpers, typed request/response model, command methods, tests, and crate documentation as an isolated addition.
+- Add the new crate `ccd-wallet-ledger-governance` and workspace manifest entry without wiring it into existing CLI commands.
+- Implement the transport abstraction, immediate HID support, APDU helpers, typed request/response model, command methods, tests, and crate documentation as an isolated addition.
 - Leave existing governance key vault and local-key governance update flows unchanged.
 - Integrate Ledger-backed governance signing in a later change once the low-level protocol crate is stable.
 - Rollback is straightforward: remove the new crate and workspace entry because no existing runtime behavior depends on it.
 
 ## Open Questions
 
-- What should the final crate name be? Candidate: `ccd-wallet-ledger-governance`.
-- Which SDK conversions should ship initially versus waiting for higher-level integration work to prove demand?
-- Should concrete HID transport support ship immediately, or should the first version stop at abstract/mock transport with HID reserved behind a feature?
+- None currently. The proposal assumes the crate will be named `ccd-wallet-ledger-governance`, will ship initial SDK conversions behind a feature gate like `ccd-wallet-ledger`, and will include concrete HID support plus mock transport support in the first version.
