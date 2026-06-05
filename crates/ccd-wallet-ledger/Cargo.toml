@@ -5,12 +5,13 @@ edition.workspace = true
 readme = "README.md"
 
 [features]
-default = []
+default = ["hid"]
 sdk = ["dep:concordium-rust-sdk"]
-hid = []
+hid = ["dep:hidapi"]
 
 [dependencies]
 concordium-rust-sdk = { workspace = true, optional = true }
+hidapi = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true

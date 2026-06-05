@@ -24,8 +24,7 @@
 //!
 //! - `sdk`: enables conversion impls from selected `concordium-rust-sdk` types into
 //!   crate-local request/value types.
-//! - `hid`: reserved for a concrete HID transport adapter; command logic remains
-//!   transport-agnostic.
+//! - `hid`: enables the concrete Ledger HID APDU transport adapter.
 
 pub mod apdu;
 pub mod commands;
@@ -38,6 +37,8 @@ pub mod types;
 
 pub use apdu::ApduCommand;
 pub use error::{LedgerError, Result};
+#[cfg(feature = "hid")]
+pub use transport::HidTransport;
 pub use transport::{LedgerTransport, MockTransport};
 pub use types::{
     AccountAddressBytes, ChunkedSigningRequest, ConfigureBakerSigningRequest,

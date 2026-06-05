@@ -9,7 +9,7 @@ use crate::types::{
     RegisterDataSigningRequest,
 };
 use concordium_rust_sdk::{
-    base::protocol_level_tokens::{TokenOperationsPayload, meta_operations::MetaUpdatePayload},
+    base::protocol_level_tokens::TokenOperationsPayload,
     common::Serial,
     types::{
         smart_contracts::WasmModule,
@@ -23,13 +23,13 @@ use concordium_rust_sdk::{
 /// SDK account-transaction data together with the Ledger derivation path used for signing.
 ///
 /// SDK account transaction payload bodies do not carry the Ledger signing path or the transaction
-/// header. This wrapper supplies the missing context so body structs such as
+/// header. This wrapper supplies the missing context so supported SDK body structs such as
 /// [`InitContractPayload`] or [`RegisteredData`] can be converted into crate-local Ledger request
 /// types.
 ///
 /// # Arguments
 ///
-/// * `P` - SDK payload or payload-body type.
+/// * `P` - Supported SDK payload-body type.
 ///
 /// # Examples
 ///
@@ -47,7 +47,7 @@ pub struct SdkAccountTransactionInput<P> {
     pub path: DerivationPath,
     /// SDK transaction header to serialize before the payload.
     pub header: TransactionHeader,
-    /// SDK transaction payload or payload body.
+    /// Supported SDK transaction payload body.
     pub payload: P,
 }
 
@@ -58,7 +58,7 @@ impl<P> SdkAccountTransactionInput<P> {
     ///
     /// * `path` - Derivation path for the Ledger signing key.
     /// * `header` - SDK account transaction header.
-    /// * `payload` - SDK account transaction payload or payload body.
+    /// * `payload` - Supported SDK account transaction payload body.
     ///
     /// # Examples
     ///
@@ -79,16 +79,6 @@ impl<P> SdkAccountTransactionInput<P> {
     }
 }
 
-impl From<SdkAccountTransactionInput<Payload>> for ChunkedSigningRequest {
-    fn from(value: SdkAccountTransactionInput<Payload>) -> Self {
-        let transaction = serialize_payload(&value.header, &value.payload);
-        Self {
-            path: value.path,
-            transaction,
-        }
-    }
-}
-
 impl From<SdkAccountTransactionInput<ConfigureDelegationPayload>> for ChunkedSigningRequest {
     fn from(value: SdkAccountTransactionInput<ConfigureDelegationPayload>) -> Self {
         let payload = Payload::ConfigureDelegation {
@@ -105,19 +95,6 @@ impl From<SdkAccountTransactionInput<ConfigureDelegationPayload>> for ChunkedSig
 impl From<SdkAccountTransactionInput<TokenOperationsPayload>> for ChunkedSigningRequest {
     fn from(value: SdkAccountTransactionInput<TokenOperationsPayload>) -> Self {
         let payload = Payload::TokenUpdate {
-            payload: value.payload,
-        };
-        let transaction = serialize_payload(&value.header, &payload);
-        Self {
-            path: value.path,
-            transaction,
-        }
-    }
-}
-
-impl From<SdkAccountTransactionInput<MetaUpdatePayload>> for ChunkedSigningRequest {
-    fn from(value: SdkAccountTransactionInput<MetaUpdatePayload>) -> Self {
-        let payload = Payload::MetaUpdate {
             payload: value.payload,
         };
         let transaction = serialize_payload(&value.header, &payload);
