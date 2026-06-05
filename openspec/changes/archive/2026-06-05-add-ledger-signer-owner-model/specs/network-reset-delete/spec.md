@@ -1,8 +1,5 @@
-# network-reset-delete Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-network-reset-delete-and-seed-delete. Update Purpose after archive.
-## Requirements
 ### Requirement: Reset network-scoped wallet data explicitly
 The CLI SHALL provide a `network reset` command that prunes wallet-local identities, accounts, imported-account vault data, and governance-vault data for a resolved network partition while keeping network config aliases and signer owners intact. The command SHALL accept either a configured network label or `--genesis-hash <HASH>`. Supplying both a label and `--genesis-hash` SHALL be an error. The command SHALL NOT infer its target from the active network.
 
@@ -48,33 +45,7 @@ The CLI SHALL provide a `network reset` command that prunes wallet-local identit
 - **AND** that row is labeled as orphaned
 - **AND** the user can choose it to prune that stored network data
 
-### Requirement: Delete network config aliases explicitly
-The CLI SHALL provide a `network delete` command that removes one or more network config aliases by label. The command SHALL NOT infer its target from the active network, and it SHALL NOT prune identities or accounts.
-
-#### Scenario: Delete one network alias by label
-- **WHEN** the user runs `ccd-wallet network delete testnet`
-- **AND** `testnet` is configured for genesis hash `abc`
-- **THEN** the CLI deletes only the `testnet` config alias
-- **AND** keeps identities and accounts for `abc`
-
-#### Scenario: Delete multiple network aliases by label
-- **WHEN** the user runs `ccd-wallet network delete testnet staging-testnet`
-- **AND** both aliases are configured for genesis hash `abc`
-- **THEN** the CLI deletes both config aliases
-- **AND** keeps identities and accounts for `abc`
-
-#### Scenario: Interactive delete uses alias multiselect
-- **WHEN** the user runs `ccd-wallet network delete`
-- **AND** interactive mode is enabled
-- **THEN** the CLI opens a multiselect over configured network aliases
-- **AND** uses the selected aliases for deletion
-
-#### Scenario: Delete warns when aliases will orphan stored network data
-- **WHEN** the user runs `ccd-wallet network delete testnet`
-- **AND** identities or accounts still exist for genesis hash `abc`
-- **AND** deleting `testnet` leaves `abc` with no remaining aliases
-- **THEN** the CLI warns that local wallet data for `abc` will become orphaned
-- **AND** advises the user to run `ccd-wallet network reset` to prune it
+## ADDED Requirements
 
 ### Requirement: Network reset preserves signer-owner enrollment and password domains
 Network reset SHALL NOT delete signer owners, signer-owner vaults, seed owner secrets, or Ledger owner details. Signer owners are owner-scoped rather than network-scoped and SHALL remain available for identities and accounts on other networks.
@@ -90,4 +61,3 @@ Network reset SHALL NOT delete signer owners, signer-owner vaults, seed owner se
 - **AND** seed signer owner `main_seed` has identities or accounts on `abc`
 - **THEN** those identities and accounts are deleted
 - **AND** signer owner `main_seed`, its signer-owner vault, and its seed owner secret remain stored
-

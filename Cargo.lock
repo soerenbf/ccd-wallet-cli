@@ -562,6 +562,7 @@ dependencies = [
  "ccd-wallet-connect",
  "ccd-wallet-core",
  "ccd-wallet-identity-provider",
+ "ccd-wallet-ledger",
  "chrono",
  "clap",
  "cliclack",
@@ -647,6 +648,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "concordium-rust-sdk",
+ "hidapi",
 ]
 
 [[package]]

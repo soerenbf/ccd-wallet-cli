@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use ccd_wallet_core::store::{
     config::{AppConfig, load},
     identities::{self, IdentityRecord, IdentityStatus},
-    seeds, wallet_state,
+    seeds,
+    signer_owners::{self, SignerOwnerKind},
+    wallet_state,
 };
 use chrono::{DateTime, Utc};
 use cliclack::input;
@@ -77,6 +79,7 @@ async fn list_identities(conn: &Connection, args: IdentityListArgs) -> Result<()
     log_scope_context(&seed_scope, &network_scope)?;
 
     let seeds_by_id = seed_labels_by_id(conn)?;
+    let key_source_tags_by_id = key_source_tags_by_id(conn)?;
     let networks_by_hash = network_names_by_genesis_hash()?;
     let now = now_unix_seconds()?;
     let mut identities = identities::list(conn)?
@@ -92,10 +95,10 @@ async fn list_identities(conn: &Connection, args: IdentityListArgs) -> Result<()
     identities.sort_by(|a, b| a.label.cmp(&b.label));
 
     for record in identities {
-        let seed_label = seeds_by_id
-            .get(&record.seed_id)
+        let seed_label = key_source_tags_by_id
+            .get(&record.signer_owner_id)
             .cloned()
-            .unwrap_or_else(|| "<unknown-seed>".to_owned());
+            .unwrap_or_else(|| "unknown-key-source".to_owned());
         let network_name = networks_by_hash
             .get(&record.network_genesis_hash)
             .cloned()
@@ -109,7 +112,7 @@ async fn list_identities(conn: &Connection, args: IdentityListArgs) -> Result<()
 }
 
 async fn rename_identity(conn: &Connection, args: IdentityRenameArgs) -> Result<()> {
-    let seeds_by_id = seed_labels_by_id(conn)?;
+    let seeds_by_id = key_source_tags_by_id(conn)?;
     let networks_by_hash = network_names_by_genesis_hash()?;
     let now = now_unix_seconds()?;
 
@@ -161,9 +164,22 @@ async fn rename_identity(conn: &Connection, args: IdentityRenameArgs) -> Result<
 }
 
 fn seed_labels_by_id(conn: &Connection) -> Result<BTreeMap<String, String>> {
-    Ok(seeds::list(conn)?
+    Ok(signer_owners::list(conn)?
         .into_iter()
-        .map(|seed| (seed.id, seed.label))
+        .map(|owner| (owner.id, owner.label))
+        .collect())
+}
+
+fn key_source_tags_by_id(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    Ok(signer_owners::list(conn)?
+        .into_iter()
+        .map(|owner| {
+            let prefix = match owner.kind {
+                SignerOwnerKind::Seed => "seed",
+                SignerOwnerKind::Ledger => "ledger",
+            };
+            (owner.id, format!("{prefix}:{}", owner.label))
+        })
         .collect())
 }
 
@@ -308,7 +324,7 @@ fn log_scope_context(
 ) -> Result<()> {
     log_resolved_context(&[
         ContextLine {
-            label: "seed:",
+            label: "key source:",
             value: match &seed_scope.0 {
                 ScopeSelection::All => "all".to_owned(),
                 ScopeSelection::One(value) => value.clone(),
@@ -333,7 +349,7 @@ fn matches_seed_scope(
 ) -> bool {
     match &scope.0 {
         ScopeSelection::All => true,
-        ScopeSelection::One(label) => labels.get(&record.seed_id) == Some(label),
+        ScopeSelection::One(label) => labels.get(&record.signer_owner_id) == Some(label),
     }
 }
 
@@ -384,7 +400,7 @@ fn render_identity_fuzzy_text(
         IdentityListStatus::Done => "",
     };
     let mut text = format!(
-        "{}{} — {} • seed:{} • provider:{} • idx:{}",
+        "{}{} — {} • key source:{} • provider:{} • idx:{}",
         prefix, record.label, network_name, seed_label, record.ip_identity, record.identity_index
     );
     if let Some(expires_at) = record.expires_at {
@@ -424,7 +440,7 @@ fn select_identity_fuzzy(
         .iter()
         .map(|record| {
             let seed_label = seeds_by_id
-                .get(&record.seed_id)
+                .get(&record.signer_owner_id)
                 .cloned()
                 .unwrap_or_else(|| "<unknown-seed>".to_owned());
             let network_name = networks_by_hash
@@ -477,7 +493,7 @@ mod tests {
     fn identity(status: IdentityStatus, expires_at: Option<i64>) -> IdentityRecord {
         IdentityRecord {
             id: 1,
-            seed_id: "seed-id".to_owned(),
+            signer_owner_id: "seed-id".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
             ip_identity: 7,
             identity_index: 0,
@@ -522,6 +538,14 @@ mod tests {
         );
         assert!(expired.starts_with("[expired] identity"));
         assert!(expired.contains("exp:2027-06-01"));
+
+        let ledger = render_identity_fuzzy_text(
+            &identity(IdentityStatus::Done, Some(200)),
+            "ledger:hardware",
+            "testnet",
+            100,
+        );
+        assert!(ledger.contains("key source:ledger:hardware"));
     }
 
     #[test]

@@ -1127,7 +1127,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "hash-testnet",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 0,
@@ -1141,7 +1141,7 @@ mod tests {
             &unlocked.dek,
             identities::PendingIdentity {
                 network_genesis_hash: "hash-testnet",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 1,
                 identity_index: 0,
                 label: "identity-a",
@@ -1154,7 +1154,7 @@ mod tests {
             &unlocked.dek,
             identities::PendingIdentity {
                 network_genesis_hash: "hash-mainnet",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 1,
                 identity_index: 1,
                 label: "identity-b",
@@ -1171,6 +1171,13 @@ mod tests {
             known_network_hashes(&conn).unwrap(),
             vec!["hash-mainnet".to_owned()]
         );
+        assert!(seeds::find_by_label(&conn, "main_seed").unwrap().is_some());
+        let vault_count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM signer_owner_vaults", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(vault_count, 1);
     }
 
     #[test]
@@ -1215,7 +1222,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "hash-testnet",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 0,

@@ -57,6 +57,8 @@ ccd-wallet
 │  ├─ sync
 │  ├─ use
 │  └─ show
+├─ ledger                       [Implemented]
+│  └─ setup
 ├─ identity                     [Implemented]
 │  ├─ list
 │  ├─ new
@@ -102,6 +104,12 @@ ccd-wallet
 │     └─ show
 └─ connect                      [Implemented]
 ```
+
+## Key-source terminology
+
+The internal storage model calls seed-backed and Ledger-backed derivation authorities **signer owners**. User-facing CLI text should call the same concept a **key source** when a command or prompt needs to cover both seed phrases and Ledger devices.
+
+The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app.
 
 ## Planned command spaces
 

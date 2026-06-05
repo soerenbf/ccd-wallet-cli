@@ -1,14 +1,17 @@
 use crate::{
     cli::IdentityNewArgs,
-    commands::ui::{
-        ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single,
+    commands::{
+        ledger_construction::{self, LedgerIdentityIssuanceInput},
+        ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
     },
 };
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     store::{
         config::{NetworkEntry, load},
-        identities, seeds, wallet_state,
+        identities, seeds,
+        signer_owners::{self, SignerOwnerKind},
+        wallet_state,
     },
     wallet::{ConcordiumHdWallet, Net},
 };
@@ -38,7 +41,7 @@ pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
 }
 
 async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
-    let (seed_label, seed_source) = resolve_seed_label(
+    let (key_source_label, key_source_source) = resolve_seed_label(
         conn,
         args.seed.as_deref(),
         args.non_interactive,
@@ -56,9 +59,9 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
 
     log_resolved_context(&[
         ContextLine {
-            label: "seed:",
-            value: seed_label.clone(),
-            source: seed_source,
+            label: "key source:",
+            value: key_source_label.clone(),
+            source: key_source_source,
         },
         ContextLine {
             label: "network:",
@@ -76,11 +79,6 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
             network_name
         );
     }
-
-    let unlocked_seed = unlock_seed(conn, &seed_label)?;
-    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
-        .context("stored seed phrase is not UTF-8")?
-        .to_owned();
 
     let spin = spinner();
     spin.start(format!("Connecting to node: {endpoint_label}"));
@@ -125,6 +123,34 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     let ar_infos = fetch_anonymity_revokers(&mut client).await?;
     spin.clear();
 
+    if let Some(owner) = signer_owners::find_by_label(conn, &key_source_label)?
+        && owner.kind == SignerOwnerKind::Ledger
+    {
+        let details = signer_owners::find_ledger_details_by_owner_id(conn, &owner.id)?
+            .with_context(|| {
+                format!(
+                    "Ledger key source '{}' has no enrollment details",
+                    owner.label
+                )
+            })?;
+        let identity_index = identities::next_index(
+            conn,
+            &network_entry.genesis_hash,
+            &owner.id,
+            ip_info.ip_identity.0,
+        )?;
+        ledger_construction::construct_identity_issuance(LedgerIdentityIssuanceInput {
+            owner_details: &details,
+            network_genesis_hash: &network_entry.genesis_hash,
+            ip_identity: ip_info.ip_identity.0,
+            identity_index,
+        })?;
+    }
+
+    let unlocked_seed = unlock_seed(conn, &key_source_label)?;
+    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
+        .context("stored seed phrase is not UTF-8")?
+        .to_owned();
     let net = infer_net(
         &network_name,
         network_entry.wallet_proxy.as_deref(),
@@ -170,7 +196,7 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
         &unlocked_seed.dek,
         identities::PendingIdentity {
             network_genesis_hash: &network_entry.genesis_hash,
-            seed_id: &unlocked_seed.record.id,
+            signer_owner_id: &unlocked_seed.record.id,
             ip_identity: ip_info.ip_identity.0,
             identity_index,
             label: &label,
@@ -286,9 +312,9 @@ fn resolve_seed_label(
     no_defaults: bool,
 ) -> Result<(String, ResolutionSource)> {
     match explicit {
-        Some(label) => seeds::find_by_label(conn, label)?
-            .map(|s| (s.label, ResolutionSource::Explicit))
-            .with_context(|| format!("seed '{}' is not configured", label)),
+        Some(label) => signer_owners::find_by_label(conn, label)?
+            .map(|owner| (owner.label, ResolutionSource::Explicit))
+            .with_context(|| format!("key source '{}' is not configured", label)),
         None => {
             let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
             if no_defaults {
@@ -300,7 +326,7 @@ fn resolve_seed_label(
             match active {
                 Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
                 None if non_interactive => bail!(
-                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
+                    "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`."
                 ),
                 None => Ok((
                     prompt_for_seed_label(conn, None)?,

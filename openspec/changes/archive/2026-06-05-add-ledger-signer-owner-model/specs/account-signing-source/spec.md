@@ -1,8 +1,5 @@
-# account-signing-source Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-imported-account-vault-and-genesis-import. Update Purpose after archive.
-## Requirements
 ### Requirement: Account material resolution is source-aware for signing and export
 The system SHALL resolve account material through the account's source kind and signer-owner kind for operations that need signer-capable account data. Seed-backed derived accounts SHALL use seed-derived signing material from the unlocked seed signer owner. Ledger-backed derived accounts SHALL use a matching connected Ledger device for signing and SHALL NOT require local private signing material. Imported accounts SHALL use encrypted imported account secret material from the imported accounts vault for the account's network.
 
@@ -23,19 +20,6 @@ The system SHALL resolve account material through the account's source kind and 
 - **THEN** the system resolves the imported accounts vault for the account's network genesis hash
 - **AND** decrypts the imported account signing material from that vault
 
-### Requirement: Imported signing material supports normal account transaction signing
-Imported account secret material SHALL contain the signing keys and account credential metadata necessary to sign normal account transactions for the imported account.
-
-#### Scenario: Imported signing payload contains account signing keys
-- **WHEN** a genesis account JSON file is imported successfully
-- **THEN** the stored imported account secret payload contains the account signing key material needed for transactions
-- **AND** the signing key material is encrypted at rest
-
-#### Scenario: Signing resolver rejects incomplete imported payload
-- **WHEN** a signing operation targets an imported account whose encrypted payload is missing required signing material
-- **THEN** signing material resolution fails with an actionable error
-- **AND** no unsigned or partially signed transaction is submitted
-
 ### Requirement: Account labels identify signing source unambiguously within a network
 The system SHALL rely on network-wide account label uniqueness to resolve a target account before selecting a signing source. It SHALL NOT permit separate seed-derived, Ledger-derived, or imported accounts with the same label on the same network.
 
@@ -49,6 +33,8 @@ The system SHALL rely on network-wide account label uniqueness to resolve a targ
 - **WHEN** a derived or imported account already uses label `baker-0` on a network
 - **AND** the user attempts to create or import another account with label `baker-0` on the same network
 - **THEN** the operation is rejected before any signing-source ambiguity is introduced
+
+## ADDED Requirements
 
 ### Requirement: Ledger signing failures do not submit transactions
 The system SHALL treat Ledger unavailability, owner mismatch, unsupported Ledger command flows, and user rejection on the device as signing failures. The wallet SHALL NOT submit unsigned, partially signed, or locally fallback-signed transactions for Ledger-backed accounts when Ledger signing fails.
@@ -64,4 +50,3 @@ The system SHALL treat Ledger unavailability, owner mismatch, unsupported Ledger
 - **AND** the wallet cannot map the transaction to a supported Ledger app signing command
 - **THEN** signing fails with an actionable error
 - **AND** no transaction is submitted
-

@@ -3,9 +3,12 @@ use crate::{
         AccountExportArgs, AccountImportGenesisArgs, AccountImportSubcommand, AccountListArgs,
         AccountNewArgs, AccountRenameArgs, AccountShowArgs, AccountSubcommand,
     },
-    commands::ui::{
-        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_always,
-        fuzzy_select_or_single, log_resolved_context, select_or_single,
+    commands::{
+        ledger_construction::{self, LedgerCredentialDeploymentInput},
+        ui::{
+            ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_always,
+            fuzzy_select_or_single, log_resolved_context, select_or_single,
+        },
     },
 };
 use anyhow::{Context, Result, bail};
@@ -20,7 +23,9 @@ use ccd_wallet_core::{
         config::{AppConfig, NetworkEntry, load},
         crypto::KEY_LEN,
         identities::{self, IdentityRecord, IdentityStatus},
-        seeds, wallet_state,
+        seeds,
+        signer_owners::{self, SignerOwnerKind},
+        wallet_state,
     },
     wallet::{ConcordiumHdWallet, Net},
 };
@@ -104,27 +109,28 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
 
     log_scope_context(&seed_scope, &network_scope)?;
 
-    let seeds_by_id = seed_labels_by_id(conn)?;
+    let key_source_labels_by_id = seed_labels_by_id(conn)?;
+    let key_source_tags_by_id = key_source_tags_by_id(conn)?;
     let networks_by_hash = network_names_by_genesis_hash()?;
     let mut accounts = accounts::list(conn)?
         .into_iter()
-        .filter(|record| matches_seed_scope(record, &seed_scope, &seeds_by_id))
+        .filter(|record| matches_seed_scope(record, &seed_scope, &key_source_labels_by_id))
         .filter(|record| matches_network_scope(record, &network_scope, &networks_by_hash))
         .filter(|record| matches_account_status(record, status_filter))
         .collect::<Vec<_>>();
     accounts.sort_by(|a, b| a.label.cmp(&b.label));
 
     let address_map = if args.show_addresses {
-        load_account_addresses(conn, &accounts, &seeds_by_id, &seed_scope)?
+        load_account_addresses(conn, &accounts, &key_source_labels_by_id, &seed_scope)?
     } else {
         BTreeMap::new()
     };
 
     for record in accounts {
-        let seed_label = seeds_by_id
-            .get(&record.seed_id)
+        let seed_label = key_source_tags_by_id
+            .get(&record.signer_owner_id)
             .cloned()
-            .unwrap_or_else(|| "<unknown-seed>".to_owned());
+            .unwrap_or_else(|| "unknown-key-source".to_owned());
         let network_name = networks_by_hash
             .get(&record.network_genesis_hash)
             .cloned()
@@ -420,7 +426,7 @@ fn local_metadata_for_record(
         Some(
             seeds::list(conn)?
                 .into_iter()
-                .find(|seed| seed.id == record.seed_id)
+                .find(|seed| seed.id == record.signer_owner_id)
                 .map(|seed| seed.label)
                 .context("selected account references unknown seed")?,
         )
@@ -443,7 +449,7 @@ fn decrypt_local_account_address(
         accounts::AccountSourceKind::Derived => {
             let seed_label = seeds::list(conn)?
                 .into_iter()
-                .find(|seed| seed.id == record.seed_id)
+                .find(|seed| seed.id == record.signer_owner_id)
                 .map(|seed| seed.label)
                 .context("selected account references unknown seed")?;
             let password: String = password(format!("Password for seed '{}':", seed_label))
@@ -793,7 +799,7 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
 }
 
 async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
-    let (seed_label, seed_source) = resolve_seed_label(
+    let (key_source_label, key_source_source) = resolve_seed_label(
         conn,
         args.seed.as_deref(),
         args.non_interactive,
@@ -811,9 +817,9 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
 
     log_resolved_context(&[
         ContextLine {
-            label: "seed:",
-            value: seed_label.clone(),
-            source: seed_source,
+            label: "key source:",
+            value: key_source_label.clone(),
+            source: key_source_source,
         },
         ContextLine {
             label: "network:",
@@ -822,12 +828,12 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         },
     ])?;
 
-    let seed = seeds::find_by_label(conn, &seed_label)?
-        .with_context(|| format!("seed '{}' is not configured", seed_label))?;
+    let owner = signer_owners::find_by_label(conn, &key_source_label)?
+        .with_context(|| format!("key source '{}' is not configured", key_source_label))?;
     let (mut identity, identity_source) = resolve_identity(
         conn,
         &network_entry.genesis_hash,
-        &seed.id,
+        &owner.id,
         args.identity.as_deref(),
         args.non_interactive,
     )?;
@@ -848,6 +854,33 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         source: identity_source,
     }])?;
 
+    if owner.kind == SignerOwnerKind::Ledger {
+        let details = signer_owners::find_ledger_details_by_owner_id(conn, &owner.id)?
+            .with_context(|| {
+                format!(
+                    "Ledger key source '{}' has no enrollment details",
+                    owner.label
+                )
+            })?;
+        let credential_counter = accounts::next_credential_counter(
+            conn,
+            &network_entry.genesis_hash,
+            &owner.id,
+            identity.ip_identity,
+            identity.identity_index,
+        )?;
+        let credential_counter_u8 = credential_counter_to_u8(credential_counter)?;
+        ledger_construction::construct_credential_deployment(LedgerCredentialDeploymentInput {
+            owner_details: &details,
+            network_genesis_hash: &network_entry.genesis_hash,
+            ip_identity: identity.ip_identity,
+            identity_index: identity.identity_index,
+            credential_counter: credential_counter_u8,
+        })?;
+    }
+
+    let seed = seeds::find_by_label(conn, &key_source_label)?
+        .with_context(|| format!("seed '{}' is not configured", key_source_label))?;
     let password: String = password(format!("Password for seed '{}': ", seed.label)).interact()?;
     let unlocked_seed = seeds::unlock_context(conn, &seed.label, &password)?;
 
@@ -919,7 +952,7 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         conn,
         accounts::PendingAccount {
             network_genesis_hash: &network_entry.genesis_hash,
-            seed_id: &unlocked_seed.record.id,
+            signer_owner_id: &unlocked_seed.record.id,
             ip_identity: identity.ip_identity,
             identity_index: identity.identity_index,
             credential_counter,
@@ -984,9 +1017,22 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
 }
 
 fn seed_labels_by_id(conn: &Connection) -> Result<BTreeMap<String, String>> {
-    Ok(seeds::list(conn)?
+    Ok(signer_owners::list(conn)?
         .into_iter()
-        .map(|seed| (seed.id, seed.label))
+        .map(|owner| (owner.id, owner.label))
+        .collect())
+}
+
+fn key_source_tags_by_id(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    Ok(signer_owners::list(conn)?
+        .into_iter()
+        .map(|owner| {
+            let prefix = match owner.kind {
+                SignerOwnerKind::Seed => "seed",
+                SignerOwnerKind::Ledger => "ledger",
+            };
+            (owner.id, format!("{prefix}:{}", owner.label))
+        })
         .collect())
 }
 
@@ -1046,9 +1092,9 @@ fn resolve_account_list_seed_scope(
 ) -> Result<(ScopeSelection, ResolutionSource)> {
     match explicit {
         Some("all") => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
-        Some(label) => seeds::find_by_label(conn, label)?
-            .map(|seed| (ScopeSelection::One(seed.label), ResolutionSource::Explicit))
-            .with_context(|| format!("seed '{}' is not configured", label)),
+        Some(label) => signer_owners::find_by_label(conn, label)?
+            .map(|owner| (ScopeSelection::One(owner.label), ResolutionSource::Explicit))
+            .with_context(|| format!("key source '{}' is not configured", label)),
         None => Ok((ScopeSelection::All, ResolutionSource::Inferred)),
     }
 }
@@ -1059,10 +1105,10 @@ fn resolve_seed_scope_for_addresses(
     _non_interactive: bool,
 ) -> Result<ScopeSelection> {
     match explicit {
-        Some(label) => seeds::find_by_label(conn, label)?
-            .map(|seed| ScopeSelection::One(seed.label))
-            .with_context(|| format!("seed '{}' is not configured", label)),
-        None => bail!("`--seed <LABEL>` is required with `--show-addresses`"),
+        Some(label) => signer_owners::find_by_label(conn, label)?
+            .map(|owner| ScopeSelection::One(owner.label))
+            .with_context(|| format!("key source '{}' is not configured", label)),
+        None => bail!("`--key-source <LABEL>` is required with `--show-addresses`"),
     }
 }
 
@@ -1097,7 +1143,7 @@ fn log_scope_context(
 ) -> Result<()> {
     log_resolved_context(&[
         ContextLine {
-            label: "seed:",
+            label: "key source:",
             value: match &seed_scope.0 {
                 ScopeSelection::All => "all".to_owned(),
                 ScopeSelection::One(value) => value.clone(),
@@ -1125,7 +1171,7 @@ fn matches_seed_scope(
     }
     match &scope.0 {
         ScopeSelection::All => true,
-        ScopeSelection::One(label) => labels.get(&record.seed_id) == Some(label),
+        ScopeSelection::One(label) => labels.get(&record.signer_owner_id) == Some(label),
     }
 }
 
@@ -1161,7 +1207,7 @@ fn seed_scope_matches_record(
         Some(ScopeSelection::All) => true,
         Some(ScopeSelection::One(label)) => {
             record.source_kind == accounts::AccountSourceKind::Imported
-                || labels.get(&record.seed_id) == Some(label)
+                || labels.get(&record.signer_owner_id) == Some(label)
         }
     }
 }
@@ -1182,7 +1228,7 @@ fn load_account_addresses(
                 .push(record);
         } else {
             by_seed
-                .entry(record.seed_id.clone())
+                .entry(record.signer_owner_id.clone())
                 .or_default()
                 .push(record);
         }
@@ -1203,15 +1249,16 @@ fn load_account_addresses(
         }
     }
 
-    for (seed_id, seed_records) in by_seed {
-        let seed_label = seeds_by_id
-            .get(&seed_id)
-            .context("account references unknown seed")?;
-        let password: String = password(format!("Password for seed '{}': ", seed_label))
-            .allow_empty()
-            .interact()?;
-        let unlocked = seeds::unlock_context(conn, seed_label, &password)?;
-        for record in seed_records {
+    for (signer_owner_id, owner_records) in by_seed {
+        let key_source_label = seeds_by_id
+            .get(&signer_owner_id)
+            .context("account references unknown key source")?;
+        let password: String =
+            password(format!("Password for key source '{}': ", key_source_label))
+                .allow_empty()
+                .interact()?;
+        let unlocked = signer_owners::unlock_by_id(conn, &signer_owner_id, &password)?;
+        for record in owner_records {
             let payload = accounts::decrypt_private_payload(conn, record.id, &unlocked.dek)?;
             addresses.insert(record.id, payload.account_address);
         }
@@ -1295,7 +1342,7 @@ fn select_account_fuzzy(
         .iter()
         .map(|record| {
             let seed_label = seeds_by_id
-                .get(&record.seed_id)
+                .get(&record.signer_owner_id)
                 .cloned()
                 .unwrap_or_else(|| "<unknown-seed>".to_owned());
             let network_name = networks_by_hash
@@ -1546,7 +1593,7 @@ pub(crate) fn account_reference_suggestions(
         .map(|record| {
             let owner = match record.source_kind {
                 accounts::AccountSourceKind::Derived => seeds_by_id
-                    .get(&record.seed_id)
+                    .get(&record.signer_owner_id)
                     .map(|seed_label| format!("[{seed_label}]"))
                     .unwrap_or_else(|| "[<unknown-seed>]".to_owned()),
                 accounts::AccountSourceKind::Imported => "[imported]".to_owned(),
@@ -1743,7 +1790,7 @@ fn decrypt_local_account_reference_address(
         accounts::AccountSourceKind::Derived => {
             let seed = seeds::list(conn)?
                 .into_iter()
-                .find(|seed| seed.id == record.seed_id)
+                .find(|seed| seed.id == record.signer_owner_id)
                 .context("selected account references unknown seed")?;
             if !unlocks.seed_deks.contains_key(&seed.id) {
                 let password: String = password(format!("Password for seed '{}':", seed.label))
@@ -1845,9 +1892,10 @@ fn build_derived_export_wallet_account(
     account: &accounts::AccountRecord,
     unlocks: &mut AccountReferenceUnlocks,
 ) -> Result<WalletAccount> {
+    ensure_seed_backed_derived_account(conn, account)?;
     let seed = seeds::list(conn)?
         .into_iter()
-        .find(|seed| seed.id == account.seed_id)
+        .find(|seed| seed.id == account.signer_owner_id)
         .context("selected account references unknown seed")?;
     let password: String = password(format!("Password for seed '{}':", seed.label))
         .allow_empty()
@@ -1890,6 +1938,25 @@ fn wallet_account_from_derived_parts(
             threshold: SignatureThreshold::ONE,
         }),
     })
+}
+
+fn ensure_seed_backed_derived_account(
+    conn: &Connection,
+    account: &accounts::AccountRecord,
+) -> Result<()> {
+    let owner = signer_owners::find_by_id(conn, &account.signer_owner_id)?.with_context(|| {
+        format!(
+            "derived account '{}' references unknown key source",
+            account.label
+        )
+    })?;
+    if owner.kind == SignerOwnerKind::Ledger {
+        bail!(
+            "Ledger-backed account '{}' cannot be signed by local seed material yet; Ledger transaction signing is not yet supported and no transaction was submitted",
+            account.label
+        );
+    }
+    Ok(())
 }
 
 fn build_imported_export_wallet_account(
@@ -2093,9 +2160,9 @@ fn resolve_seed_label(
     no_defaults: bool,
 ) -> Result<(String, ResolutionSource)> {
     match explicit {
-        Some(label) => seeds::find_by_label(conn, label)?
-            .map(|s| (s.label, ResolutionSource::Explicit))
-            .with_context(|| format!("seed '{}' is not configured", label)),
+        Some(label) => signer_owners::find_by_label(conn, label)?
+            .map(|owner| (owner.label, ResolutionSource::Explicit))
+            .with_context(|| format!("key source '{}' is not configured", label)),
         None => {
             let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
             if no_defaults {
@@ -2107,7 +2174,7 @@ fn resolve_seed_label(
             match active {
                 Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
                 None if non_interactive => bail!(
-                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
+                    "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`."
                 ),
                 None => Ok((
                     prompt_for_seed_label(conn, None)?,
@@ -2139,22 +2206,22 @@ fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<Stri
 fn resolve_identity(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     explicit: Option<&str>,
     non_interactive: bool,
 ) -> Result<(IdentityRecord, ResolutionSource)> {
     let now = now_unix_seconds()?;
     match explicit {
         Some(label) => {
-            let identity = identities::find_by_network_seed_and_label(
+            let identity = identities::find_by_network_signer_owner_and_label(
                 conn,
                 network_genesis_hash,
-                seed_id,
+                signer_owner_id,
                 label,
             )?
             .with_context(|| {
                 format!(
-                    "identity '{}' is not configured for the selected seed and network",
+                    "identity '{}' is not configured for the selected key source and network",
                     label
                 )
             })?;
@@ -2165,7 +2232,7 @@ fn resolve_identity(
             "identity label must be provided in --non-interactive mode with `--identity <LABEL>`"
         ),
         None => Ok((
-            prompt_for_identity(conn, network_genesis_hash, seed_id, now)?,
+            prompt_for_identity(conn, network_genesis_hash, signer_owner_id, now)?,
             ResolutionSource::Prompted,
         )),
     }
@@ -2174,10 +2241,11 @@ fn resolve_identity(
 fn prompt_for_identity(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     now: i64,
 ) -> Result<IdentityRecord> {
-    let identities = identities::list_by_network_and_seed(conn, network_genesis_hash, seed_id)?;
+    let identities =
+        identities::list_by_network_and_signer_owner(conn, network_genesis_hash, signer_owner_id)?;
     let expired_count = identities
         .iter()
         .filter(|identity| {
@@ -2256,10 +2324,10 @@ async fn confirm_identity_if_pending(
         }
         PollResult::Done(token) => {
             identities::set_done(conn, identity.id, seed_dek, token)?;
-            identities::find_by_network_seed_and_label(
+            identities::find_by_network_signer_owner_and_label(
                 conn,
                 &identity.network_genesis_hash,
-                &identity.seed_id,
+                &identity.signer_owner_id,
                 &identity.label,
             )?
             .with_context(|| {
@@ -2599,7 +2667,7 @@ mod tests {
     fn identity(status: IdentityStatus, expires_at: Option<i64>) -> IdentityRecord {
         IdentityRecord {
             id: 1,
-            seed_id: "seed-id".to_owned(),
+            signer_owner_id: "seed-id".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
             ip_identity: 7,
             identity_index: 0,
@@ -2613,7 +2681,7 @@ mod tests {
     fn derived_record() -> accounts::AccountRecord {
         accounts::AccountRecord {
             id: 1,
-            seed_id: "seed-id".to_owned(),
+            signer_owner_id: "seed-id".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
             ip_identity: 0,
             identity_index: 0,
@@ -2664,7 +2732,7 @@ mod tests {
 
     fn finalized_derived_account(
         conn: &mut Connection,
-        seed_id: &str,
+        signer_owner_id: &str,
         dek: &[u8; KEY_LEN],
         network_genesis_hash: &str,
         label: &str,
@@ -2675,7 +2743,7 @@ mod tests {
             conn,
             accounts::PendingAccount {
                 network_genesis_hash,
-                seed_id,
+                signer_owner_id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter,
@@ -2685,6 +2753,57 @@ mod tests {
         .unwrap();
         accounts::set_finalized(conn, id, dek, None, address).unwrap();
         id
+    }
+
+    #[test]
+    fn ledger_derived_export_fails_before_local_seed_signing() {
+        let conn = conn();
+        let owner = signer_owners::create(&conn, SignerOwnerKind::Ledger, "ledger").unwrap();
+        signer_owners::create_vault(&conn, &owner.id, "password").unwrap();
+        signer_owners::insert_ledger_details(
+            &conn,
+            signer_owners::NewLedgerOwnerDetails {
+                signer_owner_id: &owner.id,
+                canonical_public_key: &[7; 32],
+                fingerprint: "ledgerfp",
+                enrollment_path: signer_owners::LEDGER_OWNER_ENROLLMENT_PATH,
+                app_name: Some("Concordium"),
+            },
+        )
+        .unwrap();
+        let account = accounts::AccountRecord {
+            id: 1,
+            signer_owner_id: owner.id,
+            network_genesis_hash: "genesis".to_owned(),
+            ip_identity: 7,
+            identity_index: 0,
+            credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
+            label: "ledger-account".to_owned(),
+            status: accounts::AccountStatus::Finalized,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let entry = NetworkEntry {
+            node_endpoint: "https://grpc.testnet.concordium.com:20000".to_owned(),
+            genesis_hash: "genesis".to_owned(),
+            wallet_proxy: None,
+        };
+        let mut unlocks = AccountReferenceUnlocks::new();
+        let err = build_export_wallet_account_with_unlocks(
+            &conn,
+            "testnet",
+            &entry,
+            &account,
+            &mut unlocks,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Ledger-backed account"));
+        assert!(err.to_string().contains("no transaction was submitted"));
     }
 
     #[test]
@@ -2766,7 +2885,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 0,
@@ -2867,7 +2986,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 1,
@@ -2955,7 +3074,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 0,
@@ -3000,7 +3119,7 @@ mod tests {
     fn account_status_filter_matches_status() {
         let pending = accounts::AccountRecord {
             id: 1,
-            seed_id: "seed-id".to_owned(),
+            signer_owner_id: "seed-id".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
             ip_identity: 0,
             identity_index: 0,
@@ -3039,7 +3158,7 @@ mod tests {
     fn render_account_fuzzy_text_uses_bracket_first_rows() {
         let pending = accounts::AccountRecord {
             id: 1,
-            seed_id: "seed-id".to_owned(),
+            signer_owner_id: "seed-id".to_owned(),
             network_genesis_hash: "genesis".to_owned(),
             ip_identity: 0,
             identity_index: 0,
@@ -3072,13 +3191,17 @@ mod tests {
             render_account_fuzzy_text(&finalized, "test", "testnet", None, false),
             "[test] finalized-account • provider:0 • identity:0 • cred:0"
         );
+        assert_eq!(
+            render_account_fuzzy_text(&finalized, "ledger:hardware", "testnet", None, true),
+            "[ledger:hardware] finalized-account - testnet • provider:0 • identity:0 • cred:0"
+        );
 
         let imported = accounts::AccountRecord {
             source_kind: accounts::AccountSourceKind::Imported,
             imported_vault_id: Some("vault".to_owned()),
             import_kind: Some("genesis".to_owned()),
             source_metadata_json: None,
-            seed_id: String::new(),
+            signer_owner_id: String::new(),
             label: "baker-0".to_owned(),
             ..finalized
         };
@@ -3121,7 +3244,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis-1",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 0,
@@ -3133,7 +3256,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis-2",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 1,
@@ -3281,7 +3404,7 @@ mod tests {
         let err = resolve_seed_scope_for_addresses(&conn, None, true).unwrap_err();
         assert!(
             err.to_string()
-                .contains("`--seed <LABEL>` is required with `--show-addresses`")
+                .contains("`--key-source <LABEL>` is required with `--show-addresses`")
         );
     }
 
@@ -3311,7 +3434,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis-a",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 0,
@@ -3332,7 +3455,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis-a",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 1,
@@ -3344,7 +3467,7 @@ mod tests {
             &conn,
             accounts::PendingAccount {
                 network_genesis_hash: "genesis-b",
-                seed_id: &seed.id,
+                signer_owner_id: &seed.id,
                 ip_identity: 0,
                 identity_index: 0,
                 credential_counter: 2,

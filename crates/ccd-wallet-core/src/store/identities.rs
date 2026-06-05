@@ -13,7 +13,7 @@ const IDENTITY_PRIVATE_PAYLOAD_KIND: &str = "identity_private_payload";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityRecord {
     pub id: i64,
-    pub seed_id: String,
+    pub signer_owner_id: String,
     pub network_genesis_hash: String,
     pub ip_identity: u32,
     pub identity_index: u32,
@@ -55,13 +55,13 @@ impl IdentityStatus {
 pub fn next_index(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     ip_identity: u32,
 ) -> Result<u32> {
     let max_index: Option<u32> = conn
         .query_row(
-            "SELECT MAX(identity_index) FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3",
-            params![network_genesis_hash, seed_id, ip_identity],
+            "SELECT MAX(identity_index) FROM identities WHERE network_genesis_hash = ?1 AND signer_owner_id = ?2 AND ip_identity = ?3",
+            params![network_genesis_hash, signer_owner_id, ip_identity],
             |row| row.get(0),
         )
         .context("failed to query next identity index")?;
@@ -71,7 +71,7 @@ pub fn next_index(
 
 pub struct PendingIdentity<'a> {
     pub network_genesis_hash: &'a str,
-    pub seed_id: &'a str,
+    pub signer_owner_id: &'a str,
     pub ip_identity: u32,
     pub identity_index: u32,
     pub label: &'a str,
@@ -80,7 +80,7 @@ pub struct PendingIdentity<'a> {
 
 pub fn insert_pending(
     conn: &mut Connection,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     pending: PendingIdentity<'_>,
 ) -> Result<i64> {
     if find_by_network_and_label(conn, pending.network_genesis_hash, pending.label)?.is_some() {
@@ -91,20 +91,20 @@ pub fn insert_pending(
         );
     }
 
-    if find_by_network_seed_ip_and_index(
+    if find_by_network_signer_owner_ip_and_index(
         conn,
         pending.network_genesis_hash,
-        pending.seed_id,
+        pending.signer_owner_id,
         pending.ip_identity,
         pending.identity_index,
     )?
     .is_some()
     {
         bail!(
-            "identity index {} for provider {} already exists for seed '{}' on network '{}'",
+            "identity index {} for provider {} already exists for signer owner '{}' on network '{}'",
             pending.identity_index,
             pending.ip_identity,
-            pending.seed_id,
+            pending.signer_owner_id,
             pending.network_genesis_hash
         );
     }
@@ -115,10 +115,10 @@ pub fn insert_pending(
     let created_at = now_unix_seconds()?;
     tx.execute(
         "INSERT INTO identities (
-            seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
+            signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            pending.seed_id,
+            pending.signer_owner_id,
             pending.network_genesis_hash,
             pending.ip_identity,
             pending.identity_index,
@@ -132,7 +132,7 @@ pub fn insert_pending(
 
     let record = IdentityRecord {
         id,
-        seed_id: pending.seed_id.to_owned(),
+        signer_owner_id: pending.signer_owner_id.to_owned(),
         network_genesis_hash: pending.network_genesis_hash.to_owned(),
         ip_identity: pending.ip_identity,
         identity_index: pending.identity_index,
@@ -145,7 +145,7 @@ pub fn insert_pending(
         code_uri: pending.code_uri.to_owned(),
         identity_object: None,
     };
-    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    upsert_private_payload_in_tx(&tx, &record, signer_owner_dek, &payload)?;
     tx.commit()
         .context("failed to commit identity insert transaction")?;
 
@@ -155,7 +155,7 @@ pub fn insert_pending(
 pub fn set_done(
     conn: &mut Connection,
     id: i64,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     identity_object: serde_json::Value,
 ) -> Result<()> {
     let tx = conn
@@ -163,7 +163,7 @@ pub fn set_done(
         .context("failed to start identity update transaction")?;
     let mut record = find_by_id_in_tx(&tx, id)?;
     let expires_at = extract_identity_expires_at(&identity_object);
-    let mut payload = decrypt_private_payload_in_tx(&tx, &record, seed_dek)?;
+    let mut payload = decrypt_private_payload_in_tx(&tx, &record, signer_owner_dek)?;
     payload.identity_object = Some(identity_object);
 
     let affected = tx
@@ -179,7 +179,7 @@ pub fn set_done(
 
     record.status = IdentityStatus::Done;
     record.expires_at = expires_at;
-    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    upsert_private_payload_in_tx(&tx, &record, signer_owner_dek, &payload)?;
     tx.commit()
         .context("failed to commit identity done transaction")?;
     Ok(())
@@ -187,7 +187,7 @@ pub fn set_done(
 
 pub struct RecoveredIdentity<'a> {
     pub network_genesis_hash: &'a str,
-    pub seed_id: &'a str,
+    pub signer_owner_id: &'a str,
     pub ip_identity: u32,
     pub identity_index: u32,
     pub label: &'a str,
@@ -196,21 +196,21 @@ pub struct RecoveredIdentity<'a> {
 
 pub fn import_recovered(
     conn: &mut Connection,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     recovered: RecoveredIdentity<'_>,
 ) -> Result<(IdentityRecord, bool)> {
     let tx = conn
         .transaction()
         .context("failed to start recovered identity import transaction")?;
 
-    if let Some(existing) = find_by_network_seed_ip_and_index(
+    if let Some(existing) = find_by_network_signer_owner_ip_and_index(
         &tx,
         recovered.network_genesis_hash,
-        recovered.seed_id,
+        recovered.signer_owner_id,
         recovered.ip_identity,
         recovered.identity_index,
     )? {
-        let mut payload = decrypt_private_payload_in_tx(&tx, &existing, seed_dek)?;
+        let mut payload = decrypt_private_payload_in_tx(&tx, &existing, signer_owner_dek)?;
         payload.identity_object = Some(recovered.identity_object.clone());
         let expires_at = extract_identity_expires_at(recovered.identity_object);
 
@@ -225,7 +225,7 @@ pub fn import_recovered(
             expires_at,
             ..existing
         };
-        upsert_private_payload_in_tx(&tx, &updated, seed_dek, &payload)?;
+        upsert_private_payload_in_tx(&tx, &updated, signer_owner_dek, &payload)?;
         tx.commit()
             .context("failed to commit recovered identity update transaction")?;
         return Ok((updated, false));
@@ -243,10 +243,10 @@ pub fn import_recovered(
     let expires_at = extract_identity_expires_at(recovered.identity_object);
     tx.execute(
         "INSERT INTO identities (
-            seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+            signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            recovered.seed_id,
+            recovered.signer_owner_id,
             recovered.network_genesis_hash,
             recovered.ip_identity,
             recovered.identity_index,
@@ -260,7 +260,7 @@ pub fn import_recovered(
 
     let record = IdentityRecord {
         id: tx.last_insert_rowid(),
-        seed_id: recovered.seed_id.to_owned(),
+        signer_owner_id: recovered.signer_owner_id.to_owned(),
         network_genesis_hash: recovered.network_genesis_hash.to_owned(),
         ip_identity: recovered.ip_identity,
         identity_index: recovered.identity_index,
@@ -273,7 +273,7 @@ pub fn import_recovered(
         code_uri: String::new(),
         identity_object: Some(recovered.identity_object.clone()),
     };
-    upsert_private_payload_in_tx(&tx, &record, seed_dek, &payload)?;
+    upsert_private_payload_in_tx(&tx, &record, signer_owner_dek, &payload)?;
     tx.commit()
         .context("failed to commit recovered identity insert transaction")?;
     Ok((record, true))
@@ -336,7 +336,7 @@ pub fn distinct_network_genesis_hashes(conn: &Connection) -> Result<Vec<String>>
 pub fn list(conn: &Connection) -> Result<Vec<IdentityRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+            "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
              FROM identities ORDER BY label",
         )
         .context("failed to prepare identity list query")?;
@@ -349,35 +349,36 @@ pub fn list(conn: &Connection) -> Result<Vec<IdentityRecord>> {
         .context("failed to read identity rows")
 }
 
-pub fn list_by_network_and_seed(
+pub fn list_by_network_and_signer_owner(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
 ) -> Result<Vec<IdentityRecord>> {
     Ok(list(conn)?
         .into_iter()
         .filter(|record| {
-            record.network_genesis_hash == network_genesis_hash && record.seed_id == seed_id
+            record.network_genesis_hash == network_genesis_hash
+                && record.signer_owner_id == signer_owner_id
         })
         .collect())
 }
 
-pub fn find_by_network_seed_and_label(
+pub fn find_by_network_signer_owner_and_label(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     label: &str,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
-         FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND label = ?3",
-        params![network_genesis_hash, seed_id, label],
+        "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+         FROM identities WHERE network_genesis_hash = ?1 AND signer_owner_id = ?2 AND label = ?3",
+        params![network_genesis_hash, signer_owner_id, label],
         map_identity_row,
     )
     .optional()
     .with_context(|| {
         format!(
-            "failed to query identity '{label}' for seed '{seed_id}' on network '{network_genesis_hash}'"
+            "failed to query identity '{label}' for signer owner '{signer_owner_id}' on network '{network_genesis_hash}'"
         )
     })
 }
@@ -388,7 +389,7 @@ pub fn find_by_network_and_label(
     label: &str,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+        "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE network_genesis_hash = ?1 AND label = ?2",
         params![network_genesis_hash, label],
         map_identity_row,
@@ -401,23 +402,23 @@ pub fn find_by_network_and_label(
     })
 }
 
-pub fn find_by_network_seed_ip_and_index(
+pub fn find_by_network_signer_owner_ip_and_index(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     ip_identity: u32,
     identity_index: u32,
 ) -> Result<Option<IdentityRecord>> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
-         FROM identities WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3 AND identity_index = ?4",
-        params![network_genesis_hash, seed_id, ip_identity, identity_index],
+        "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+         FROM identities WHERE network_genesis_hash = ?1 AND signer_owner_id = ?2 AND ip_identity = ?3 AND identity_index = ?4",
+        params![network_genesis_hash, signer_owner_id, ip_identity, identity_index],
         map_identity_row,
     )
     .optional()
     .with_context(|| {
         format!(
-            "failed to query identity index {identity_index} for seed '{seed_id}', provider {ip_identity}, network '{network_genesis_hash}'"
+            "failed to query identity index {identity_index} for signer owner '{signer_owner_id}', provider {ip_identity}, network '{network_genesis_hash}'"
         )
     })
 }
@@ -425,10 +426,10 @@ pub fn find_by_network_seed_ip_and_index(
 pub fn decrypt_private_payload(
     conn: &Connection,
     id: i64,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<IdentityPrivatePayload> {
     let record = find_by_id(conn, id)?;
-    decrypt_private_payload_for_record(conn, &record, seed_dek)
+    decrypt_private_payload_for_record(conn, &record, signer_owner_dek)
 }
 
 pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
@@ -457,7 +458,7 @@ pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
 
 pub fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
     conn.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+        "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE id = ?1",
         params![id],
         map_identity_row,
@@ -469,7 +470,7 @@ pub fn find_by_id(conn: &Connection, id: i64) -> Result<IdentityRecord> {
 
 fn find_by_id_in_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<IdentityRecord> {
     tx.query_row(
-        "SELECT id, seed_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
+        "SELECT id, signer_owner_id, network_genesis_hash, ip_identity, identity_index, label, status, created_at, expires_at
          FROM identities WHERE id = ?1",
         params![id],
         map_identity_row,
@@ -482,7 +483,7 @@ fn find_by_id_in_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<IdentityR
 fn decrypt_private_payload_for_record(
     conn: &Connection,
     record: &IdentityRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<IdentityPrivatePayload> {
     conn.query_row(
         "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
@@ -499,14 +500,14 @@ fn decrypt_private_payload_for_record(
     .with_context(|| format!("failed to query private payload for identity {}", record.id))?
     .with_context(|| format!("identity {} has no private payload", record.id))
     .and_then(|(cipher_version, ciphertext, nonce)| {
-        decrypt_payload_bytes(record, seed_dek, cipher_version, &ciphertext, &nonce)
+        decrypt_payload_bytes(record, signer_owner_dek, cipher_version, &ciphertext, &nonce)
     })
 }
 
 fn decrypt_private_payload_in_tx(
     tx: &rusqlite::Transaction<'_>,
     record: &IdentityRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<IdentityPrivatePayload> {
     tx.query_row(
         "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
@@ -523,19 +524,19 @@ fn decrypt_private_payload_in_tx(
     .with_context(|| format!("failed to query private payload for identity {}", record.id))?
     .with_context(|| format!("identity {} has no private payload", record.id))
     .and_then(|(cipher_version, ciphertext, nonce)| {
-        decrypt_payload_bytes(record, seed_dek, cipher_version, &ciphertext, &nonce)
+        decrypt_payload_bytes(record, signer_owner_dek, cipher_version, &ciphertext, &nonce)
     })
 }
 
 fn decrypt_payload_bytes(
     record: &IdentityRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     cipher_version: u32,
     ciphertext: &[u8],
     nonce: &[u8],
 ) -> Result<IdentityPrivatePayload> {
     let aad = identity_payload_aad(record, cipher_version);
-    let plaintext = aead_decrypt(seed_dek, nonce, ciphertext, &aad).with_context(|| {
+    let plaintext = aead_decrypt(signer_owner_dek, nonce, ciphertext, &aad).with_context(|| {
         format!(
             "failed to decrypt private payload for identity {}",
             record.id
@@ -548,7 +549,7 @@ fn decrypt_payload_bytes(
 fn upsert_private_payload_in_tx(
     tx: &rusqlite::Transaction<'_>,
     record: &IdentityRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     payload: &IdentityPrivatePayload,
 ) -> Result<()> {
     let plaintext = Zeroizing::new(serde_json::to_vec(payload).with_context(|| {
@@ -558,12 +559,13 @@ fn upsert_private_payload_in_tx(
         )
     })?);
     let aad = identity_payload_aad(record, CIPHER_VERSION);
-    let (ciphertext, nonce) = aead_encrypt(seed_dek, &plaintext, &aad).with_context(|| {
-        format!(
-            "failed to encrypt private payload for identity {}",
-            record.id
-        )
-    })?;
+    let (ciphertext, nonce) =
+        aead_encrypt(signer_owner_dek, &plaintext, &aad).with_context(|| {
+            format!(
+                "failed to encrypt private payload for identity {}",
+                record.id
+            )
+        })?;
 
     tx.execute(
         "INSERT INTO identity_private_payloads (identity_id, cipher_version, ciphertext, nonce)
@@ -585,7 +587,7 @@ fn identity_payload_aad(record: &IdentityRecord, cipher_version: u32) -> Vec<u8>
             "{}:{}:{}:{}:{}",
             record.id,
             record.network_genesis_hash,
-            record.seed_id,
+            record.signer_owner_id,
             record.ip_identity,
             record.identity_index
         ),
@@ -598,7 +600,7 @@ fn map_identity_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityRecord>
     let status: String = row.get(6)?;
     Ok(IdentityRecord {
         id: row.get(0)?,
-        seed_id: row.get(1)?,
+        signer_owner_id: row.get(1)?,
         network_genesis_hash: row.get(2)?,
         ip_identity: row.get(3)?,
         identity_index: row.get(4)?,
@@ -678,7 +680,10 @@ pub fn test_key(byte: u8) -> Zeroizing<[u8; KEY_LEN]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{migrations, seeds};
+    use crate::store::{
+        migrations, seeds,
+        signer_owners::{self, SignerOwnerKind},
+    };
 
     const MAINNET: &str = "mainnet-hash";
     const TESTNET: &str = "testnet-hash";
@@ -696,12 +701,29 @@ mod tests {
         (record.id, unlocked.dek)
     }
 
+    fn ledger_owner(conn: &Connection, label: &str) -> (String, Zeroizing<[u8; KEY_LEN]>) {
+        let owner = signer_owners::create(conn, SignerOwnerKind::Ledger, label).unwrap();
+        let dek = signer_owners::create_vault(conn, &owner.id, "password").unwrap();
+        signer_owners::insert_ledger_details(
+            conn,
+            signer_owners::NewLedgerOwnerDetails {
+                signer_owner_id: &owner.id,
+                canonical_public_key: &[7; 32],
+                fingerprint: "ledgerfp",
+                enrollment_path: signer_owners::LEDGER_OWNER_ENROLLMENT_PATH,
+                app_name: Some("Concordium"),
+            },
+        )
+        .unwrap();
+        (owner.id, dek)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn insert_pending(
         conn: &mut Connection,
-        seed_dek: &[u8; KEY_LEN],
+        signer_owner_dek: &[u8; KEY_LEN],
         network_genesis_hash: &str,
-        seed_id: &str,
+        signer_owner_id: &str,
         ip_identity: u32,
         identity_index: u32,
         label: &str,
@@ -709,10 +731,10 @@ mod tests {
     ) -> Result<i64> {
         super::insert_pending(
             conn,
-            seed_dek,
+            signer_owner_dek,
             PendingIdentity {
                 network_genesis_hash,
-                seed_id,
+                signer_owner_id,
                 ip_identity,
                 identity_index,
                 label,
@@ -822,7 +844,7 @@ mod tests {
     #[test]
     fn import_recovered_inserts_and_reuses_tuple() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
         let identity_object = serde_json::json!({"value": {"validTo": "2026-05-15T00:00:00Z"}});
 
         let (record, inserted) = import_recovered(
@@ -830,7 +852,7 @@ mod tests {
             &dek,
             RecoveredIdentity {
                 network_genesis_hash: MAINNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 7,
                 identity_index: 0,
                 label: "identity_1",
@@ -846,7 +868,7 @@ mod tests {
             &dek,
             RecoveredIdentity {
                 network_genesis_hash: MAINNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 7,
                 identity_index: 0,
                 label: "identity_other",
@@ -865,12 +887,12 @@ mod tests {
     #[test]
     fn next_generated_label_skips_existing_suffixes() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
         insert_pending(
             &mut conn,
             &dek,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity_1",
@@ -881,7 +903,7 @@ mod tests {
             &mut conn,
             &dek,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             1,
             "identity_2",
@@ -896,14 +918,50 @@ mod tests {
     }
 
     #[test]
+    fn ledger_owned_identity_uses_independent_signer_owner_tuple_and_payload_domain() {
+        let mut conn = conn();
+        let (seed_owner, seed_key) = seed(&conn, "seed_a");
+        let (ledger_owner, ledger_key) = ledger_owner(&conn, "ledger_a");
+
+        insert_pending(
+            &mut conn,
+            &seed_key,
+            MAINNET,
+            &seed_owner,
+            7,
+            0,
+            "seed-identity",
+            "https://seed-code",
+        )
+        .unwrap();
+        let ledger_id = insert_pending(
+            &mut conn,
+            &ledger_key,
+            MAINNET,
+            &ledger_owner,
+            7,
+            0,
+            "ledger-identity",
+            "https://ledger-code",
+        )
+        .unwrap();
+
+        let ledger_payload = decrypt_private_payload(&conn, ledger_id, &ledger_key).unwrap();
+        assert_eq!(ledger_payload.code_uri, "https://ledger-code");
+        assert!(decrypt_private_payload(&conn, ledger_id, &seed_key).is_err());
+        assert_eq!(next_index(&conn, MAINNET, &seed_owner, 7).unwrap(), 1);
+        assert_eq!(next_index(&conn, MAINNET, &ledger_owner, 7).unwrap(), 1);
+    }
+
+    #[test]
     fn private_payload_is_encrypted_and_decrypts_with_correct_key() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let id = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity",
@@ -931,12 +989,12 @@ mod tests {
     #[test]
     fn aad_mismatch_fails_for_transplanted_payload() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let id_1 = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity-1",
@@ -947,7 +1005,7 @@ mod tests {
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             1,
             "identity-2",
@@ -974,24 +1032,24 @@ mod tests {
     #[test]
     fn list_returns_all_identities() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity-b",
             "https://code-1",
         )
         .unwrap();
-        let (seed_id2, key2) = seed(&conn, "seed_b");
+        let (signer_owner_id2, key2) = seed(&conn, "seed_b");
         insert_pending(
             &mut conn,
             &key2,
             TESTNET,
-            &seed_id2,
+            &signer_owner_id2,
             8,
             0,
             "identity-a",
@@ -1013,12 +1071,12 @@ mod tests {
     #[test]
     fn rename_updates_label_within_network_scope() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let record_id = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity",
@@ -1043,12 +1101,12 @@ mod tests {
     #[test]
     fn rename_rejects_duplicate_label_in_network_scope() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let record_a = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity-a",
@@ -1059,7 +1117,7 @@ mod tests {
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             1,
             "identity-b",
@@ -1074,12 +1132,12 @@ mod tests {
     #[test]
     fn status_transitions_to_done_and_provider_error_deletes_identity() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let id = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity",
@@ -1124,12 +1182,12 @@ mod tests {
     #[test]
     fn removing_seed_cascades_identity_and_private_payload() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let id = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity",
@@ -1160,12 +1218,12 @@ mod tests {
     #[test]
     fn pruning_network_cascades_private_payloads() {
         let mut conn = conn();
-        let (seed_id, key) = seed(&conn, "seed_a");
+        let (signer_owner_id, key) = seed(&conn, "seed_a");
         let id = insert_pending(
             &mut conn,
             &key,
             MAINNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             0,
             "identity",
@@ -1176,7 +1234,7 @@ mod tests {
             &mut conn,
             &key,
             TESTNET,
-            &seed_id,
+            &signer_owner_id,
             7,
             1,
             "identity-testnet",

@@ -1,6 +1,9 @@
-use crate::store::crypto::{
-    Argon2Params, KEY_LEN, aead_decrypt, aead_encrypt, derive_kek, generate_dek, object_aad,
-    random_salt, zeroizing_array_from_slice,
+use crate::store::{
+    crypto::{
+        Argon2Params, KEY_LEN, aead_decrypt, aead_encrypt, derive_kek, generate_dek, object_aad,
+        random_salt, zeroizing_array_from_slice,
+    },
+    signer_owners::{self, SignerOwnerKind},
 };
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -12,7 +15,7 @@ use zeroize::Zeroizing;
 
 const KDF_ALGORITHM: &str = "argon2id";
 const CIPHER_VERSION: u32 = 1;
-const ACCOUNT_PRIVATE_PAYLOAD_KIND: &str = "account_private_payload";
+const DERIVED_ACCOUNT_PRIVATE_PAYLOAD_KIND: &str = "derived_account_private_payload";
 const IMPORTED_ACCOUNT_PAYLOAD_KIND: &str = "imported_account_payload";
 const IMPORTED_ACCOUNT_VAULT_DEK_KIND: &str = "imported_account_vault_dek";
 
@@ -42,7 +45,7 @@ impl AccountSourceKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
     pub id: i64,
-    pub seed_id: String,
+    pub signer_owner_id: String,
     pub network_genesis_hash: String,
     pub ip_identity: u32,
     pub identity_index: u32,
@@ -77,7 +80,8 @@ pub struct ImportedAccountSecretPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountSigningSource {
     Derived {
-        seed_id: String,
+        signer_owner_id: String,
+        signer_owner_kind: SignerOwnerKind,
         ip_identity: u32,
         identity_index: u32,
         credential_counter: u32,
@@ -141,7 +145,7 @@ impl AccountStatus {
 
 pub struct PendingAccount<'a> {
     pub network_genesis_hash: &'a str,
-    pub seed_id: &'a str,
+    pub signer_owner_id: &'a str,
     pub ip_identity: u32,
     pub identity_index: u32,
     pub credential_counter: u32,
@@ -157,10 +161,10 @@ pub fn insert_pending(conn: &Connection, pending: PendingAccount<'_>) -> Result<
         );
     }
 
-    if find_by_derivation(
+    if find_by_derived_tuple(
         conn,
         pending.network_genesis_hash,
-        pending.seed_id,
+        pending.signer_owner_id,
         pending.ip_identity,
         pending.identity_index,
         pending.credential_counter,
@@ -168,9 +172,9 @@ pub fn insert_pending(conn: &Connection, pending: PendingAccount<'_>) -> Result<
     .is_some()
     {
         bail!(
-            "credential counter {} already exists for seed '{}', provider {}, identity index {} on network '{}'",
+            "credential counter {} already exists for signer owner '{}', provider {}, identity index {} on network '{}'",
             pending.credential_counter,
-            pending.seed_id,
+            pending.signer_owner_id,
             pending.ip_identity,
             pending.identity_index,
             pending.network_genesis_hash
@@ -180,11 +184,11 @@ pub fn insert_pending(conn: &Connection, pending: PendingAccount<'_>) -> Result<
     let now = now_unix_seconds()?;
     conn.execute(
         "INSERT INTO accounts (
-            seed_id, network_genesis_hash, ip_identity, identity_index, credential_counter,
+            signer_owner_id, network_genesis_hash, ip_identity, identity_index, credential_counter,
             label, status, source_kind, created_at, updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
-            pending.seed_id,
+            pending.signer_owner_id,
             pending.network_genesis_hash,
             pending.ip_identity,
             pending.identity_index,
@@ -220,7 +224,7 @@ pub fn set_submitted_transaction(conn: &Connection, id: i64, transaction_hash: &
 pub fn set_finalized(
     conn: &mut Connection,
     id: i64,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     transaction_hash: Option<&str>,
     account_address: &str,
 ) -> Result<()> {
@@ -252,7 +256,7 @@ pub fn set_finalized(
     upsert_private_payload_in_tx(
         &tx,
         &record,
-        seed_dek,
+        signer_owner_dek,
         &AccountPrivatePayload {
             account_address: account_address.to_owned(),
         },
@@ -264,7 +268,7 @@ pub fn set_finalized(
 
 pub struct RecoveredAccount<'a> {
     pub network_genesis_hash: &'a str,
-    pub seed_id: &'a str,
+    pub signer_owner_id: &'a str,
     pub ip_identity: u32,
     pub identity_index: u32,
     pub credential_counter: u32,
@@ -274,17 +278,17 @@ pub struct RecoveredAccount<'a> {
 
 pub fn import_recovered(
     conn: &mut Connection,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     recovered: RecoveredAccount<'_>,
 ) -> Result<(AccountRecord, bool)> {
     let tx = conn
         .transaction()
         .context("failed to start recovered account import transaction")?;
 
-    if let Some(existing) = find_by_derivation(
+    if let Some(existing) = find_by_derived_tuple(
         &tx,
         recovered.network_genesis_hash,
-        recovered.seed_id,
+        recovered.signer_owner_id,
         recovered.ip_identity,
         recovered.identity_index,
         recovered.credential_counter,
@@ -304,7 +308,7 @@ pub fn import_recovered(
         upsert_private_payload_in_tx(
             &tx,
             &updated,
-            seed_dek,
+            signer_owner_dek,
             &AccountPrivatePayload {
                 account_address: recovered.account_address.to_owned(),
             },
@@ -325,11 +329,11 @@ pub fn import_recovered(
     let now = now_unix_seconds()?;
     tx.execute(
         "INSERT INTO accounts (
-            seed_id, network_genesis_hash, ip_identity, identity_index, credential_counter,
+            signer_owner_id, network_genesis_hash, ip_identity, identity_index, credential_counter,
             label, status, source_kind, created_at, updated_at
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
-            recovered.seed_id,
+            recovered.signer_owner_id,
             recovered.network_genesis_hash,
             recovered.ip_identity,
             recovered.identity_index,
@@ -345,7 +349,7 @@ pub fn import_recovered(
 
     let record = AccountRecord {
         id: tx.last_insert_rowid(),
-        seed_id: recovered.seed_id.to_owned(),
+        signer_owner_id: recovered.signer_owner_id.to_owned(),
         network_genesis_hash: recovered.network_genesis_hash.to_owned(),
         ip_identity: recovered.ip_identity,
         identity_index: recovered.identity_index,
@@ -363,7 +367,7 @@ pub fn import_recovered(
     upsert_private_payload_in_tx(
         &tx,
         &record,
-        seed_dek,
+        signer_owner_dek,
         &AccountPrivatePayload {
             account_address: recovered.account_address.to_owned(),
         },
@@ -501,7 +505,7 @@ pub fn import_imported_account(
 
     let record = AccountRecord {
         id: tx.last_insert_rowid(),
-        seed_id: String::new(),
+        signer_owner_id: String::new(),
         network_genesis_hash: imported.network_genesis_hash.to_owned(),
         ip_identity: 0,
         identity_index: 0,
@@ -606,12 +610,22 @@ pub fn resolve_signing_source(
 ) -> Result<AccountSigningSource> {
     let record = find_by_id(conn, id)?;
     match record.source_kind {
-        AccountSourceKind::Derived => Ok(AccountSigningSource::Derived {
-            seed_id: record.seed_id,
-            ip_identity: record.ip_identity,
-            identity_index: record.identity_index,
-            credential_counter: record.credential_counter,
-        }),
+        AccountSourceKind::Derived => {
+            let owner =
+                signer_owners::find_by_id(conn, &record.signer_owner_id)?.with_context(|| {
+                    format!(
+                        "derived account {} references unknown signer owner",
+                        record.id
+                    )
+                })?;
+            Ok(AccountSigningSource::Derived {
+                signer_owner_id: record.signer_owner_id,
+                signer_owner_kind: owner.kind,
+                ip_identity: record.ip_identity,
+                identity_index: record.identity_index,
+                credential_counter: record.credential_counter,
+            })
+        }
         AccountSourceKind::Imported => {
             let dek = imported_vault_dek.context(
                 "imported accounts vault must be unlocked to sign with imported account",
@@ -677,7 +691,7 @@ pub fn distinct_network_genesis_hashes(conn: &Connection) -> Result<Vec<String>>
 pub fn list(conn: &Connection) -> Result<Vec<AccountRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, COALESCE(seed_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
+            "SELECT id, COALESCE(signer_owner_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
                     COALESCE(credential_counter, 0), source_kind, imported_vault_id, import_kind, source_metadata_json,
                     label, status, transaction_hash, created_at, updated_at
              FROM accounts ORDER BY label",
@@ -698,7 +712,7 @@ pub fn find_by_network_and_label(
     label: &str,
 ) -> Result<Option<AccountRecord>> {
     conn.query_row(
-        "SELECT id, COALESCE(seed_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
+        "SELECT id, COALESCE(signer_owner_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
                 COALESCE(credential_counter, 0), source_kind, imported_vault_id, import_kind, source_metadata_json,
                 label, status, transaction_hash, created_at, updated_at
          FROM accounts WHERE network_genesis_hash = ?1 AND label = ?2",
@@ -711,24 +725,24 @@ pub fn find_by_network_and_label(
     })
 }
 
-pub fn find_by_derivation(
+pub fn find_by_derived_tuple(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     ip_identity: u32,
     identity_index: u32,
     credential_counter: u32,
 ) -> Result<Option<AccountRecord>> {
     conn.query_row(
-        "SELECT id, COALESCE(seed_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
+        "SELECT id, COALESCE(signer_owner_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
                 COALESCE(credential_counter, 0), source_kind, imported_vault_id, import_kind, source_metadata_json,
                 label, status, transaction_hash, created_at, updated_at
          FROM accounts
-         WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3
+         WHERE network_genesis_hash = ?1 AND signer_owner_id = ?2 AND ip_identity = ?3
            AND identity_index = ?4 AND credential_counter = ?5 AND source_kind = 'derived'",
         params![
             network_genesis_hash,
-            seed_id,
+            signer_owner_id,
             ip_identity,
             identity_index,
             credential_counter,
@@ -738,7 +752,7 @@ pub fn find_by_derivation(
     .optional()
     .with_context(|| {
         format!(
-            "failed to query account credential counter {credential_counter} for seed '{seed_id}', provider {ip_identity}, identity index {identity_index}, network '{network_genesis_hash}'"
+            "failed to query account credential counter {credential_counter} for signer owner '{signer_owner_id}', provider {ip_identity}, identity index {identity_index}, network '{network_genesis_hash}'"
         )
     })
 }
@@ -746,15 +760,15 @@ pub fn find_by_derivation(
 pub fn next_credential_counter(
     conn: &Connection,
     network_genesis_hash: &str,
-    seed_id: &str,
+    signer_owner_id: &str,
     ip_identity: u32,
     identity_index: u32,
 ) -> Result<u32> {
     let max_counter: Option<u32> = conn
         .query_row(
             "SELECT MAX(credential_counter) FROM accounts
-             WHERE network_genesis_hash = ?1 AND seed_id = ?2 AND ip_identity = ?3 AND identity_index = ?4 AND source_kind = 'derived'",
-            params![network_genesis_hash, seed_id, ip_identity, identity_index],
+             WHERE network_genesis_hash = ?1 AND signer_owner_id = ?2 AND ip_identity = ?3 AND identity_index = ?4 AND source_kind = 'derived'",
+            params![network_genesis_hash, signer_owner_id, ip_identity, identity_index],
             |row| row.get(0),
         )
         .context("failed to query next account credential counter")?;
@@ -765,10 +779,10 @@ pub fn next_credential_counter(
 pub fn decrypt_private_payload(
     conn: &Connection,
     id: i64,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<AccountPrivatePayload> {
     let record = find_by_id(conn, id)?;
-    decrypt_private_payload_for_record(conn, &record, seed_dek)
+    decrypt_private_payload_for_record(conn, &record, signer_owner_dek)
 }
 
 pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
@@ -797,7 +811,7 @@ pub fn rename(conn: &Connection, id: i64, new_label: &str) -> Result<()> {
 
 pub fn find_by_id(conn: &Connection, id: i64) -> Result<AccountRecord> {
     conn.query_row(
-        "SELECT id, COALESCE(seed_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
+        "SELECT id, COALESCE(signer_owner_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
                 COALESCE(credential_counter, 0), source_kind, imported_vault_id, import_kind, source_metadata_json,
                 label, status, transaction_hash, created_at, updated_at
          FROM accounts WHERE id = ?1",
@@ -811,7 +825,7 @@ pub fn find_by_id(conn: &Connection, id: i64) -> Result<AccountRecord> {
 
 fn find_by_id_in_tx(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<AccountRecord> {
     tx.query_row(
-        "SELECT id, COALESCE(seed_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
+        "SELECT id, COALESCE(signer_owner_id, ''), network_genesis_hash, COALESCE(ip_identity, 0), COALESCE(identity_index, 0),
                 COALESCE(credential_counter, 0), source_kind, imported_vault_id, import_kind, source_metadata_json,
                 label, status, transaction_hash, created_at, updated_at
          FROM accounts WHERE id = ?1",
@@ -887,10 +901,10 @@ fn unlock_imported_vault_record(
 fn decrypt_private_payload_for_record(
     conn: &Connection,
     record: &AccountRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<AccountPrivatePayload> {
     conn.query_row(
-        "SELECT cipher_version, ciphertext, nonce FROM account_private_payloads WHERE account_id = ?1",
+        "SELECT cipher_version, ciphertext, nonce FROM derived_account_private_payloads WHERE account_id = ?1",
         params![record.id],
         |row| {
             Ok((
@@ -904,19 +918,19 @@ fn decrypt_private_payload_for_record(
     .with_context(|| format!("failed to query private payload for account {}", record.id))?
     .with_context(|| format!("account {} has no private payload", record.id))
     .and_then(|(cipher_version, ciphertext, nonce)| {
-        decrypt_payload_bytes(record, seed_dek, cipher_version, &ciphertext, &nonce)
+        decrypt_payload_bytes(record, signer_owner_dek, cipher_version, &ciphertext, &nonce)
     })
 }
 
 fn decrypt_payload_bytes(
     record: &AccountRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     cipher_version: u32,
     ciphertext: &[u8],
     nonce: &[u8],
 ) -> Result<AccountPrivatePayload> {
     let aad = account_payload_aad(record, cipher_version);
-    let plaintext = aead_decrypt(seed_dek, nonce, ciphertext, &aad).with_context(|| {
+    let plaintext = aead_decrypt(signer_owner_dek, nonce, ciphertext, &aad).with_context(|| {
         format!(
             "failed to decrypt private payload for account {}",
             record.id
@@ -962,7 +976,7 @@ fn decrypt_imported_payload_for_record(
 fn upsert_private_payload_in_tx(
     tx: &rusqlite::Transaction<'_>,
     record: &AccountRecord,
-    seed_dek: &[u8; KEY_LEN],
+    signer_owner_dek: &[u8; KEY_LEN],
     payload: &AccountPrivatePayload,
 ) -> Result<()> {
     let plaintext = Zeroizing::new(serde_json::to_vec(payload).with_context(|| {
@@ -972,15 +986,16 @@ fn upsert_private_payload_in_tx(
         )
     })?);
     let aad = account_payload_aad(record, CIPHER_VERSION);
-    let (ciphertext, nonce) = aead_encrypt(seed_dek, &plaintext, &aad).with_context(|| {
-        format!(
-            "failed to encrypt private payload for account {}",
-            record.id
-        )
-    })?;
+    let (ciphertext, nonce) =
+        aead_encrypt(signer_owner_dek, &plaintext, &aad).with_context(|| {
+            format!(
+                "failed to encrypt private payload for account {}",
+                record.id
+            )
+        })?;
 
     tx.execute(
-        "INSERT INTO account_private_payloads (account_id, cipher_version, ciphertext, nonce)
+        "INSERT INTO derived_account_private_payloads (account_id, cipher_version, ciphertext, nonce)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(account_id) DO UPDATE SET
             cipher_version = excluded.cipher_version,
@@ -1032,12 +1047,12 @@ fn account_payload_aad(record: &AccountRecord, cipher_version: u32) -> Vec<u8> {
             "{}:{}:{}:{}:{}:{}",
             record.id,
             record.network_genesis_hash,
-            record.seed_id,
+            record.signer_owner_id,
             record.ip_identity,
             record.identity_index,
             record.credential_counter
         ),
-        ACCOUNT_PRIVATE_PAYLOAD_KIND,
+        DERIVED_ACCOUNT_PRIVATE_PAYLOAD_KIND,
         cipher_version,
     )
 }
@@ -1059,7 +1074,7 @@ fn map_account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AccountRecord> {
     let status: String = row.get(11)?;
     Ok(AccountRecord {
         id: row.get(0)?,
-        seed_id: row.get(1)?,
+        signer_owner_id: row.get(1)?,
         network_genesis_hash: row.get(2)?,
         ip_identity: row.get(3)?,
         identity_index: row.get(4)?,
@@ -1140,13 +1155,13 @@ mod tests {
     }
 
     fn pending<'a>(
-        seed_id: &'a str,
+        signer_owner_id: &'a str,
         label: &'a str,
         credential_counter: u32,
     ) -> PendingAccount<'a> {
         PendingAccount {
             network_genesis_hash: MAINNET,
-            seed_id,
+            signer_owner_id,
             ip_identity: 1,
             identity_index: 0,
             credential_counter,
@@ -1157,23 +1172,23 @@ mod tests {
     #[test]
     fn insert_pending_stores_metadata_and_allocates_next_counter() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
 
         assert_eq!(
-            next_credential_counter(&conn, MAINNET, &seed_id, 1, 0).unwrap(),
+            next_credential_counter(&conn, MAINNET, &signer_owner_id, 1, 0).unwrap(),
             0
         );
-        let id = insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account-1", 0)).unwrap();
         assert!(id > 0);
 
         let record = find_by_network_and_label(&conn, MAINNET, "account-1")
             .unwrap()
             .unwrap();
-        assert_eq!(record.seed_id, seed_id);
+        assert_eq!(record.signer_owner_id, signer_owner_id);
         assert_eq!(record.status, AccountStatus::Pending);
         assert_eq!(record.credential_counter, 0);
         assert_eq!(
-            next_credential_counter(&conn, MAINNET, &record.seed_id, 1, 0).unwrap(),
+            next_credential_counter(&conn, MAINNET, &record.signer_owner_id, 1, 0).unwrap(),
             1
         );
     }
@@ -1181,14 +1196,14 @@ mod tests {
     #[test]
     fn import_recovered_inserts_and_reuses_tuple() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
 
         let (record, inserted) = import_recovered(
             &mut conn,
             &dek,
             RecoveredAccount {
                 network_genesis_hash: MAINNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 0,
@@ -1205,7 +1220,7 @@ mod tests {
             &dek,
             RecoveredAccount {
                 network_genesis_hash: MAINNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 0,
@@ -1225,9 +1240,9 @@ mod tests {
     #[test]
     fn next_generated_label_skips_existing_suffixes() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        insert_pending(&conn, pending(&seed_id, "account_1", 0)).unwrap();
-        insert_pending(&conn, pending(&seed_id, "account_2", 1)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        insert_pending(&conn, pending(&signer_owner_id, "account_1", 0)).unwrap();
+        insert_pending(&conn, pending(&signer_owner_id, "account_2", 1)).unwrap();
 
         assert_eq!(
             next_generated_label(&conn, MAINNET, "account").unwrap(),
@@ -1238,17 +1253,17 @@ mod tests {
     #[test]
     fn duplicate_label_is_rejected_per_network() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
 
-        insert_pending(&conn, pending(&seed_id, "account", 0)).unwrap();
-        let err = insert_pending(&conn, pending(&seed_id, "account", 1)).unwrap_err();
+        insert_pending(&conn, pending(&signer_owner_id, "account", 0)).unwrap();
+        let err = insert_pending(&conn, pending(&signer_owner_id, "account", 1)).unwrap_err();
         assert!(err.to_string().contains("account label 'account'"));
 
         insert_pending(
             &conn,
             PendingAccount {
                 network_genesis_hash: TESTNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 0,
@@ -1261,23 +1276,23 @@ mod tests {
     #[test]
     fn duplicate_derivation_tuple_is_rejected() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
 
-        insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
-        let err = insert_pending(&conn, pending(&seed_id, "account-2", 0)).unwrap_err();
+        insert_pending(&conn, pending(&signer_owner_id, "account-1", 0)).unwrap();
+        let err = insert_pending(&conn, pending(&signer_owner_id, "account-2", 0)).unwrap_err();
         assert!(err.to_string().contains("credential counter 0"));
     }
 
     #[test]
     fn list_returns_all_accounts() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        insert_pending(&conn, pending(&seed_id, "account-b", 0)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        insert_pending(&conn, pending(&signer_owner_id, "account-b", 0)).unwrap();
         insert_pending(
             &conn,
             PendingAccount {
                 network_genesis_hash: TESTNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 1,
@@ -1297,8 +1312,8 @@ mod tests {
     #[test]
     fn rename_updates_label_within_network_scope() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        let id = insert_pending(&conn, pending(&seed_id, "account", 0)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account", 0)).unwrap();
 
         rename(&conn, id, "account-renamed").unwrap();
 
@@ -1317,9 +1332,9 @@ mod tests {
     #[test]
     fn rename_rejects_duplicate_label_in_network_scope() {
         let conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        let id = insert_pending(&conn, pending(&seed_id, "account-a", 0)).unwrap();
-        insert_pending(&conn, pending(&seed_id, "account-b", 1)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account-a", 0)).unwrap();
+        insert_pending(&conn, pending(&signer_owner_id, "account-b", 1)).unwrap();
 
         let err = rename(&conn, id, "account-b").unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -1398,7 +1413,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(record.source_kind, AccountSourceKind::Imported);
-        assert_eq!(record.seed_id, "");
+        assert_eq!(record.signer_owner_id, "");
         assert_eq!(record.imported_vault_id, Some(vault.record.id.clone()));
         let decrypted = decrypt_imported_payload(&conn, record.id, &vault.dek).unwrap();
         assert_eq!(decrypted.account_address, "addr-imported");
@@ -1415,8 +1430,8 @@ mod tests {
     #[test]
     fn imported_account_label_collides_with_derived_label() {
         let mut conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        insert_pending(&conn, pending(&seed_id, "account", 0)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        insert_pending(&conn, pending(&signer_owner_id, "account", 0)).unwrap();
         let vault = create_or_unlock_imported_vault(&conn, MAINNET, "password").unwrap();
         let payload = imported_payload("addr-imported");
 
@@ -1439,8 +1454,8 @@ mod tests {
     #[test]
     fn deleting_seed_leaves_imported_accounts_but_network_prune_removes_them() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
-        let derived_id = insert_pending(&conn, pending(&seed_id, "derived", 0)).unwrap();
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
+        let derived_id = insert_pending(&conn, pending(&signer_owner_id, "derived", 0)).unwrap();
         set_finalized(&mut conn, derived_id, &dek, None, "derived-address").unwrap();
         let vault = create_or_unlock_imported_vault(&conn, MAINNET, "password").unwrap();
         let payload = imported_payload("addr-imported");
@@ -1483,18 +1498,44 @@ mod tests {
     #[test]
     fn signing_source_resolves_derived_and_imported_paths() {
         let mut conn = conn();
-        let (seed_id, _) = seed(&conn, "seed_a");
-        let derived_id = insert_pending(&conn, pending(&seed_id, "derived", 0)).unwrap();
+        let (signer_owner_id, _) = seed(&conn, "seed_a");
+        let derived_id = insert_pending(&conn, pending(&signer_owner_id, "derived", 0)).unwrap();
         match resolve_signing_source(&conn, derived_id, None).unwrap() {
             AccountSigningSource::Derived {
-                seed_id: resolved_seed,
+                signer_owner_id: resolved_seed,
+                signer_owner_kind,
                 credential_counter,
                 ..
             } => {
-                assert_eq!(resolved_seed, seed_id);
+                assert_eq!(resolved_seed, signer_owner_id);
+                assert_eq!(signer_owner_kind, SignerOwnerKind::Seed);
                 assert_eq!(credential_counter, 0);
             }
             AccountSigningSource::Imported(_) => panic!("expected derived signing source"),
+        }
+
+        let ledger_owner = signer_owners::create(&conn, SignerOwnerKind::Ledger, "ledger").unwrap();
+        signer_owners::create_vault(&conn, &ledger_owner.id, "password").unwrap();
+        signer_owners::insert_ledger_details(
+            &conn,
+            signer_owners::NewLedgerOwnerDetails {
+                signer_owner_id: &ledger_owner.id,
+                canonical_public_key: &[7; 32],
+                fingerprint: "ledgerfp",
+                enrollment_path: signer_owners::LEDGER_OWNER_ENROLLMENT_PATH,
+                app_name: Some("Concordium"),
+            },
+        )
+        .unwrap();
+        let ledger_derived_id =
+            insert_pending(&conn, pending(&ledger_owner.id, "ledger-derived", 1)).unwrap();
+        match resolve_signing_source(&conn, ledger_derived_id, None).unwrap() {
+            AccountSigningSource::Derived {
+                signer_owner_kind, ..
+            } => {
+                assert_eq!(signer_owner_kind, SignerOwnerKind::Ledger);
+            }
+            AccountSigningSource::Imported(_) => panic!("expected Ledger derived signing source"),
         }
 
         let vault = create_or_unlock_imported_vault(&conn, MAINNET, "password").unwrap();
@@ -1525,8 +1566,8 @@ mod tests {
     #[test]
     fn finalization_encrypts_structured_payload() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
-        let id = insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account-1", 0)).unwrap();
 
         set_finalized(
             &mut conn,
@@ -1560,7 +1601,7 @@ mod tests {
 
         let raw_address_count: u32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM account_private_payloads WHERE CAST(ciphertext AS TEXT) LIKE '%4TnQQ%'",
+                "SELECT COUNT(*) FROM derived_account_private_payloads WHERE CAST(ciphertext AS TEXT) LIKE '%4TnQQ%'",
                 [],
                 |row| row.get(0),
             )
@@ -1571,8 +1612,8 @@ mod tests {
     #[test]
     fn deleting_seed_cascades_accounts_and_payloads() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
-        let id = insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account-1", 0)).unwrap();
         set_finalized(&mut conn, id, &dek, None, "account-address").unwrap();
 
         seeds::remove(&conn, "seed_a").unwrap();
@@ -1581,9 +1622,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
             .unwrap();
         let payload_count: u32 = conn
-            .query_row("SELECT COUNT(*) FROM account_private_payloads", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM derived_account_private_payloads",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(account_count, 0);
         assert_eq!(payload_count, 0);
@@ -1592,14 +1635,14 @@ mod tests {
     #[test]
     fn pruning_network_cascades_account_payloads() {
         let mut conn = conn();
-        let (seed_id, dek) = seed(&conn, "seed_a");
-        let id = insert_pending(&conn, pending(&seed_id, "account-1", 0)).unwrap();
+        let (signer_owner_id, dek) = seed(&conn, "seed_a");
+        let id = insert_pending(&conn, pending(&signer_owner_id, "account-1", 0)).unwrap();
         set_finalized(&mut conn, id, &dek, None, "account-address").unwrap();
         insert_pending(
             &conn,
             PendingAccount {
                 network_genesis_hash: TESTNET,
-                seed_id: &seed_id,
+                signer_owner_id: &signer_owner_id,
                 ip_identity: 1,
                 identity_index: 0,
                 credential_counter: 1,
@@ -1614,9 +1657,11 @@ mod tests {
             vec![TESTNET.to_owned()]
         );
         let payload_count: u32 = conn
-            .query_row("SELECT COUNT(*) FROM account_private_payloads", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM derived_account_private_payloads",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(payload_count, 0);
     }

@@ -1,8 +1,5 @@
-# account-storage Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-account-creation. Update Purpose after archive.
-## Requirements
 ### Requirement: Accounts are persisted as plaintext metadata plus encrypted private payloads
 The system SHALL store wallet-managed accounts in the local SQLite database as plaintext relational metadata plus source-specific encrypted private payload data. Derived account metadata SHALL include the network identity (`network_genesis_hash`), owning signer owner id, identity provider index, identity index, credential counter, user-supplied account label, lifecycle status, and timestamps. Imported account metadata SHALL reference an imported account vault instead of a signer owner. Derived account private payload data SHALL be encrypted under the owning signer owner's password domain and stored as a structured payload object rather than as a bare encrypted address string.
 
@@ -123,36 +120,6 @@ The account storage layer SHALL represent whether each account is backed by sign
 - **THEN** the account source is recorded as imported
 - **AND** the account does not require a signer owner id, identity provider id, identity index, or credential counter to be present
 
-### Requirement: Account labels remain unique across all account sources on a network
-The account storage layer SHALL enforce a single account label namespace per `network_genesis_hash`. Derived and imported accounts SHALL NOT be allowed to share the same label on the same network.
-
-#### Scenario: Imported label collides with derived account
-- **WHEN** a derived account with label `alice` exists on a network
-- **AND** the wallet attempts to import an account with label `alice` on the same network
-- **THEN** the store rejects the imported account
-
-#### Scenario: Derived label collides with imported account
-- **WHEN** an imported account with label `alice` exists on a network
-- **AND** the wallet attempts to create a derived account with label `alice` on the same network
-- **THEN** the store rejects the derived account
-
-#### Scenario: Same label on different networks remains allowed
-- **WHEN** account label `alice` exists on network genesis hash `A`
-- **AND** the wallet stores another account with label `alice` on network genesis hash `B`
-- **THEN** both account records can be stored
-
-### Requirement: Imported account payloads are encrypted under the imported vault domain
-The account storage layer SHALL encrypt imported account private payloads using the imported accounts vault DEK for the account's `network_genesis_hash`. Imported account payload encryption SHALL use unique nonces and AAD binding the ciphertext to the account row, network, and imported vault context.
-
-#### Scenario: Imported payload stores address and signing material encrypted
-- **WHEN** the wallet imports an account from genesis JSON
-- **THEN** the account address and signing material are stored in encrypted imported account payload data
-- **AND** those values are not stored in plaintext account metadata columns
-
-#### Scenario: AAD prevents imported payload transplantation
-- **WHEN** an encrypted imported account payload is copied to another account row or network vault context
-- **THEN** AEAD authentication fails during decryption
-
 ### Requirement: Account deletion cascades source-specific private data
 The account storage layer SHALL remove source-specific private payload rows when an account row is deleted. Deleting a signer owner SHALL cascade derived accounts owned by that signer owner, but SHALL NOT delete imported accounts. Pruning a network partition SHALL delete all accounts on that network, including imported accounts and imported account payloads.
 
@@ -169,4 +136,3 @@ The account storage layer SHALL remove source-specific private payload rows when
 - **WHEN** the storage layer deletes all account rows for a network genesis hash
 - **THEN** imported accounts for that network are removed
 - **AND** their encrypted imported account payloads are removed
-

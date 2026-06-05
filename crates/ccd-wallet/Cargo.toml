@@ -7,6 +7,7 @@ edition.workspace = true
 ccd-wallet-connect = { path = "../ccd-wallet-connect" }
 ccd-wallet-core = { path = "../ccd-wallet-core" }
 ccd-wallet-identity-provider = { path = "../ccd-wallet-identity-provider" }
+ccd-wallet-ledger = { path = "../ccd-wallet-ledger", features = ["hid"] }
 anyhow.workspace = true
 base64.workspace = true
 bip39.workspace = true

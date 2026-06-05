@@ -8,6 +8,7 @@ use ccd_wallet_core::{
         accounts::{self, AccountRecord, AccountSourceKind, AccountStatus},
         config::{self, NetworkEntry, load},
         seeds,
+        signer_owners::{self, SignerOwnerKind},
     },
     wallet::{ConcordiumHdWallet, Net},
 };
@@ -85,9 +86,9 @@ pub(super) fn select_account(
         bail!("no finalized accounts are available for the selected network");
     }
 
-    let seed_labels = seeds::list(conn)?
+    let seed_labels = signer_owners::list(conn)?
         .into_iter()
-        .map(|seed| (seed.id, seed.label))
+        .map(|owner| (owner.id, owner.label))
         .collect::<BTreeMap<_, _>>();
     let items = accounts
         .iter()
@@ -109,7 +110,7 @@ fn render_account_label(record: &AccountRecord, seed_labels: &BTreeMap<String, S
         format!("[imported] {}", record.label)
     } else {
         let seed_label = seed_labels
-            .get(&record.seed_id)
+            .get(&record.signer_owner_id)
             .map(String::as_str)
             .unwrap_or("<unknown-seed>");
         format!("[{seed_label}] {}", record.label)
@@ -133,9 +134,10 @@ pub(super) fn read_account_address(
 ) -> Result<String> {
     match account.source_kind {
         AccountSourceKind::Derived => {
+            ensure_seed_backed_account(conn, account)?;
             let seed = seeds::list(conn)?
                 .into_iter()
-                .find(|seed| seed.id == account.seed_id)
+                .find(|seed| seed.id == account.signer_owner_id)
                 .context("selected account references unknown seed")?;
             let password: String = password(format!("Password for seed '{}':", seed.label))
                 .allow_empty()
@@ -197,15 +199,32 @@ fn unlock_wallet_account_candidate(
     }
 }
 
+fn ensure_seed_backed_account(conn: &Connection, account: &AccountRecord) -> Result<()> {
+    let owner = signer_owners::find_by_id(conn, &account.signer_owner_id)?.with_context(|| {
+        format!(
+            "derived account '{}' references unknown key source",
+            account.label
+        )
+    })?;
+    if owner.kind == SignerOwnerKind::Ledger {
+        bail!(
+            "Ledger-backed account '{}' cannot be used for browser connect signing yet; Ledger transaction signing is not yet supported and no transaction was submitted",
+            account.label
+        );
+    }
+    Ok(())
+}
+
 fn unlock_derived_wallet_account(
     conn: &Connection,
     network_name: &str,
     network_entry: &NetworkEntry,
     account: &AccountRecord,
 ) -> Result<WalletAccount> {
+    ensure_seed_backed_account(conn, account)?;
     let seed = seeds::list(conn)?
         .into_iter()
-        .find(|seed| seed.id == account.seed_id)
+        .find(|seed| seed.id == account.signer_owner_id)
         .context("selected account references unknown seed")?;
     let password: String = password(format!("Password for seed '{}':", seed.label))
         .allow_empty()

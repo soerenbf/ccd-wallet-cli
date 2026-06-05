@@ -27,6 +27,8 @@ pub enum Command {
     Contract(Box<ContractCommand>),
     /// Seed phrase commands.
     Seed(SeedCommand),
+    /// Ledger hardware-wallet setup commands.
+    Ledger(LedgerCommand),
     /// Identity issuance commands.
     Identity(Box<IdentityCommand>),
     /// Account creation and management commands.
@@ -450,6 +452,29 @@ pub struct ContractDeployModuleArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct LedgerCommand {
+    #[command(subcommand)]
+    pub command: LedgerSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LedgerSubcommand {
+    /// Enroll a Ledger device as a wallet key source.
+    Setup(LedgerSetupArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct LedgerSetupArgs {
+    /// Local key-source label for the Ledger device.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct SeedCommand {
     #[command(subcommand)]
     pub command: SeedSubcommand,
@@ -581,8 +606,8 @@ pub enum IdentitySubcommand {
 
 #[derive(Debug, Args)]
 pub struct IdentityListArgs {
-    /// Seed label to use. Defaults to the active seed.
-    #[arg(long, value_name = "LABEL")]
+    /// Key-source label to use. Defaults to the active key source.
+    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
     pub seed: Option<String>,
 
     /// Registered network name to resolve from the config store.
@@ -620,8 +645,8 @@ pub struct IdentityNewArgs {
     #[arg(long, conflicts_with = "provider")]
     pub interactive: bool,
 
-    /// Seed label to use. Defaults to the active seed.
-    #[arg(long, value_name = "LABEL")]
+    /// Key-source label to use. Defaults to the active key source.
+    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
     pub seed: Option<String>,
 
     /// Registered network name to resolve from the config store.
@@ -746,8 +771,8 @@ pub struct AccountImportGenesisArgs {
 
 #[derive(Debug, Args)]
 pub struct AccountListArgs {
-    /// Seed label to use. Defaults to the active seed.
-    #[arg(long, value_name = "LABEL")]
+    /// Key-source label to use. Defaults to the active key source.
+    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
     pub seed: Option<String>,
 
     /// Registered network name to resolve from the config store.
@@ -816,8 +841,8 @@ pub struct AccountNewArgs {
     #[arg(long, value_name = "LABEL")]
     pub identity: Option<String>,
 
-    /// Seed label to use. Defaults to the active seed.
-    #[arg(long, value_name = "LABEL")]
+    /// Key-source label to use. Defaults to the active key source.
+    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
     pub seed: Option<String>,
 
     /// Registered network name to resolve from the config store.
@@ -851,8 +876,8 @@ pub struct AccountRenameArgs {
     #[arg(value_name = "NEW_LABEL")]
     pub new_label: Option<String>,
 
-    /// Seed label to use when showing addresses in the selector.
-    #[arg(long, value_name = "LABEL")]
+    /// Key-source label to use when showing addresses in the selector.
+    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
     pub seed: Option<String>,
 
     /// Reveal decrypted account addresses in the selector.
@@ -1903,6 +1928,78 @@ mod tests {
                 other => panic!("expected account show command, got {other:?}"),
             },
             other => panic!("expected account command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_identity_new_with_key_source_alias() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "identity",
+            "new",
+            "alice-id",
+            "--provider",
+            "7",
+            "--key-source",
+            "ledger-main",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Identity(command) => match command.command {
+                IdentitySubcommand::New(args) => {
+                    assert_eq!(args.label.as_deref(), Some("alice-id"));
+                    assert_eq!(args.provider, Some(7));
+                    assert_eq!(args.seed.as_deref(), Some("ledger-main"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                }
+                other => panic!("expected identity new command, got {other:?}"),
+            },
+            other => panic!("expected identity command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_account_new_with_key_source_alias() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "account",
+            "new",
+            "alice",
+            "--identity",
+            "alice-id",
+            "--key-source",
+            "ledger-main",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Account(command) => match command.command {
+                AccountSubcommand::New(args) => {
+                    assert_eq!(args.label.as_deref(), Some("alice"));
+                    assert_eq!(args.identity.as_deref(), Some("alice-id"));
+                    assert_eq!(args.seed.as_deref(), Some("ledger-main"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                }
+                other => panic!("expected account new command, got {other:?}"),
+            },
+            other => panic!("expected account command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_setup_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "ledger", "setup", "ledger-main"]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Setup(args) => {
+                    assert_eq!(args.label.as_deref(), Some("ledger-main"));
+                }
+            },
+            other => panic!("expected ledger setup command, got {other:?}"),
         }
     }
 

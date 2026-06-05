@@ -15,6 +15,8 @@ This repository is now a Cargo workspace:
 
 - `crates/ccd-wallet-core`: shared library crate for storage, config, and wallet cryptography
 - `crates/ccd-wallet-identity-provider`: shared library crate for identity issuance request construction, provider HTTP helpers, and callback handling
+- `crates/ccd-wallet-ledger`: low-level Concordium Ledger app protocol client
+- `crates/ccd-wallet-ledger-governance`: low-level Concordium Governance Ledger app protocol client
 - `crates/ccd-wallet`: CLI binary crate
 
 ## Build
@@ -233,6 +235,16 @@ cargo run -p ccd-wallet -- seed delete daily_seed
 For safety, `seed show` displays the seed phrase in a temporary terminal view and hides it when you press any key or after 30 seconds, whichever happens first. This reduces terminal scrollback exposure, but it cannot protect against screenshots, terminal/session logging, tmux/screen behavior, or clipboard history if you copy the phrase.
 
 Seed labels may contain only ASCII letters, digits, dash (`-`), and underscore (`_`).
+
+### Example: enroll a Ledger key source
+
+```bash
+cargo run -p ccd-wallet -- ledger setup ledger_main
+```
+
+A key source is the root authority the wallet uses for derived identities and accounts. Seed phrases are seed-backed key sources managed with `seed ...` commands. Ledger devices are Ledger-backed key sources enrolled with `ledger setup`.
+
+`ledger setup [LABEL]` connects to a Ledger device running the Concordium app, asks the app for the canonical enrollment public key at `m/44'/919'/0'/0'/0'`, derives a short display fingerprint, and stores the Ledger key source with a local wallet password. The local password protects wallet-local identity/account payloads for the Ledger key source; it does not replace the Ledger device or store Ledger private signing material locally.
 
 ### Example: issue, inspect, and rename identities
 

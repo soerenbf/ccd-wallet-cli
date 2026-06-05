@@ -1,8 +1,5 @@
-# entity-listing Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-list-and-rename-commands. Update Purpose after archive.
-## Requirements
 ### Requirement: Managed entities can be listed through entity-family commands
 The CLI SHALL provide human-oriented `list` subcommands for `network`, `seed`, `identity`, and `account`, and SHALL include key-source context in identity and account list rows where relevant.
 
@@ -87,19 +84,7 @@ The CLI SHALL include imported accounts in normal `account list` results when th
 - **WHEN** the user lists accounts for a network containing imported accounts
 - **THEN** imported accounts are included even though they do not belong to any key source
 
-### Requirement: Imported account addresses remain hidden by default
-The CLI SHALL apply the same address privacy policy to imported accounts as to derived accounts. Imported account addresses SHALL be omitted from list output unless the user explicitly requests address display.
-
-#### Scenario: Default account list hides imported account address
-- **WHEN** the user runs `ccd-wallet account list` without the address-reveal flag
-- **AND** the result set includes imported accounts
-- **THEN** imported account addresses are not included in the output
-
-#### Scenario: Explicit address reveal unlocks imported vault
-- **WHEN** the user runs `ccd-wallet account list --show-addresses`
-- **AND** the result set includes imported accounts
-- **THEN** the CLI prompts for the relevant imported accounts vault password before showing imported account addresses
-- **AND** includes imported account addresses only after successful vault unlock
+## ADDED Requirements
 
 ### Requirement: List rows identify key source kind
 Identity and account list rows SHALL identify enough key-source context to distinguish seed-backed derived entities from Ledger-backed derived entities without decrypting private payloads.
@@ -113,4 +98,3 @@ Identity and account list rows SHALL identify enough key-source context to disti
 - **WHEN** the CLI lists an identity or derived account owned by a Ledger signer owner
 - **THEN** the row identifies the owning Ledger label or fingerprint key-source context
 - **AND** no private payload decryption or Ledger device connection is required for that owner label
-

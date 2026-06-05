@@ -66,12 +66,14 @@ fn matches_current_baseline_schema(conn: &Connection) -> Result<bool> {
     for table in [
         "schema_version",
         "wallet_state",
-        "seeds",
-        "seed_vaults",
+        "signer_owners",
+        "signer_owner_vaults",
+        "seed_owner_secrets",
+        "ledger_owner_details",
         "identities",
         "identity_private_payloads",
         "accounts",
-        "account_private_payloads",
+        "derived_account_private_payloads",
         "imported_account_vaults",
         "imported_account_payloads",
         "governance_key_vaults",
@@ -84,8 +86,15 @@ fn matches_current_baseline_schema(conn: &Connection) -> Result<bool> {
     }
 
     for (table, column) in [
+        ("signer_owners", "owner_kind"),
+        ("signer_owner_vaults", "signer_owner_id"),
+        ("seed_owner_secrets", "signer_owner_id"),
+        ("ledger_owner_details", "canonical_public_key"),
+        ("ledger_owner_details", "enrollment_path"),
+        ("identities", "signer_owner_id"),
         ("identities", "expires_at"),
         ("accounts", "source_kind"),
+        ("accounts", "signer_owner_id"),
         ("accounts", "imported_vault_id"),
         ("accounts", "import_kind"),
         ("accounts", "source_metadata_json"),
@@ -142,11 +151,34 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
-    fn foreign_key_delete_action(conn: &Connection, table: &str) -> String {
-        conn.query_row(&format!("PRAGMA foreign_key_list({table})"), [], |row| {
-            row.get(6)
-        })
-        .unwrap()
+    fn has_foreign_key_delete_action(
+        conn: &Connection,
+        table: &str,
+        from_column: &str,
+        target_table: &str,
+        delete_action: &str,
+    ) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA foreign_key_list({table})"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .unwrap();
+
+        for row in rows {
+            let (to_table, from, on_delete) = row.unwrap();
+            if to_table == target_table && from == from_column && on_delete == delete_action {
+                return true;
+            }
+        }
+
+        false
     }
 
     #[test]
@@ -164,12 +196,14 @@ mod tests {
         for table in [
             "schema_version",
             "wallet_state",
-            "seeds",
-            "seed_vaults",
+            "signer_owners",
+            "signer_owner_vaults",
+            "seed_owner_secrets",
+            "ledger_owner_details",
             "identities",
             "identity_private_payloads",
             "accounts",
-            "account_private_payloads",
+            "derived_account_private_payloads",
             "imported_account_vaults",
             "imported_account_payloads",
             "governance_key_vaults",
@@ -186,35 +220,242 @@ mod tests {
             assert_eq!(count, 1, "missing table {table}");
         }
 
+        assert!(has_column(&conn, "signer_owners", "owner_kind").unwrap());
+        assert!(has_column(&conn, "signer_owner_vaults", "signer_owner_id").unwrap());
+        assert!(has_column(&conn, "seed_owner_secrets", "signer_owner_id").unwrap());
+        assert!(has_column(&conn, "ledger_owner_details", "canonical_public_key").unwrap());
+        assert!(has_column(&conn, "ledger_owner_details", "enrollment_path").unwrap());
+        assert!(has_column(&conn, "identities", "signer_owner_id").unwrap());
         assert!(has_column(&conn, "identities", "expires_at").unwrap());
         assert!(has_column(&conn, "accounts", "source_kind").unwrap());
+        assert!(has_column(&conn, "accounts", "signer_owner_id").unwrap());
         assert!(has_column(&conn, "accounts", "imported_vault_id").unwrap());
         assert!(has_column(&conn, "accounts", "import_kind").unwrap());
         assert!(has_column(&conn, "accounts", "source_metadata_json").unwrap());
         assert!(has_index(&conn, "accounts_derived_tuple_unique").unwrap());
 
-        assert_eq!(foreign_key_delete_action(&conn, "seed_vaults"), "CASCADE");
-        assert_eq!(foreign_key_delete_action(&conn, "identities"), "CASCADE");
-        assert_eq!(
-            foreign_key_delete_action(&conn, "identity_private_payloads"),
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "signer_owner_vaults",
+            "signer_owner_id",
+            "signer_owners",
             "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "seed_owner_secrets",
+            "signer_owner_id",
+            "signer_owners",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "ledger_owner_details",
+            "signer_owner_id",
+            "signer_owners",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "identities",
+            "signer_owner_id",
+            "signer_owners",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "identity_private_payloads",
+            "identity_id",
+            "identities",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "accounts",
+            "signer_owner_id",
+            "signer_owners",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "accounts",
+            "imported_vault_id",
+            "imported_account_vaults",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "derived_account_private_payloads",
+            "account_id",
+            "accounts",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "imported_account_payloads",
+            "account_id",
+            "accounts",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "imported_account_payloads",
+            "vault_id",
+            "imported_account_vaults",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "governance_keys",
+            "vault_id",
+            "governance_key_vaults",
+            "CASCADE"
+        ));
+        assert!(has_foreign_key_delete_action(
+            &conn,
+            "governance_key_payloads",
+            "governance_key_id",
+            "governance_keys",
+            "CASCADE"
+        ));
+    }
+
+    #[test]
+    fn signer_owner_schema_enforces_uniqueness_and_cascades() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        run(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO signer_owners (id, owner_kind, label, created_at, updated_at)
+             VALUES ('owner-1', 'seed', 'main', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let duplicate_label = conn
+            .execute(
+                "INSERT INTO signer_owners (id, owner_kind, label, created_at, updated_at)
+                 VALUES ('owner-2', 'ledger', 'main', 1, 1)",
+                [],
+            )
+            .unwrap_err();
+        assert_eq!(
+            duplicate_label.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
         );
-        assert_eq!(foreign_key_delete_action(&conn, "accounts"), "CASCADE");
+
+        conn.execute(
+            "INSERT INTO signer_owner_vaults (
+                signer_owner_id, kdf_algorithm, kdf_params_json, salt, encrypted_dek,
+                dek_nonce, cipher_version, created_at, updated_at
+             ) VALUES ('owner-1', 'argon2id', '{}', x'01', x'02', x'03', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO seed_owner_secrets (
+                signer_owner_id, cipher_version, payload_ciphertext, payload_nonce
+             ) VALUES ('owner-1', 1, x'04', x'05')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO identities (
+                signer_owner_id, network_genesis_hash, ip_identity, identity_index,
+                label, status, created_at
+             ) VALUES ('owner-1', 'net', 7, 0, 'identity', 'done', 1)",
+            [],
+        )
+        .unwrap();
+        let identity_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO identity_private_payloads (identity_id, cipher_version, ciphertext, nonce)
+             VALUES (?1, 1, x'06', x'07')",
+            params![identity_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO accounts (
+                network_genesis_hash, label, status, source_kind, signer_owner_id,
+                ip_identity, identity_index, credential_counter, created_at, updated_at
+             ) VALUES ('net', 'account', 'finalized', 'derived', 'owner-1', 7, 0, 0, 1, 1)",
+            [],
+        )
+        .unwrap();
+        let account_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO derived_account_private_payloads (account_id, cipher_version, ciphertext, nonce)
+             VALUES (?1, 1, x'08', x'09')",
+            params![account_id],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM signer_owners WHERE id = 'owner-1'", [])
+            .unwrap();
+
+        for table in [
+            "signer_owner_vaults",
+            "seed_owner_secrets",
+            "identities",
+            "identity_private_payloads",
+            "accounts",
+            "derived_account_private_payloads",
+        ] {
+            let count: u32 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "expected {table} to cascade to zero rows");
+        }
+    }
+
+    #[test]
+    fn account_source_constraints_reject_inconsistent_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO signer_owners (id, owner_kind, label, created_at, updated_at)
+             VALUES ('owner-1', 'seed', 'main', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        let missing_owner = conn
+            .execute(
+                "INSERT INTO accounts (
+                    network_genesis_hash, label, status, source_kind,
+                    ip_identity, identity_index, credential_counter, created_at, updated_at
+                 ) VALUES ('net', 'bad-derived', 'pending', 'derived', 7, 0, 0, 1, 1)",
+                [],
+            )
+            .unwrap_err();
         assert_eq!(
-            foreign_key_delete_action(&conn, "imported_account_payloads"),
-            "CASCADE"
+            missing_owner.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
         );
+
+        let imported_with_owner = conn
+            .execute(
+                "INSERT INTO imported_account_vaults (
+                    id, network_genesis_hash, kdf_algorithm, kdf_params_json, salt,
+                    encrypted_dek, dek_nonce, cipher_version, created_at, updated_at
+                 ) VALUES ('vault-1', 'net', 'argon2id', '{}', x'01', x'02', x'03', 1, 1, 1)",
+                [],
+            )
+            .and_then(|_| {
+                conn.execute(
+                    "INSERT INTO accounts (
+                        network_genesis_hash, label, status, source_kind, signer_owner_id,
+                        imported_vault_id, created_at, updated_at
+                     ) VALUES ('net', 'bad-imported', 'finalized', 'imported', 'owner-1', 'vault-1', 1, 1)",
+                    [],
+                )
+            })
+            .unwrap_err();
         assert_eq!(
-            foreign_key_delete_action(&conn, "account_private_payloads"),
-            "CASCADE"
-        );
-        assert_eq!(
-            foreign_key_delete_action(&conn, "governance_keys"),
-            "CASCADE"
-        );
-        assert_eq!(
-            foreign_key_delete_action(&conn, "governance_key_payloads"),
-            "CASCADE"
+            imported_with_owner.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::ConstraintViolation)
         );
     }
 

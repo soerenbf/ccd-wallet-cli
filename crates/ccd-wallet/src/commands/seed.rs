@@ -344,11 +344,11 @@ async fn list_seeds(conn: &Connection) -> Result<()> {
     for seed in seeds {
         let identity_count = identities
             .iter()
-            .filter(|record| record.seed_id == seed.id)
+            .filter(|record| record.signer_owner_id == seed.id)
             .count();
         let account_count = accounts
             .iter()
-            .filter(|record| record.seed_id == seed.id)
+            .filter(|record| record.signer_owner_id == seed.id)
             .count();
         println!(
             "{}",
@@ -467,11 +467,11 @@ async fn delete_seed(
     let seed = ensure_seed_exists(conn, &label)?;
     let identity_count = identities::list(conn)?
         .into_iter()
-        .filter(|record| record.seed_id == seed.id)
+        .filter(|record| record.signer_owner_id == seed.id)
         .count();
     let account_count = accounts::list(conn)?
         .into_iter()
-        .filter(|record| record.seed_id == seed.id)
+        .filter(|record| record.signer_owner_id == seed.id)
         .count();
     let confirmation = prompts.prompt_delete_confirmation(&label, identity_count, account_count)?;
     if confirmation != label {
@@ -552,11 +552,11 @@ fn select_seed_label(conn: &Connection, prompts: &mut impl SeedPrompts) -> Resul
         .map(|seed| {
             let identity_count = identities
                 .iter()
-                .filter(|record| record.seed_id == seed.id)
+                .filter(|record| record.signer_owner_id == seed.id)
                 .count();
             let account_count = accounts
                 .iter()
-                .filter(|record| record.seed_id == seed.id)
+                .filter(|record| record.signer_owner_id == seed.id)
                 .count();
             SelectItem {
                 value: seed.label.clone(),
@@ -921,7 +921,7 @@ async fn run_seed_recovery(
         bail!("no recovery-capable identity providers are available on the selected network");
     }
 
-    let existing_identities = identities::list_by_network_and_seed(
+    let existing_identities = identities::list_by_network_and_signer_owner(
         conn,
         &network_entry.genesis_hash,
         &unlocked_seed.record.id,
@@ -930,7 +930,7 @@ async fn run_seed_recovery(
         .into_iter()
         .filter(|record| {
             record.network_genesis_hash == network_entry.genesis_hash
-                && record.seed_id == unlocked_seed.record.id
+                && record.signer_owner_id == unlocked_seed.record.id
         })
         .collect::<Vec<_>>();
 
@@ -1045,7 +1045,7 @@ async fn run_seed_recovery(
                 &unlocked_seed.dek,
                 identities::RecoveredIdentity {
                     network_genesis_hash: &network_entry.genesis_hash,
-                    seed_id: &unlocked_seed.record.id,
+                    signer_owner_id: &unlocked_seed.record.id,
                     ip_identity: identity.provider_id,
                     identity_index: identity.identity_index,
                     label: &label,
@@ -1072,7 +1072,7 @@ async fn run_seed_recovery(
                 &unlocked_seed.dek,
                 accounts::RecoveredAccount {
                     network_genesis_hash: &network_entry.genesis_hash,
-                    seed_id: &unlocked_seed.record.id,
+                    signer_owner_id: &unlocked_seed.record.id,
                     ip_identity: account.provider_id,
                     identity_index: account.identity_index,
                     credential_counter: account.credential_counter,
@@ -1660,7 +1660,7 @@ fn recovered_identity_label(
     provider_id: u32,
     identity_index: u32,
 ) -> Result<String> {
-    if let Some(record) = identities::find_by_network_seed_ip_and_index(
+    if let Some(record) = identities::find_by_network_signer_owner_ip_and_index(
         conn,
         network_genesis_hash,
         seed_id,
@@ -1686,7 +1686,7 @@ fn recovered_account_label(
     identity_index: u32,
     credential_counter: u32,
 ) -> Result<String> {
-    if let Some(record) = accounts::find_by_derivation(
+    if let Some(record) = accounts::find_by_derived_tuple(
         conn,
         network_genesis_hash,
         seed_id,
@@ -2375,7 +2375,9 @@ mod tests {
 
         assert!(seeds::find_by_label(&conn, "main_seed").unwrap().is_some());
         let vault_count: u32 = conn
-            .query_row("SELECT COUNT(*) FROM seed_vaults", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM signer_owner_vaults", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(vault_count, 1);
     }

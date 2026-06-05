@@ -10,9 +10,9 @@ This document covers:
 - per-domain data encryption keys
 - which data is plaintext vs encrypted at rest
 - AAD binding strategy
-- password change behavior for seed vaults
+- password change behavior for signer-owner vaults
 
-It does **not** describe network transport security or chain-level cryptography.
+It does **not** describe network transport security, Ledger device PIN/security, or chain-level cryptography.
 
 ## Crypto primitives
 
@@ -31,13 +31,15 @@ Default Argon2 parameters:
 
 ## Encryption domains
 
-The store has three password domains.
+The store has three password-domain families.
 Each domain owns its own DEK and its own encrypted child payloads.
 
-1. **Seed domain**
-   - unlocked by the seed password
-   - owns the seed secret itself
-   - also owns identity private payloads and derived account private payloads
+1. **Signer-owner domain**
+   - unlocked by the key source's local password
+   - exists for both seed-backed and Ledger-backed signer owners
+   - owns identity private payloads and derived account private payloads
+   - for seed owners, also owns the encrypted seed secret itself
+   - for Ledger owners, does **not** contain Ledger private signing material
 
 2. **Imported account vault domain**
    - unlocked by the imported-account-vault password for one network
@@ -75,10 +77,13 @@ This lets password changes re-wrap the DEK without forcing all child payloads to
 
 ```mermaid
 flowchart LR
-    SP[Seed password] --> SKEK[Seed KEK] --> SDEK[Seed DEK]
-    SDEK --> SeedPayload[Seed payload]
-    SDEK --> IdentityPayloads[Identity private payloads]
-    SDEK --> DerivedAccountPayloads[Derived account private payloads]
+    OP[Key source password] --> OKEK[Signer owner KEK] --> ODEK[Signer owner DEK]
+    ODEK --> SeedSecret[Seed owner secret]
+    ODEK --> IdentityPayloads[Identity private payloads]
+    ODEK --> DerivedAccountPayloads[Derived account private payloads]
+
+    LP[Ledger device] --> LedgerSigning[Hardware-held signing]
+    ODEK -. local privacy only .-> LedgerMetadata[Ledger-owned local payloads]
 
     IP[Imported vault password] --> IKEK[Imported vault KEK] --> IDEK[Imported vault DEK]
     IDEK --> ImportedPayloads[Imported account payloads]
@@ -86,6 +91,8 @@ flowchart LR
     GP[Governance vault password] --> GKEK[Governance vault KEK] --> GDEK[Governance vault DEK]
     GDEK --> GovernancePayloads[Governance key payloads]
 ```
+
+A Ledger signer owner's local password protects wallet-local payloads only. It does not replace the Ledger device and does not expose Ledger private signing material.
 
 ## Plaintext vs encrypted at rest
 
@@ -95,9 +102,10 @@ The store intentionally keeps enough metadata plaintext for normal CLI workflows
 
 | Area | Plaintext at rest |
 |---|---|
-| Seeds | `id`, `label`, timestamps |
-| Seed vault metadata | KDF algorithm, KDF params JSON, salt, encrypted DEK, DEK nonce, cipher version |
-| Identities | owner seed id, network genesis hash, provider/index tuple, label, status, `expires_at`, timestamps |
+| Signer owners / key sources | `id`, `owner_kind`, `label`, timestamps |
+| Signer owner vault metadata | KDF algorithm, KDF params JSON, salt, encrypted DEK, DEK nonce, cipher version, timestamps |
+| Ledger owner details | canonical public key, fingerprint, enrollment path, optional app metadata, timestamps |
+| Identities | owner signer id, network genesis hash, provider/index tuple, label, status, `expires_at`, timestamps |
 | Accounts | network genesis hash, label, status, `source_kind`, derived tuple fields, imported vault reference, import metadata, transaction hash, timestamps |
 | Imported account vaults | vault id, network genesis hash, KDF metadata, encrypted DEK metadata, timestamps |
 | Governance key vaults | vault id, network genesis hash, KDF metadata, encrypted DEK metadata, timestamps |
@@ -107,10 +115,10 @@ The store intentionally keeps enough metadata plaintext for normal CLI workflows
 
 | Encrypted object | Stored in |
 |---|---|
-| Seed secret bytes | `seed_vaults.payload_ciphertext` |
-| Seed DEK | `seed_vaults.encrypted_dek` |
+| Signer-owner DEK | `signer_owner_vaults.encrypted_dek` |
+| Seed secret bytes | `seed_owner_secrets.payload_ciphertext` |
 | Identity private payload (`code_uri`, identity object JSON) | `identity_private_payloads.ciphertext` |
-| Derived account private payload (`AccountPrivatePayload`) | `account_private_payloads.ciphertext` |
+| Derived account private payload (`AccountPrivatePayload`) | `derived_account_private_payloads.ciphertext` |
 | Imported account secret payload (address, signing material, credential metadata, optional encryption keys, source metadata) | `imported_account_payloads.ciphertext` |
 | Imported-account vault DEK | `imported_account_vaults.encrypted_dek` |
 | Governance key JSON payload | `governance_key_payloads.ciphertext` |
@@ -121,32 +129,34 @@ The store intentionally keeps enough metadata plaintext for normal CLI workflows
 Every AEAD operation uses object-specific Associated Additional Data created through `object_aad(id, kind, cipher_version)`.
 That means ciphertext is authenticated not just against the key, but also against the expected object identity and context.
 
-### Seed vault AAD
-- seed DEK AAD: `<seed_id>:seed_dek:v1`
-- seed payload AAD: `<seed_id>:seed:v1`
+### Signer-owner vault AAD
+- signer-owner DEK AAD: `<signer_owner_id>:signer_owner_dek:v1`
+
+### Seed owner secret AAD
+- seed secret payload AAD: `<signer_owner_id>:seed_owner_secret:v1`
 
 ### Identity payload AAD
 Identity payloads are bound to:
 - identity row id
 - network genesis hash
-- seed id
+- signer owner id
 - identity provider index
 - identity index
 
 Effective identity payload context:
-- `<identity_id>:<network_genesis_hash>:<seed_id>:<ip_identity>:<identity_index>`
+- `<identity_id>:<network_genesis_hash>:<signer_owner_id>:<ip_identity>:<identity_index>`
 
 ### Derived account payload AAD
 Derived account payloads are bound to:
 - account row id
 - network genesis hash
-- seed id
+- signer owner id
 - identity provider index
 - identity index
 - credential counter
 
 Effective derived account payload context:
-- `<account_id>:<network_genesis_hash>:<seed_id>:<ip_identity>:<identity_index>:<credential_counter>`
+- `<account_id>:<network_genesis_hash>:<signer_owner_id>:<ip_identity>:<identity_index>:<credential_counter>`
 
 ### Imported account payload AAD
 Imported account payloads are bound to:
@@ -186,11 +196,11 @@ flowchart TD
 
 ## Password changes
 
-For seeds, password changes re-encrypt the DEK only:
+For signer owners, password changes re-encrypt the DEK only:
 - unlock existing DEK with the old password-derived KEK
 - derive a new KEK from the new password and a new salt
 - re-encrypt the same DEK under the new KEK
-- leave the encrypted seed payload unchanged
+- leave encrypted seed, identity, and derived-account payloads unchanged
 
 This keeps password rotation proportional to vault count rather than payload count.
 

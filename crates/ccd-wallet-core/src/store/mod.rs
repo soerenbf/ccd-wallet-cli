@@ -6,4 +6,5 @@ pub mod governance;
 pub mod identities;
 pub mod migrations;
 pub mod seeds;
+pub mod signer_owners;
 pub mod wallet_state;
