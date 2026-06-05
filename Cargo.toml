@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet-connect", "crates/ccd-wallet"]
+members = ["crates/ccd-wallet-core", "crates/ccd-wallet-identity-provider", "crates/ccd-wallet-connect", "crates/ccd-wallet-ledger", "crates/ccd-wallet"]
 resolver = "2"
 
 [workspace.package]

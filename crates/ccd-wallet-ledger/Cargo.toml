@@ -1,0 +1,16 @@
+[package]
+name = "ccd-wallet-ledger"
+version.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[features]
+default = []
+sdk = ["dep:concordium-rust-sdk"]
+hid = []
+
+[dependencies]
+concordium-rust-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow.workspace = true

@@ -642,6 +642,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccd-wallet-ledger"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "concordium-rust-sdk",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
