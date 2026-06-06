@@ -49,6 +49,12 @@ The request includes:
 
 The update-credentials command uses a P2 subprotocol. The crate preserves the referenced JavaScript sequencing by setting P2 for initial state, credential index, credential fields, credential ID count, credential IDs, and threshold.
 
+## Identity issuance material
+
+The app 5.4.1 legacy new-path private-key export protocol can export PRFKey and IDCredSec for a selected identity provider and identity index, but it does not export deterministic signature blinding randomness. App 5.5.0+ purpose-based identity credential creation export adds the missing signature blinding randomness and returns all three values as length-prefixed 32-byte fields. Higher-level identity issuance code must reject legacy raw responses when a recoverable Ledger-backed identity requires all three values.
+
+A physical Ledger device running Concordium app `5.6.2` has been used to validate that the purpose-based identity issuance flow works end-to-end for Ledger-backed `identity new`.
+
 ## Design intent
 
 These APIs are deliberately low-level. Higher-level code should prepare canonical Concordium credential bytes, then pass staged byte fields into this crate for Ledger exchange and raw signature retrieval.

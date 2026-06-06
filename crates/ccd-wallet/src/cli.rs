@@ -461,6 +461,8 @@ pub struct LedgerCommand {
 pub enum LedgerSubcommand {
     /// Enroll a Ledger device as a wallet key source.
     Setup(LedgerSetupArgs),
+    /// Show connected Concordium Ledger app information.
+    Show,
 }
 
 #[derive(Debug, Args)]
@@ -664,6 +666,10 @@ pub struct IdentityNewArgs {
     /// Return after receiving the callback code URI without waiting for identity completion.
     #[arg(long = "no-wait")]
     pub no_wait: bool,
+
+    /// Explicitly allow Ledger identity issuance secrets to be exported temporarily in non-interactive mode.
+    #[arg(long = "allow-ledger-secret-export")]
+    pub allow_ledger_secret_export: bool,
 
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive", conflicts_with = "interactive")]
@@ -1944,6 +1950,7 @@ mod tests {
             "ledger-main",
             "--network",
             "testnet",
+            "--allow-ledger-secret-export",
         ]);
 
         match cli.command {
@@ -1953,6 +1960,7 @@ mod tests {
                     assert_eq!(args.provider, Some(7));
                     assert_eq!(args.seed.as_deref(), Some("ledger-main"));
                     assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.allow_ledger_secret_export);
                 }
                 other => panic!("expected identity new command, got {other:?}"),
             },
@@ -1998,8 +2006,22 @@ mod tests {
                 LedgerSubcommand::Setup(args) => {
                     assert_eq!(args.label.as_deref(), Some("ledger-main"));
                 }
+                other => panic!("expected ledger setup command, got {other:?}"),
             },
             other => panic!("expected ledger setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_show_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "ledger", "show"]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Show => {}
+                other => panic!("expected ledger show command, got {other:?}"),
+            },
+            other => panic!("expected ledger command, got {other:?}"),
         }
     }
 

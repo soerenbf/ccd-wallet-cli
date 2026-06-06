@@ -12,7 +12,10 @@ use crate::store::crypto::{
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -62,22 +65,12 @@ impl SignerOwnerKind {
             Self::Ledger => "ledger",
         }
     }
+}
 
-    /// Parse a signer-owner kind from the database representation.
-    ///
-    /// # Arguments
-    /// * `value` - Lowercase signer-owner kind string.
-    ///
-    /// # Errors
-    /// Returns an error if `value` is not a supported signer-owner kind.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ccd_wallet_core::store::signer_owners::SignerOwnerKind;
-    /// assert_eq!(SignerOwnerKind::from_str("seed").unwrap(), SignerOwnerKind::Seed);
-    /// ```
-    pub fn from_str(value: &str) -> Result<Self> {
+impl FromStr for SignerOwnerKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
         match value {
             "seed" => Ok(Self::Seed),
             "ledger" => Ok(Self::Ledger),

@@ -121,3 +121,33 @@ pub fn parse_public_key_response(reply: Vec<u8>, signed_key: bool) -> Result<Pub
         signed_public_key,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DerivationPath, PublicKeyOptions};
+
+    #[test]
+    fn public_key_confirmation_p1_matches_ledger_app_protocol() {
+        let path = DerivationPath::new([1]).unwrap();
+        let no_confirm = build_public_key_command(&PublicKeyRequest {
+            path: path.clone(),
+            options: PublicKeyOptions {
+                confirm_on_device: false,
+                signed_key: false,
+            },
+        });
+        let confirm = build_public_key_command(&PublicKeyRequest {
+            path,
+            options: PublicKeyOptions {
+                confirm_on_device: true,
+                signed_key: false,
+            },
+        });
+
+        assert_eq!(no_confirm.p1, P1_PUBLIC_KEY_NO_CONFIRM);
+        assert_eq!(no_confirm.p1, 0x01);
+        assert_eq!(confirm.p1, P1_PUBLIC_KEY_CONFIRM);
+        assert_eq!(confirm.p1, 0x00);
+    }
+}

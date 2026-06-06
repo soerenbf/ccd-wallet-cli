@@ -58,7 +58,8 @@ ccd-wallet
 │  ├─ use
 │  └─ show
 ├─ ledger                       [Implemented]
-│  └─ setup
+│  ├─ setup
+│  └─ show
 ├─ identity                     [Implemented]
 │  ├─ list
 │  ├─ new
@@ -109,7 +110,9 @@ ccd-wallet
 
 The internal storage model calls seed-backed and Ledger-backed derivation authorities **signer owners**. User-facing CLI text should call the same concept a **key source** when a command or prompt needs to cover both seed phrases and Ledger devices.
 
-The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app.
+The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app. `ledger show` inspects the connected Concordium Ledger app and displays the app name plus app version when the app supports version reporting.
+
+`identity new` can target either a seed-backed or Ledger-backed key source through `--seed <LABEL>` / `--key-source <LABEL>`. Ledger-backed identity issuance uses an explicit export security model and requires a Concordium Ledger app with purpose-based export support (version 5.5.0 or newer): interactive runs require confirmation, and non-interactive runs must include `--allow-ledger-secret-export` before the CLI exports identity issuance material temporarily from the Ledger app. This flow has been validated on a physical Ledger device running Concordium app `5.6.2`.
 
 ## Planned command spaces
 

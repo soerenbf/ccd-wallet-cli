@@ -10,7 +10,8 @@ use ccd_wallet_core::store::signer_owners::{
     self, LEDGER_OWNER_ENROLLMENT_PATH, NewLedgerOwnerDetails, SignerOwnerKind,
 };
 use ccd_wallet_ledger::{
-    ConcordiumLedgerApp, DerivationPath, HidTransport, LedgerTransport, PublicKeyOptions,
+    ConcordiumLedgerApp, DerivationPath, HidTransport, LedgerError, LedgerTransport,
+    PublicKeyOptions,
 };
 use cliclack::{input, password};
 use rusqlite::Connection;
@@ -34,7 +35,24 @@ use std::str::FromStr;
 pub async fn run(conn: &Connection, command: LedgerSubcommand) -> Result<()> {
     match command {
         LedgerSubcommand::Setup(args) => setup(conn, args).await,
+        LedgerSubcommand::Show => show().await,
     }
+}
+
+async fn show() -> Result<()> {
+    let transport = HidTransport::open_first()
+        .context("failed to open Ledger device; connect a Ledger with the Concordium app open")?;
+    let mut app = ConcordiumLedgerApp::new(transport);
+    let app_name = read_app_name(&mut app)?.unwrap_or_else(|| "<unknown>".to_owned());
+    let version = read_app_version(&mut app)?;
+
+    println!("Ledger app");
+    println!("  name:    {app_name}");
+    match version {
+        Some(version) => println!("  version: {version}"),
+        None => println!("  version: unavailable (requires Concordium Ledger app 5.4.1 or newer)"),
+    }
+    Ok(())
 }
 
 async fn setup(conn: &Connection, args: LedgerSetupArgs) -> Result<()> {
@@ -48,7 +66,7 @@ async fn setup(conn: &Connection, args: LedgerSetupArgs) -> Result<()> {
         .context("failed to open Ledger device; connect a Ledger with the Concordium app open")?;
     let mut app = ConcordiumLedgerApp::new(transport);
     let app_name = read_app_name(&mut app)?;
-    let canonical_public_key = read_canonical_public_key(&mut app)?;
+    let canonical_public_key = read_canonical_public_key(&mut app, true)?;
     if signer_owners::find_ledger_details_by_canonical_public_key(conn, &canonical_public_key)?
         .is_some()
     {
@@ -113,7 +131,6 @@ fn validate_key_source_label(label: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) fn verify_connected_ledger_owner<T: LedgerTransport>(
     conn: &Connection,
     signer_owner_id: &str,
@@ -123,7 +140,7 @@ pub(crate) fn verify_connected_ledger_owner<T: LedgerTransport>(
         .with_context(|| {
             format!("signer owner '{signer_owner_id}' is not an enrolled Ledger key source")
         })?;
-    let connected_key = read_canonical_public_key(app)?;
+    let connected_key = read_canonical_public_key(app, false)?;
     if connected_key != details.canonical_public_key {
         bail!(
             "connected Ledger does not match key source '{}' (expected fingerprint {})",
@@ -141,8 +158,19 @@ fn read_app_name<T: LedgerTransport>(app: &mut ConcordiumLedgerApp<T>) -> Result
     }
 }
 
+fn read_app_version<T: LedgerTransport>(
+    app: &mut ConcordiumLedgerApp<T>,
+) -> Result<Option<ccd_wallet_ledger::AppVersion>> {
+    match app.get_app_version() {
+        Ok(version) => Ok(Some(version)),
+        Err(LedgerError::Status { status: 0x6D00, .. }) => Ok(None),
+        Err(err) => Err(err).context("failed to read Concordium Ledger app version"),
+    }
+}
+
 fn read_canonical_public_key<T: LedgerTransport>(
     app: &mut ConcordiumLedgerApp<T>,
+    confirm_on_device: bool,
 ) -> Result<Vec<u8>> {
     let path = DerivationPath::from_str(LEDGER_OWNER_ENROLLMENT_PATH)
         .context("invalid Ledger enrollment derivation path")?;
@@ -150,7 +178,7 @@ fn read_canonical_public_key<T: LedgerTransport>(
         .get_public_key(
             path,
             PublicKeyOptions {
-                confirm_on_device: true,
+                confirm_on_device,
                 signed_key: false,
             },
         )
@@ -206,6 +234,10 @@ mod tests {
         let transport = MockTransport::new([public_key_reply(7)]);
         let mut app = ConcordiumLedgerApp::new(transport);
         verify_connected_ledger_owner(&conn, &owner.id, &mut app).unwrap();
+
+        let commands = app.transport().commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].p1, 0x01);
     }
 
     #[test]

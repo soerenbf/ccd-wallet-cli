@@ -1,8 +1,5 @@
-# identity-issuance Specification
+## ADDED Requirements
 
-## Purpose
-TBD - created by archiving change add-identity-issuance. Update Purpose after archive.
-## Requirements
 ### Requirement: Ledger identity issuance requires explicit export approval
 When `identity new` targets a Ledger key source, the CLI SHALL treat Ledger secret export as an explicit security-mode change rather than a normal signing step. Interactive operation SHALL display a warning that the required identity issuance secrets will be exported into host process memory temporarily and SHALL require an explicit confirmation before any Ledger export command is sent. In `--non-interactive` mode, the command SHALL require the explicit opt-in flag `--allow-ledger-secret-export` and SHALL otherwise fail with an actionable error. Ledger-backed identity issuance SHALL require a Ledger app export path that provides every recovery-critical issuance secret deterministically from the Ledger.
 
@@ -29,6 +26,8 @@ When `identity new` targets a Ledger key source, the CLI SHALL treat Ledger secr
 - **WHEN** the user declines the explicit Ledger export approval
 - **THEN** the CLI exits without calling the identity provider
 - **AND** no pending identity row is written
+
+## MODIFIED Requirements
 
 ### Requirement: Identity issuance can be initiated with a known provider ID
 `identity new <LABEL> --provider <provider_id>` SHALL initiate the v1 Concordium identity issuance protocol with the specified identity provider without presenting a selection menu. `<LABEL>` is a user-supplied name for the identity; it must be non-empty, contain only ASCII alphanumeric characters, dashes, or underscores, and be unique within the resolved network.
@@ -157,7 +156,7 @@ The CLI SHALL implement the v1 issuance protocol by orchestrating node queries, 
 1. Resolve wallet-facing provider metadata from the selected network's `wallet_proxy`.
 2. Unlock the selected key source's local storage domain once.
 3. If the selected key source is a seed, derive the issuance material from the seed-backed wallet and use the seed DEK for encrypted identity private payload storage.
-4. If the selected key source is a Ledger signer owner, verify the connected Ledger matches that signer owner, complete the explicit export approval flow, use the Ledger app 5.5.0+ purpose-based identity credential creation export to derive IDCredSec, PRFKey, and signature blinding randomness, and use the Ledger owner vault DEK for encrypted identity private payload storage.
+4. If the selected key source is a Ledger signer owner, complete the explicit export approval flow, use the Ledger app 5.5.0+ purpose-based identity credential creation export to derive IDCredSec, PRFKey, and signature blinding randomness, and use the Ledger owner vault DEK for encrypted identity private payload storage.
 5. Build and send the issuance start `GET` request to the provider's `issuanceStart` URL as a preflight step.
 6. If the preflight returns a redirect, open the redirect target URL in the system browser (or print it as a fallback).
 7. If the preflight does not return a redirect, open the original issuance URL in the system browser.
@@ -170,14 +169,6 @@ The CLI SHALL implement the v1 issuance protocol by orchestrating node queries, 
 - **WHEN** the selected `wallet_proxy` does not return metadata for the chosen identity provider
 - **THEN** the CLI exits with an actionable error before browser handoff
 
-#### Scenario: Identity provider responds with a redirect
-- **WHEN** the IP's issuance start endpoint responds with a redirect
-- **THEN** the CLI opens the redirect target URL in the browser
-
-#### Scenario: Identity provider responds with a browser entry page
-- **WHEN** the IP's issuance start endpoint responds without a redirect
-- **THEN** the CLI opens the original issuance URL in the browser instead of failing early
-
 #### Scenario: Successful seed-backed issuance flow
 - **WHEN** the full issuance flow completes with status `done` for a seed-backed key source
 - **THEN** the CLI stores the identity object encrypted under the owning seed password domain
@@ -189,6 +180,15 @@ The CLI SHALL implement the v1 issuance protocol by orchestrating node queries, 
 - **THEN** the CLI stores the identity object encrypted under the owning Ledger signer-owner password domain
 - **AND** prints a success message for the assigned identity label
 
+
+#### Scenario: Identity provider responds with a redirect
+- **WHEN** the IP's issuance start endpoint responds with a redirect
+- **THEN** the CLI opens the redirect target URL in the browser
+
+#### Scenario: Identity provider responds with a browser entry page
+- **WHEN** the IP's issuance start endpoint responds without a redirect
+- **THEN** the CLI opens the original issuance URL in the browser instead of failing early
+
 #### Scenario: Identity provider reports error
 - **WHEN** polling returns status `error`
 - **THEN** the CLI deletes the pending identity row and its encrypted private payload
@@ -197,77 +197,8 @@ The CLI SHALL implement the v1 issuance protocol by orchestrating node queries, 
 #### Scenario: Polling times out
 - **WHEN** polling has not resolved within 5 minutes
 - **THEN** the CLI exits with an error indicating the identity is still pending
-- **AND** the stored `code_uri` remains encrypted under the owning seed password domain
+- **AND** the stored `code_uri` remains encrypted under the owning key-source password domain
 
 #### Scenario: No plaintext identity private data is stored during issuance
 - **WHEN** identity issuance stores `code_uri` or identity object data
 - **THEN** neither value is written to SQLite as plaintext
-
-### Requirement: Browser handoff uses manual callback paste
-The CLI SHALL keep manual callback paste available as an explicit callback transport selected by flag. In manual mode, the CLI prints the browser URL and prompts the user to paste the final redirect URL after completing browser-based identity verification. The CLI SHALL NOT automatically switch from loopback mode to manual paste after a loopback timeout. All identity issuance input prompts SHALL use `cliclack`.
-
-#### Scenario: CLI prints provider URL and prompts for callback in manual mode
-- **WHEN** the browser handoff step uses manual callback mode
-- **THEN** the CLI prints the URL to open
-- **AND** uses a `cliclack` input prompt to request the final redirect URL
-
-#### Scenario: Pasted URL contains code_uri fragment
-- **WHEN** the user pastes a URL of the form `<redirect_uri>#code_uri=<url>`
-- **THEN** the CLI extracts `<url>` and proceeds to poll it
-
-#### Scenario: Pasted URL contains error fragment
-- **WHEN** the user pastes a URL containing `#error=<detail>`
-- **THEN** the CLI exits with the error detail
-
-#### Scenario: Pasted URL is unrecognisable
-- **WHEN** the user pastes a URL that contains neither `#code_uri=` nor `#error=`
-- **THEN** the CLI exits with an error asking the user to paste the correct URL
-
-### Requirement: Browser handoff uses loopback callback by default
-The CLI SHALL use a local loopback callback receiver by default for identity issuance. The receiver SHALL bind only to `127.0.0.1` on an ephemeral port, generate a single-use nonce-bearing callback path, and provide that URL as the issuance `redirect_uri`.
-
-#### Scenario: Loopback callback session provides redirect URI
-- **WHEN** identity issuance reaches browser handoff setup
-- **THEN** the CLI starts a local loopback callback receiver
-- **AND** uses a redirect URI of the form `http://127.0.0.1:<port>/callback/<nonce>` for the issuance request
-
-#### Scenario: Browser callback fragment is bridged to CLI
-- **WHEN** the browser lands on the loopback callback URL with `#code_uri=<url>` in the fragment
-- **THEN** the local callback page reads the fragment in the browser
-- **AND** posts it back to the loopback receiver
-- **AND** the CLI extracts `<url>` and proceeds to poll it
-
-#### Scenario: Browser callback error is bridged to CLI
-- **WHEN** the browser lands on the loopback callback URL with `#error=<detail>` in the fragment
-- **THEN** the local callback page posts the fragment back to the loopback receiver
-- **AND** the CLI exits with the provider error detail
-
-#### Scenario: Callback page is minimal
-- **WHEN** the browser loads the loopback callback page
-- **THEN** the page displays only minimal status text needed to complete the handoff and tell the user they may close the tab
-
-#### Scenario: Loopback callback is single-use
-- **WHEN** the loopback receiver accepts a callback result
-- **THEN** it resolves the waiting issuance flow
-- **AND** refuses or ignores subsequent completion attempts for the same nonce
-- **AND** shuts down the local callback listener
-
-#### Scenario: Unexpected callback path is rejected
-- **WHEN** a request uses the wrong callback path or nonce
-- **THEN** the loopback receiver rejects the request without completing the issuance flow
-
-#### Scenario: Explicit manual mode bypasses loopback
-- **WHEN** the user selects manual callback mode with the explicit flag
-- **THEN** the CLI does not start a loopback callback receiver
-- **AND** uses manual callback paste for browser handoff
-
-#### Scenario: Loopback timeout does not automatically fall back
-- **WHEN** loopback callback mode times out before receiving a callback
-- **THEN** the CLI exits with an actionable error explaining that the user can retry with the manual callback flag
-
-#### Scenario: Pending identity row is inserted after code URI is received
-- **WHEN** loopback mode starts and browser handoff begins
-- **THEN** no pending identity row is inserted yet
-- **WHEN** the callback receiver obtains a `code_uri`
-- **THEN** the CLI inserts the pending identity row as in the existing issuance flow
-

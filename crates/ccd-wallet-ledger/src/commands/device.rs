@@ -6,13 +6,17 @@ use crate::{
         constants::{
             Instruction, NONE, P1_ACCOUNT_CREATION, P1_ACCOUNT_CREDENTIAL_DISCOVERY,
             P1_CREATION_OF_ZK_PROOF, P1_ID_RECOVERY, P1_IDENTITY_CREDENTIAL_CREATION,
-            P1_LEGACY_VERIFY_ADDRESS, P1_VERIFY_ADDRESS,
+            P1_LEGACY_VERIFY_ADDRESS, P1_NEW_PATH_LEGACY_PRF_KEY,
+            P1_NEW_PATH_LEGACY_PRF_KEY_AND_ID_CRED_SEC, P1_NEW_PATH_LEGACY_PRF_KEY_RECOVERY,
+            P1_VERIFY_ADDRESS, P2_NEW_PATH_LEGACY_BLS_KEY, P2_NEW_PATH_LEGACY_SEED,
         },
     },
-    error::Result,
+    error::{LedgerError, Result},
     transport::LedgerTransport,
     types::{
-        ExportPrivateKeyLegacyRequest, ExportPrivateKeyNewRequest, ExportPrivateKeyNewType,
+        AppVersion, ExportPrivateKeyLegacyRequest, ExportPrivateKeyNetwork,
+        ExportPrivateKeyNewPathLegacyMode, ExportPrivateKeyNewPathLegacyOutput,
+        ExportPrivateKeyNewPathLegacyRequest, ExportPrivateKeyNewRequest, ExportPrivateKeyNewType,
         LegacyVerifyAddressRequest, VerifyAddressRequest,
     },
 };
@@ -122,6 +126,47 @@ pub fn get_app_name<T: LedgerTransport>(transport: &mut T) -> Result<Vec<u8>> {
     Ok(transport.exchange(&build_get_app_name_command())?.data)
 }
 
+/// Build the app-version query command.
+///
+/// # Examples
+///
+/// ```
+/// use ccd_wallet_ledger::commands::device::build_get_app_version_command;
+/// assert_eq!(build_get_app_version_command().ins, 0x40);
+/// ```
+pub fn build_get_app_version_command() -> ApduCommand {
+    ApduCommand::new(Instruction::GetAppVersion.as_u8(), NONE, NONE, Vec::new())
+}
+
+/// Query the Ledger app semantic version.
+///
+/// # Arguments
+/// * `transport` - APDU transport connected to a Ledger device.
+///
+/// # Errors
+/// Returns an error if APDU exchange fails, the app does not support version reporting, or the
+/// response is not exactly three bytes.
+pub fn get_app_version<T: LedgerTransport>(transport: &mut T) -> Result<AppVersion> {
+    parse_app_version_response(transport.exchange(&build_get_app_version_command())?.data)
+}
+
+/// Parse an app-version response.
+///
+/// # Arguments
+/// * `bytes` - Status-stripped response bytes.
+///
+/// # Errors
+/// Returns an error if `bytes` is not exactly three bytes.
+pub fn parse_app_version_response(bytes: Vec<u8>) -> Result<AppVersion> {
+    let [major, minor, patch]: [u8; 3] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+        LedgerError::invalid_request(format!(
+            "app-version response is {} bytes; expected 3",
+            bytes.len()
+        ))
+    })?;
+    Ok(AppVersion::new(major, minor, patch))
+}
+
 /// Build a legacy private-key export command.
 ///
 /// # Arguments
@@ -157,26 +202,26 @@ pub fn export_private_key_legacy<T: LedgerTransport>(
         .data)
 }
 
-/// Build a new private-key export command.
+/// Build a purpose-based new private-key export command for app 5.5.0 and newer.
 ///
 /// # Arguments
 ///
-/// * `request` - New export request.
+/// * `request` - Purpose-based export request.
 pub fn build_export_private_key_new_command(request: &ExportPrivateKeyNewRequest) -> ApduCommand {
     ApduCommand::new(
         Instruction::ExportPrivateKeyNew.as_u8(),
         export_private_key_new_p1(request.export_type),
-        NONE,
+        export_private_key_new_p2(request.network),
         request.payload.clone(),
     )
 }
 
-/// Execute new private-key export and return raw device bytes.
+/// Execute purpose-based new private-key export and return raw device bytes.
 ///
 /// # Arguments
 ///
 /// * `transport` - APDU transport connected to a Ledger device.
-/// * `request` - New export request.
+/// * `request` - Purpose-based export request.
 ///
 /// # Errors
 ///
@@ -190,6 +235,38 @@ pub fn export_private_key_new<T: LedgerTransport>(
         .data)
 }
 
+/// Build a legacy new-path private-key export command.
+///
+/// # Arguments
+/// * `request` - Legacy-new-path export mode, output kind, and payload.
+pub fn build_export_private_key_new_path_legacy_command(
+    request: &ExportPrivateKeyNewPathLegacyRequest,
+) -> ApduCommand {
+    ApduCommand::new(
+        Instruction::ExportPrivateKeyNew.as_u8(),
+        export_private_key_new_path_legacy_p1(request.mode),
+        export_private_key_new_path_legacy_p2(request.output),
+        request.payload.clone(),
+    )
+}
+
+/// Execute legacy new-path private-key export and return raw device bytes.
+///
+/// # Arguments
+/// * `transport` - APDU transport connected to a Ledger device.
+/// * `request` - Legacy-new-path export request.
+///
+/// # Errors
+/// Returns an error if APDU exchange fails or the Ledger app returns a non-success status word.
+pub fn export_private_key_new_path_legacy<T: LedgerTransport>(
+    transport: &mut T,
+    request: &ExportPrivateKeyNewPathLegacyRequest,
+) -> Result<Vec<u8>> {
+    Ok(transport
+        .exchange(&build_export_private_key_new_path_legacy_command(request))?
+        .data)
+}
+
 fn export_private_key_new_p1(export_type: ExportPrivateKeyNewType) -> u8 {
     match export_type {
         ExportPrivateKeyNewType::IdentityCredentialCreation => P1_IDENTITY_CREDENTIAL_CREATION,
@@ -197,6 +274,30 @@ fn export_private_key_new_p1(export_type: ExportPrivateKeyNewType) -> u8 {
         ExportPrivateKeyNewType::IdRecovery => P1_ID_RECOVERY,
         ExportPrivateKeyNewType::AccountCredentialDiscovery => P1_ACCOUNT_CREDENTIAL_DISCOVERY,
         ExportPrivateKeyNewType::CreationOfZkProof => P1_CREATION_OF_ZK_PROOF,
+    }
+}
+
+fn export_private_key_new_p2(network: ExportPrivateKeyNetwork) -> u8 {
+    match network {
+        ExportPrivateKeyNetwork::Mainnet => 0x00,
+        ExportPrivateKeyNetwork::Testnet => 0x01,
+    }
+}
+
+fn export_private_key_new_path_legacy_p1(mode: ExportPrivateKeyNewPathLegacyMode) -> u8 {
+    match mode {
+        ExportPrivateKeyNewPathLegacyMode::PrfKey => P1_NEW_PATH_LEGACY_PRF_KEY,
+        ExportPrivateKeyNewPathLegacyMode::PrfKeyRecovery => P1_NEW_PATH_LEGACY_PRF_KEY_RECOVERY,
+        ExportPrivateKeyNewPathLegacyMode::PrfKeyAndIdCredSec => {
+            P1_NEW_PATH_LEGACY_PRF_KEY_AND_ID_CRED_SEC
+        }
+    }
+}
+
+fn export_private_key_new_path_legacy_p2(output: ExportPrivateKeyNewPathLegacyOutput) -> u8 {
+    match output {
+        ExportPrivateKeyNewPathLegacyOutput::Seed => P2_NEW_PATH_LEGACY_SEED,
+        ExportPrivateKeyNewPathLegacyOutput::BlsKey => P2_NEW_PATH_LEGACY_BLS_KEY,
     }
 }
 
@@ -231,11 +332,39 @@ mod tests {
     }
 
     #[test]
-    fn export_private_key_new_maps_export_type_to_p1() {
+    fn get_app_version_parses_three_byte_response() {
+        let mut transport = MockTransport::new([ok_reply(vec![5, 4, 1])]);
+        assert_eq!(
+            get_app_version(&mut transport).unwrap(),
+            AppVersion::new(5, 4, 1)
+        );
+        assert_eq!(
+            transport.commands()[0].ins,
+            Instruction::GetAppVersion.as_u8()
+        );
+    }
+
+    #[test]
+    fn purpose_based_export_private_key_new_uses_p1_and_network_p2() {
         let command = build_export_private_key_new_command(&ExportPrivateKeyNewRequest {
             export_type: ExportPrivateKeyNewType::AccountCreation,
+            network: ExportPrivateKeyNetwork::Testnet,
             payload: vec![1],
         });
         assert_eq!(command.p1, P1_ACCOUNT_CREATION);
+        assert_eq!(command.p2, 0x01);
+    }
+
+    #[test]
+    fn legacy_new_path_export_uses_mode_as_p1_and_output_as_p2() {
+        let command = build_export_private_key_new_path_legacy_command(
+            &ExportPrivateKeyNewPathLegacyRequest {
+                mode: ExportPrivateKeyNewPathLegacyMode::PrfKeyAndIdCredSec,
+                output: ExportPrivateKeyNewPathLegacyOutput::BlsKey,
+                payload: vec![1],
+            },
+        );
+        assert_eq!(command.p1, P1_NEW_PATH_LEGACY_PRF_KEY_AND_ID_CRED_SEC);
+        assert_eq!(command.p2, P2_NEW_PATH_LEGACY_BLS_KEY);
     }
 }

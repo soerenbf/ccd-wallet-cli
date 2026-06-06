@@ -1,9 +1,5 @@
-# ledger-identity-account-construction Specification
+## MODIFIED Requirements
 
-## Purpose
-Define the wallet-side construction layer that bridges Ledger-backed identity, credential, and account flows to low-level Concordium Ledger APDU commands while preserving explicit export policy and recoverability guarantees.
-
-## Requirements
 ### Requirement: Ledger construction layer bridges wallet flows to APDU commands
 The system SHALL provide a Ledger identity/account construction layer between CLI orchestration and the low-level Ledger APDU client. For identity issuance, the layer SHALL use the Concordium Ledger app `5.5.0+` purpose-based identity credential creation export protocol to retrieve IDCredSec, PRFKey, and deterministic signature blinding randomness after explicit user approval. For account credential deployment and account transaction signing, the layer SHALL continue to prepare Ledger request payloads and return SDK-compatible values or raw signatures needed by higher-level wallet flows.
 

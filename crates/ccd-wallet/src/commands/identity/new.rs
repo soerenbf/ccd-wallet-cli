@@ -1,6 +1,7 @@
 use crate::{
     cli::IdentityNewArgs,
     commands::{
+        ledger,
         ledger_construction::{self, LedgerIdentityIssuanceInput},
         ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
     },
@@ -16,13 +17,17 @@ use ccd_wallet_core::{
     wallet::{ConcordiumHdWallet, Net},
 };
 use ccd_wallet_identity_provider::{
-    self as identity_provider,
+    self as identity_provider, IdentityRequestInput,
     callback::{CallbackSession, LoopbackCallbackSession, ManualPasteSession, parse_callback_url},
     client::{self, PollResult, WalletProxyIpEntry},
 };
-use cliclack::{input, password, spinner};
+use ccd_wallet_ledger::{ConcordiumLedgerApp, ExportPrivateKeyNetwork, HidTransport};
+use cliclack::{confirm, input, password, spinner};
 use concordium_rust_sdk::{
-    id::types::{ArIdentity, ArInfo, IpInfo},
+    id::{
+        constants::{ArCurve, IpPairing},
+        types::{ArIdentity, ArInfo, GlobalContext, IpInfo},
+    },
     v2,
 };
 use futures_util::StreamExt;
@@ -35,6 +40,24 @@ use std::{
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const POLL_TIMEOUT: Duration = Duration::from_secs(300);
+
+type OwnerDek = zeroize::Zeroizing<[u8; ccd_wallet_core::store::crypto::KEY_LEN]>;
+
+struct PreparedIdentityRequest {
+    signer_owner_id: String,
+    signer_owner_dek: OwnerDek,
+    identity_index: u32,
+    request_json: String,
+}
+
+struct IdentityRequestContext<'a> {
+    conn: &'a Connection,
+    network_entry: &'a NetworkEntry,
+    net: Net,
+    ip_info: &'a IpInfo<IpPairing>,
+    ar_infos: &'a BTreeMap<ArIdentity, ArInfo<ArCurve>>,
+    global_context: &'a GlobalContext<ArCurve>,
+}
 
 pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
     run_with_callback_session(conn, args).await
@@ -123,56 +146,32 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     let ar_infos = fetch_anonymity_revokers(&mut client).await?;
     spin.clear();
 
-    if let Some(owner) = signer_owners::find_by_label(conn, &key_source_label)?
-        && owner.kind == SignerOwnerKind::Ledger
-    {
-        let details = signer_owners::find_ledger_details_by_owner_id(conn, &owner.id)?
-            .with_context(|| {
-                format!(
-                    "Ledger key source '{}' has no enrollment details",
-                    owner.label
-                )
-            })?;
-        let identity_index = identities::next_index(
-            conn,
-            &network_entry.genesis_hash,
-            &owner.id,
-            ip_info.ip_identity.0,
-        )?;
-        ledger_construction::construct_identity_issuance(LedgerIdentityIssuanceInput {
-            owner_details: &details,
-            network_genesis_hash: &network_entry.genesis_hash,
-            ip_identity: ip_info.ip_identity.0,
-            identity_index,
-        })?;
-    }
-
-    let unlocked_seed = unlock_seed(conn, &key_source_label)?;
-    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
-        .context("stored seed phrase is not UTF-8")?
-        .to_owned();
+    let key_source = signer_owners::find_by_label(conn, &key_source_label)?
+        .with_context(|| format!("key source '{}' is not configured", key_source_label))?;
     let net = infer_net(
         &network_name,
         network_entry.wallet_proxy.as_deref(),
         &endpoint_label,
     );
-    let wallet = ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?;
-    let identity_index = identities::next_index(
+    let request_context = IdentityRequestContext {
         conn,
-        &network_entry.genesis_hash,
-        &unlocked_seed.record.id,
-        ip_info.ip_identity.0,
-    )?;
-    let spin = spinner();
-    spin.start("Constructing identity request...");
-    let request_json = identity_provider::build_request(
-        &wallet,
+        network_entry: &network_entry,
+        net,
         ip_info,
-        &ar_infos,
-        &global_context,
-        identity_index,
-    )?;
-    spin.clear();
+        ar_infos: &ar_infos,
+        global_context: &global_context,
+    };
+    let prepared = match key_source.kind {
+        SignerOwnerKind::Ledger => prepare_ledger_identity_request(
+            &request_context,
+            &key_source,
+            args.allow_ledger_secret_export,
+            args.non_interactive,
+        )?,
+        SignerOwnerKind::Seed => {
+            prepare_seed_identity_request(&request_context, &key_source_label)?
+        }
+    };
 
     let callback_session = prepare_callback_session(args.manual_callback).await?;
     let redirect_uri = callback_session.redirect_uri().to_owned();
@@ -182,7 +181,7 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     let browser_url = client::start_issuance(
         &wallet_proxy_entry.metadata.issuance_start,
         &redirect_uri,
-        &request_json,
+        &prepared.request_json,
     )
     .await?;
     spin.clear();
@@ -193,12 +192,12 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
 
     let record_id = identities::insert_pending(
         conn,
-        &unlocked_seed.dek,
+        &prepared.signer_owner_dek,
         identities::PendingIdentity {
             network_genesis_hash: &network_entry.genesis_hash,
-            signer_owner_id: &unlocked_seed.record.id,
+            signer_owner_id: &prepared.signer_owner_id,
             ip_identity: ip_info.ip_identity.0,
-            identity_index,
+            identity_index: prepared.identity_index,
             label: &label,
             code_uri: &code_uri,
         },
@@ -211,7 +210,154 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
         return Ok(());
     }
 
-    poll_identity(conn, record_id, &unlocked_seed.dek, &code_uri, &label).await
+    poll_identity(
+        conn,
+        record_id,
+        &prepared.signer_owner_dek,
+        &code_uri,
+        &label,
+    )
+    .await
+}
+
+fn prepare_seed_identity_request(
+    context: &IdentityRequestContext<'_>,
+    key_source_label: &str,
+) -> Result<PreparedIdentityRequest> {
+    let unlocked_seed = unlock_seed(context.conn, key_source_label)?;
+    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
+        .context("stored seed phrase is not UTF-8")?
+        .to_owned();
+    let wallet = ConcordiumHdWallet::from_seed_phrase(&seed_phrase, context.net)?;
+    let identity_index = identities::next_index(
+        context.conn,
+        &context.network_entry.genesis_hash,
+        &unlocked_seed.record.id,
+        context.ip_info.ip_identity.0,
+    )?;
+    let spin = spinner();
+    spin.start("Constructing identity request...");
+    let request_json = identity_provider::build_request(
+        &wallet,
+        context.ip_info,
+        context.ar_infos,
+        context.global_context,
+        identity_index,
+    )?;
+    spin.clear();
+
+    Ok(PreparedIdentityRequest {
+        signer_owner_id: unlocked_seed.record.id,
+        signer_owner_dek: unlocked_seed.dek,
+        identity_index,
+        request_json,
+    })
+}
+
+fn prepare_ledger_identity_request(
+    context: &IdentityRequestContext<'_>,
+    key_source: &signer_owners::SignerOwnerRecord,
+    allow_ledger_secret_export: bool,
+    non_interactive: bool,
+) -> Result<PreparedIdentityRequest> {
+    let details = signer_owners::find_ledger_details_by_owner_id(context.conn, &key_source.id)?
+        .with_context(|| {
+            format!(
+                "Ledger key source '{}' has no enrollment details",
+                key_source.label
+            )
+        })?;
+    let identity_index = identities::next_index(
+        context.conn,
+        &context.network_entry.genesis_hash,
+        &key_source.id,
+        context.ip_info.ip_identity.0,
+    )?;
+    approve_ledger_secret_export(
+        &key_source.label,
+        non_interactive,
+        allow_ledger_secret_export,
+    )?;
+
+    let password: String = password(format!(
+        "Local password for Ledger key source '{}': ",
+        key_source.label
+    ))
+    .allow_empty()
+    .interact()?;
+    let unlocked_owner = signer_owners::unlock_by_id(context.conn, &key_source.id, &password)?;
+
+    let transport = HidTransport::open_first()
+        .context("failed to open Ledger device; connect a Ledger with the Concordium app open")?;
+    let mut app = ConcordiumLedgerApp::new(transport);
+    let spin = spinner();
+    spin.start("Verifying connected Ledger key source...");
+    ledger::verify_connected_ledger_owner(context.conn, &key_source.id, &mut app)?;
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Exporting identity issuance material from Ledger...");
+    let material = ledger_construction::construct_identity_issuance(
+        LedgerIdentityIssuanceInput {
+            owner_details: &details,
+            network_genesis_hash: &context.network_entry.genesis_hash,
+            export_network: ledger_export_network(context.net),
+            ip_identity: context.ip_info.ip_identity.0,
+            identity_index,
+            approved_secret_export: true,
+        },
+        &mut app,
+    )?;
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Constructing identity request...");
+    let request_json = identity_provider::build_request_from_material(IdentityRequestInput {
+        ip_info: context.ip_info,
+        ar_infos: context.ar_infos,
+        global_context: context.global_context,
+        material,
+    })?;
+    spin.clear();
+
+    Ok(PreparedIdentityRequest {
+        signer_owner_id: unlocked_owner.record.id,
+        signer_owner_dek: unlocked_owner.dek,
+        identity_index,
+        request_json,
+    })
+}
+
+fn approve_ledger_secret_export(
+    key_source_label: &str,
+    non_interactive: bool,
+    allow_ledger_secret_export: bool,
+) -> Result<()> {
+    if allow_ledger_secret_export {
+        return Ok(());
+    }
+    if non_interactive {
+        bail!(
+            "Ledger identity issuance for key source '{key_source_label}' requires secret export; rerun with --allow-ledger-secret-export to explicitly allow this non-interactive flow"
+        );
+    }
+
+    let approved = confirm(format!(
+        "Ledger identity issuance for key source '{key_source_label}' must export identity issuance secrets into this process temporarily. This is not an on-device signing flow. Continue?"
+    ))
+    .initial_value(false)
+    .interact()?;
+    if !approved {
+        bail!("Ledger secret export was declined; no local identity state was written");
+    }
+    Ok(())
+}
+
+fn ledger_export_network(net: Net) -> ExportPrivateKeyNetwork {
+    match net {
+        Net::Mainnet => ExportPrivateKeyNetwork::Mainnet,
+        Net::Testnet => ExportPrivateKeyNetwork::Testnet,
+    }
 }
 
 async fn fetch_identity_providers(
@@ -338,21 +484,26 @@ fn resolve_seed_label(
 }
 
 fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<String> {
-    let seeds = seeds::list(conn)?;
-    if seeds.is_empty() {
-        bail!("no seeds are configured; run `ccd-wallet seed add <LABEL>` first")
+    let owners = signer_owners::list(conn)?;
+    if owners.is_empty() {
+        bail!(
+            "no key sources are configured; run `ccd-wallet seed add <LABEL>` or `ccd-wallet ledger setup <LABEL>` first"
+        )
     }
 
-    let items = seeds
+    let items = owners
         .iter()
-        .map(|seed| SelectItem {
-            value: seed.label.clone(),
-            label: seed.label.clone(),
-            hint: String::new(),
+        .map(|owner| SelectItem {
+            value: owner.label.clone(),
+            label: owner.label.clone(),
+            hint: match owner.kind {
+                SignerOwnerKind::Seed => "seed".to_owned(),
+                SignerOwnerKind::Ledger => "ledger".to_owned(),
+            },
         })
         .collect::<Vec<_>>();
     let initial = active.map(str::to_owned);
-    select_or_single("Select seed", &items, initial.as_ref())
+    select_or_single("Select key source", &items, initial.as_ref())
 }
 
 fn unlock_seed(conn: &Connection, seed_label: &str) -> Result<seeds::UnlockedSeed> {
@@ -732,5 +883,21 @@ async fn poll_identity(
                 bail!(detail);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_interactive_ledger_export_requires_allow_flag() {
+        let err = approve_ledger_secret_export("ledger", true, false).unwrap_err();
+        assert!(err.to_string().contains("--allow-ledger-secret-export"));
+    }
+
+    #[test]
+    fn explicit_ledger_export_flag_skips_prompt_guard() {
+        approve_ledger_secret_export("ledger", true, true).unwrap();
     }
 }

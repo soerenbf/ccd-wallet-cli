@@ -20,10 +20,10 @@ pub const P1_LEGACY_VERIFY_ADDRESS: u8 = 0x00;
 /// P1 value for current address verification.
 pub const P1_VERIFY_ADDRESS: u8 = 0x01;
 
-/// P1 value for public-key retrieval without device confirmation.
-pub const P1_PUBLIC_KEY_NO_CONFIRM: u8 = 0x00;
 /// P1 value for public-key retrieval with device confirmation.
-pub const P1_PUBLIC_KEY_CONFIRM: u8 = 0x01;
+pub const P1_PUBLIC_KEY_CONFIRM: u8 = 0x00;
+/// P1 value for public-key retrieval without device confirmation.
+pub const P1_PUBLIC_KEY_NO_CONFIRM: u8 = 0x01;
 /// P2 value requesting that the device signs the returned public key.
 pub const P2_SIGNED_PUBLIC_KEY: u8 = 0x01;
 
@@ -104,16 +104,27 @@ pub const P1_PROOFS: u8 = 0x08;
 /// P1 value used for new/existing credential deployment discriminator and context.
 pub const P1_NEW_OR_EXISTING: u8 = 0x09;
 
-/// P1 value for legacy PRF-key seed export.
+/// P1 value for purpose-based identity credential creation export.
 pub const P1_IDENTITY_CREDENTIAL_CREATION: u8 = 0x00;
-/// P1 value for new account-creation key export.
+/// P1 value for purpose-based account-creation key export.
 pub const P1_ACCOUNT_CREATION: u8 = 0x01;
-/// P1 value for new identity-recovery key export.
+/// P1 value for purpose-based identity-recovery key export.
 pub const P1_ID_RECOVERY: u8 = 0x02;
-/// P1 value for account-credential discovery key export.
+/// P1 value for purpose-based account-credential discovery key export.
 pub const P1_ACCOUNT_CREDENTIAL_DISCOVERY: u8 = 0x03;
-/// P1 value for zero-knowledge proof creation key export.
+/// P1 value for purpose-based zero-knowledge proof creation key export.
 pub const P1_CREATION_OF_ZK_PROOF: u8 = 0x04;
+
+/// P1 value for legacy new-path PRF-key export.
+pub const P1_NEW_PATH_LEGACY_PRF_KEY: u8 = 0x00;
+/// P1 value for legacy new-path PRF-key recovery-display export.
+pub const P1_NEW_PATH_LEGACY_PRF_KEY_RECOVERY: u8 = 0x01;
+/// P1 value for legacy new-path PRF-key plus IDCredSec export.
+pub const P1_NEW_PATH_LEGACY_PRF_KEY_AND_ID_CRED_SEC: u8 = 0x02;
+/// P2 value for legacy new-path seed export.
+pub const P2_NEW_PATH_LEGACY_SEED: u8 = 0x01;
+/// P2 value for legacy new-path BLS-key export.
+pub const P2_NEW_PATH_LEGACY_BLS_KEY: u8 = 0x02;
 
 /// Concordium Ledger app instruction byte.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +169,8 @@ pub enum Instruction {
     ExportPrivateKeyNew,
     /// Sign a protocol-level token transaction.
     SignPltTransaction,
+    /// Query the Ledger app version.
+    GetAppVersion,
 }
 
 impl Instruction {
@@ -191,6 +204,7 @@ impl Instruction {
             Self::SignRegisterData => 0x35,
             Self::ExportPrivateKeyNew => 0x37,
             Self::SignPltTransaction => 0x38,
+            Self::GetAppVersion => 0x40,
         }
     }
 }

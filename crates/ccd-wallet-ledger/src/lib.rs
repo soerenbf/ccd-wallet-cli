@@ -41,13 +41,14 @@ pub use error::{LedgerError, Result};
 pub use transport::HidTransport;
 pub use transport::{LedgerTransport, MockTransport};
 pub use types::{
-    AccountAddressBytes, ChunkedSigningRequest, ConfigureBakerSigningRequest,
+    AccountAddressBytes, AppVersion, ChunkedSigningRequest, ConfigureBakerSigningRequest,
     ContractSigningRequest, CredentialAttribute, CredentialDeploymentContext,
     CredentialDeploymentSigningRequest, CredentialSigningPayload, DeployModuleSigningRequest,
-    DerivationPath, ExportPrivateKeyLegacyRequest, ExportPrivateKeyNewRequest,
-    ExportPrivateKeyNewType, LegacyVerifyAddressRequest, PublicInfoForIpSigningRequest,
-    PublicKeyOptions, PublicKeyRequest, PublicKeyResponse, RawSignature,
-    RegisterDataSigningRequest, ScheduledTransferSigningRequest,
+    DerivationPath, ExportPrivateKeyLegacyRequest, ExportPrivateKeyNetwork,
+    ExportPrivateKeyNewPathLegacyMode, ExportPrivateKeyNewPathLegacyOutput,
+    ExportPrivateKeyNewPathLegacyRequest, ExportPrivateKeyNewRequest, ExportPrivateKeyNewType,
+    LegacyVerifyAddressRequest, PublicInfoForIpSigningRequest, PublicKeyOptions, PublicKeyRequest,
+    PublicKeyResponse, RawSignature, RegisterDataSigningRequest, ScheduledTransferSigningRequest,
     ScheduledTransferWithMemoSigningRequest, TransferToPublicSigningRequest,
     TransferWithMemoSigningRequest, UpdateCredentialEntry, UpdateCredentialsSigningRequest,
     VerifyAddressRequest, harden,
@@ -152,6 +153,16 @@ impl<T: LedgerTransport> ConcordiumLedgerApp<T> {
         commands::device::get_app_name(&mut self.transport)
     }
 
+    /// Query the Ledger app semantic version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if APDU exchange fails, the app does not support version reporting, or the
+    /// response is malformed.
+    pub fn get_app_version(&mut self) -> Result<AppVersion> {
+        commands::device::get_app_version(&mut self.transport)
+    }
+
     /// Export private-key material through the legacy Ledger app command.
     ///
     /// # Arguments
@@ -168,11 +179,11 @@ impl<T: LedgerTransport> ConcordiumLedgerApp<T> {
         commands::device::export_private_key_legacy(&mut self.transport, request)
     }
 
-    /// Export private-key material through the new Ledger app command.
+    /// Export private-key material through the purpose-based new Ledger app command.
     ///
     /// # Arguments
     ///
-    /// * `request` - New export type and payload.
+    /// * `request` - Purpose-based export type and payload.
     ///
     /// # Errors
     ///
@@ -182,6 +193,22 @@ impl<T: LedgerTransport> ConcordiumLedgerApp<T> {
         request: &ExportPrivateKeyNewRequest,
     ) -> Result<Vec<u8>> {
         commands::device::export_private_key_new(&mut self.transport, request)
+    }
+
+    /// Export private-key material through the legacy new-path protocol.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Legacy-new-path mode, output kind, and payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if APDU exchange fails or the device rejects export.
+    pub fn export_private_key_new_path_legacy(
+        &mut self,
+        request: &ExportPrivateKeyNewPathLegacyRequest,
+    ) -> Result<Vec<u8>> {
+        commands::device::export_private_key_new_path_legacy(&mut self.transport, request)
     }
 
     /// Sign a simple-transfer transaction and return the raw signature.

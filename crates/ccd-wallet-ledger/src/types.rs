@@ -490,28 +490,110 @@ pub struct ExportPrivateKeyLegacyRequest {
     pub payload: Vec<u8>,
 }
 
-/// New private-key export type.
+/// Purpose-based private-key export type used by Concordium Ledger app 5.5.0 and newer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportPrivateKeyNewType {
-    /// Identity credential creation key material.
+    /// Identity credential creation material: IDCredSec, PRF key, and signature blinding randomness.
     IdentityCredentialCreation,
-    /// Account creation key material.
+    /// Account creation material: PRF key, IDCredSec, and commitment randomness root.
     AccountCreation,
-    /// Identity recovery key material.
+    /// Identity recovery material: IDCredSec and signature blinding randomness.
     IdRecovery,
-    /// Account credential discovery key material.
+    /// Account credential discovery material: PRF key.
     AccountCredentialDiscovery,
-    /// Zero-knowledge proof creation key material.
+    /// Zero-knowledge proof creation material: commitment randomness for an account index.
     CreationOfZkProof,
 }
 
-/// Request for new private-key export.
+/// Network designation for purpose-based private-key export used by app 5.5.0 and newer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportPrivateKeyNetwork {
+    /// Mainnet derivation paths using coin type `919'`.
+    Mainnet,
+    /// Testnet derivation paths using coin type `1'`.
+    Testnet,
+}
+
+/// Request for purpose-based new private-key export used by Concordium Ledger app 5.5.0 and newer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExportPrivateKeyNewRequest {
-    /// Export type used to select APDU P1.
+    /// Export purpose used to select APDU P1.
     pub export_type: ExportPrivateKeyNewType,
-    /// Serialized export payload bytes.
+    /// Network designation used to select APDU P2 on the Ledger Live app line.
+    pub network: ExportPrivateKeyNetwork,
+    /// Serialized export payload bytes. Purpose-based exports expect `idp || identity` and
+    /// additionally `account` for account-creation and ZK-proof purposes.
     pub payload: Vec<u8>,
+}
+
+/// Legacy new-path export mode used by app 5.4.1 and earlier observed releases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportPrivateKeyNewPathLegacyMode {
+    /// Export the PRF key.
+    PrfKey,
+    /// Export the PRF key with the recovery display wording.
+    PrfKeyRecovery,
+    /// Export the PRF key followed by IDCredSec.
+    PrfKeyAndIdCredSec,
+}
+
+/// Legacy new-path export output kind used by app 5.4.1 and earlier observed releases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExportPrivateKeyNewPathLegacyOutput {
+    /// Export the ed25519 seed used by BLS key generation.
+    Seed,
+    /// Export the derived BLS key.
+    BlsKey,
+}
+
+/// Request for the `INS=0x37` legacy new-path export protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportPrivateKeyNewPathLegacyRequest {
+    /// Legacy export mode used to select APDU P1.
+    pub mode: ExportPrivateKeyNewPathLegacyMode,
+    /// Legacy output kind used to select APDU P2.
+    pub output: ExportPrivateKeyNewPathLegacyOutput,
+    /// Serialized export payload bytes: `idp || identity`.
+    pub payload: Vec<u8>,
+}
+
+/// Concordium Ledger app semantic version.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AppVersion {
+    /// Major version.
+    pub major: u8,
+    /// Minor version.
+    pub minor: u8,
+    /// Patch version.
+    pub patch: u8,
+}
+
+impl AppVersion {
+    /// Construct a Ledger app version.
+    ///
+    /// # Arguments
+    /// * `major` - Major version component.
+    /// * `minor` - Minor version component.
+    /// * `patch` - Patch version component.
+    ///
+    /// # Examples
+    /// ```
+    /// use ccd_wallet_ledger::AppVersion;
+    /// assert_eq!(AppVersion::new(5, 4, 1).to_string(), "5.4.1");
+    /// ```
+    pub const fn new(major: u8, minor: u8, patch: u8) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+}
+
+impl fmt::Display for AppVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
 }
 
 /// Raw 32-byte account address bytes used by optional SDK conversions.
