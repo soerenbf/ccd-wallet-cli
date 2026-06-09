@@ -192,6 +192,44 @@ pub fn build_request(
     })
 }
 
+/// Build a Concordium v1 identity recovery request from a prepared identity credential secret.
+///
+/// # Arguments
+///
+/// * `id_cred_sec` - Identity credential secret for the provider/identity tuple.
+/// * `ip_info` - Identity provider selected for recovery.
+/// * `global_context` - Chain cryptographic parameters.
+/// * `timestamp` - Unix timestamp included in the recovery request.
+///
+/// # Errors
+///
+/// Returns an error if recovery request construction or JSON serialization fails.
+///
+/// # Examples
+///
+/// ```ignore
+/// let request_json = build_recovery_request_from_id_cred_sec(
+///     id_cred_sec,
+///     ip_info,
+///     &global_context,
+///     timestamp,
+/// )?;
+/// ```
+pub fn build_recovery_request_from_id_cred_sec(
+    id_cred_sec: CredId,
+    ip_info: &IpInfo<IpPairing>,
+    global_context: &GlobalContext<ArCurve>,
+    timestamp: u64,
+) -> Result<String> {
+    let id_cred_sec = PedersenValue::new(id_cred_sec);
+    let request = generate_id_recovery_request(ip_info, global_context, &id_cred_sec, timestamp)
+        .ok_or_else(|| anyhow::anyhow!("generating the identity recovery request failed"))?;
+
+    Ok(serde_json::to_string(&IdentityRecoveryRequestV1 {
+        id_recovery_request: Versioned::new(VERSION_0, request),
+    })?)
+}
+
 /// Build a Concordium v1 identity recovery request from a seed-backed wallet.
 ///
 /// # Arguments
@@ -219,14 +257,12 @@ pub fn build_recovery_request(
     identity_index: u32,
     timestamp: u64,
 ) -> Result<String> {
-    let id_cred_sec =
-        PedersenValue::new(wallet.get_id_cred_sec(ip_info.ip_identity.0, identity_index)?);
-    let request = generate_id_recovery_request(ip_info, global_context, &id_cred_sec, timestamp)
-        .ok_or_else(|| anyhow::anyhow!("generating the identity recovery request failed"))?;
-
-    Ok(serde_json::to_string(&IdentityRecoveryRequestV1 {
-        id_recovery_request: Versioned::new(VERSION_0, request),
-    })?)
+    build_recovery_request_from_id_cred_sec(
+        wallet.get_id_cred_sec(ip_info.ip_identity.0, identity_index)?,
+        ip_info,
+        global_context,
+        timestamp,
+    )
 }
 
 #[cfg(test)]

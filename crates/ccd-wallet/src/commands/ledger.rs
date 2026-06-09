@@ -4,18 +4,32 @@
 //! enrolled Ledger as a Ledger-backed key source while keeping the internal
 //! persisted model in signer-owner tables.
 
-use crate::cli::{LedgerSetupArgs, LedgerSubcommand};
+use crate::{
+    cli::{LedgerSetupArgs, LedgerSubcommand, LedgerSyncArgs},
+    commands::{
+        ledger_construction::{self, LedgerIdentityIssuanceInput},
+        seed::{self, AccountRecoveryMaterial, IdentityRecoveryMaterial, TerminalSeedPrompts},
+        ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
+    },
+};
 use anyhow::{Context, Result, bail};
-use ccd_wallet_core::store::signer_owners::{
-    self, LEDGER_OWNER_ENROLLMENT_PATH, NewLedgerOwnerDetails, SignerOwnerKind,
+use ccd_wallet_core::{
+    store::{
+        config::NetworkEntry,
+        signer_owners::{
+            self, LEDGER_OWNER_ENROLLMENT_PATH, NewLedgerOwnerDetails, SignerOwnerKind,
+        },
+        wallet_state,
+    },
+    wallet::Net,
 };
 use ccd_wallet_ledger::{
-    ConcordiumLedgerApp, DerivationPath, HidTransport, LedgerError, LedgerTransport,
-    PublicKeyOptions,
+    ConcordiumLedgerApp, DerivationPath, ExportPrivateKeyNetwork, HidTransport, LedgerError,
+    LedgerTransport, PublicKeyOptions,
 };
-use cliclack::{input, password};
+use cliclack::{confirm, input, password};
 use rusqlite::Connection;
-use std::str::FromStr;
+use std::{cell::RefCell, str::FromStr};
 
 /// Run a Ledger command.
 ///
@@ -30,11 +44,12 @@ use std::str::FromStr;
 /// # Examples
 ///
 /// ```ignore
-/// commands::ledger::run(&conn, command).await?;
+/// commands::ledger::run(&mut conn, command).await?;
 /// ```
-pub async fn run(conn: &Connection, command: LedgerSubcommand) -> Result<()> {
+pub async fn run(conn: &mut Connection, command: LedgerSubcommand) -> Result<()> {
     match command {
         LedgerSubcommand::Setup(args) => setup(conn, args).await,
+        LedgerSubcommand::Sync(args) => sync(conn, args).await,
         LedgerSubcommand::Show => show().await,
     }
 }
@@ -55,12 +70,26 @@ async fn show() -> Result<()> {
     Ok(())
 }
 
-async fn setup(conn: &Connection, args: LedgerSetupArgs) -> Result<()> {
+async fn setup(conn: &mut Connection, args: LedgerSetupArgs) -> Result<()> {
     let label = resolve_label(args.label, args.non_interactive)?;
     validate_key_source_label(&label)?;
     if signer_owners::find_by_label(conn, &label)?.is_some() {
         bail!("key source label '{label}' already exists");
     }
+
+    let restore_target = if let Some(network_name) = args.restore.as_deref() {
+        Some(
+            seed::resolve_sync_network_context(
+                conn,
+                Some(network_name),
+                args.non_interactive,
+                false,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let transport = HidTransport::open_first()
         .context("failed to open Ledger device; connect a Ledger with the Concordium app open")?;
@@ -85,9 +114,9 @@ async fn setup(conn: &Connection, args: LedgerSetupArgs) -> Result<()> {
     }
 
     let owner = signer_owners::create(conn, SignerOwnerKind::Ledger, &label)?;
-    signer_owners::create_vault(conn, &owner.id, &local_password)?;
+    let owner_dek = signer_owners::create_vault(conn, &owner.id, &local_password)?;
     let fingerprint = signer_owners::ledger_owner_fingerprint(&canonical_public_key);
-    signer_owners::insert_ledger_details(
+    let details = signer_owners::insert_ledger_details(
         conn,
         NewLedgerOwnerDetails {
             signer_owner_id: &owner.id,
@@ -98,8 +127,271 @@ async fn setup(conn: &Connection, args: LedgerSetupArgs) -> Result<()> {
         },
     )?;
 
-    println!("Ledger key source '{label}' enrolled with fingerprint {fingerprint}.");
+    if restore_target.is_some() {
+        cliclack::log::success(format!(
+            "Ledger key source '{label}' enrolled with fingerprint {fingerprint}."
+        ))?;
+    } else {
+        println!("Ledger key source '{label}' enrolled with fingerprint {fingerprint}.");
+    }
+
+    if let Some((network_name, network_entry, endpoint, endpoint_label, _)) = restore_target {
+        approve_ledger_recovery_export(
+            &label,
+            args.non_interactive,
+            args.allow_ledger_secret_export,
+        )?;
+        log_resolved_context(&[
+            ContextLine {
+                label: "key source:",
+                value: label.clone(),
+                source: ResolutionSource::Explicit,
+            },
+            ContextLine {
+                label: "network:",
+                value: format!("{network_name} @ {endpoint_label}"),
+                source: ResolutionSource::Explicit,
+            },
+        ])?;
+        let mut prompts = TerminalSeedPrompts;
+        run_ledger_recovery_with_app(
+            conn,
+            &label,
+            &owner.id,
+            &owner_dek,
+            &details,
+            &network_name,
+            &network_entry,
+            endpoint,
+            &[],
+            args.non_interactive,
+            &mut prompts,
+            &mut app,
+        )
+        .await?;
+    }
+
     Ok(())
+}
+
+async fn sync(conn: &mut Connection, args: LedgerSyncArgs) -> Result<()> {
+    let (key_source, source) =
+        resolve_sync_ledger_label(conn, args.label.as_deref(), args.non_interactive)?;
+    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
+        seed::resolve_sync_network_context(
+            conn,
+            args.network.as_deref(),
+            args.non_interactive,
+            args.no_defaults,
+        )
+        .await?;
+
+    approve_ledger_recovery_export(
+        &key_source.label,
+        args.non_interactive,
+        args.allow_ledger_secret_export,
+    )?;
+
+    log_resolved_context(&[
+        ContextLine {
+            label: "key source:",
+            value: key_source.label.clone(),
+            source,
+        },
+        ContextLine {
+            label: "network:",
+            value: format!("{network_name} @ {endpoint_label}"),
+            source: network_source,
+        },
+    ])?;
+
+    let local_password = password(format!(
+        "Local password for Ledger key source '{}': ",
+        key_source.label
+    ))
+    .allow_empty()
+    .interact()?;
+    let unlocked_owner = signer_owners::unlock_by_id(conn, &key_source.id, &local_password)?;
+    let details = signer_owners::find_ledger_details_by_owner_id(conn, &key_source.id)?
+        .with_context(|| {
+            format!(
+                "Ledger key source '{}' has no enrollment details",
+                key_source.label
+            )
+        })?;
+
+    let transport = HidTransport::open_first()
+        .context("failed to open Ledger device; connect a Ledger with the Concordium app open")?;
+    let mut app = ConcordiumLedgerApp::new(transport);
+    verify_connected_ledger_owner(conn, &key_source.id, &mut app)?;
+
+    let mut prompts = TerminalSeedPrompts;
+    run_ledger_recovery_with_app(
+        conn,
+        &key_source.label,
+        &unlocked_owner.record.id,
+        &unlocked_owner.dek,
+        &details,
+        &network_name,
+        &network_entry,
+        endpoint,
+        &args.providers,
+        args.non_interactive,
+        &mut prompts,
+        &mut app,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_ledger_recovery_with_app<T: LedgerTransport>(
+    conn: &mut Connection,
+    key_source_label: &str,
+    signer_owner_id: &str,
+    signer_owner_dek: &zeroize::Zeroizing<[u8; ccd_wallet_core::store::crypto::KEY_LEN]>,
+    owner_details: &signer_owners::LedgerOwnerDetailsRecord,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    endpoint: concordium_rust_sdk::v2::Endpoint,
+    providers: &[String],
+    non_interactive: bool,
+    prompts: &mut impl seed::SeedPrompts,
+    app: &mut ConcordiumLedgerApp<T>,
+) -> Result<()> {
+    let export_network = ledger_export_network(seed::infer_net(
+        network_name,
+        network_entry.wallet_proxy.as_deref(),
+        &network_entry.node_endpoint,
+    ));
+    let app = RefCell::new(app);
+    let mut identity_material_for =
+        |ip_identity: u32, identity_index: u32| -> Result<IdentityRecoveryMaterial> {
+            let mut app = app.borrow_mut();
+            let id_cred_sec = ledger_construction::construct_identity_recovery(
+                LedgerIdentityIssuanceInput {
+                    owner_details,
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    export_network,
+                    ip_identity,
+                    identity_index,
+                    approved_secret_export: true,
+                },
+                &mut **app,
+            )?;
+            Ok(IdentityRecoveryMaterial { id_cred_sec })
+        };
+    let mut account_material_for =
+        |ip_identity: u32, identity_index: u32| -> Result<AccountRecoveryMaterial> {
+            let mut app = app.borrow_mut();
+            let prf_key = ledger_construction::construct_account_credential_discovery(
+                LedgerIdentityIssuanceInput {
+                    owner_details,
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    export_network,
+                    ip_identity,
+                    identity_index,
+                    approved_secret_export: true,
+                },
+                &mut **app,
+            )?;
+            Ok(AccountRecoveryMaterial { prf_key })
+        };
+
+    seed::run_ledger_recovery(
+        conn,
+        key_source_label,
+        signer_owner_id,
+        signer_owner_dek,
+        network_name,
+        network_entry,
+        endpoint,
+        providers,
+        non_interactive,
+        prompts,
+        &mut identity_material_for,
+        &mut account_material_for,
+    )
+    .await
+}
+
+fn approve_ledger_recovery_export(
+    key_source_label: &str,
+    non_interactive: bool,
+    allow_ledger_secret_export: bool,
+) -> Result<()> {
+    if allow_ledger_secret_export {
+        return Ok(());
+    }
+    if non_interactive {
+        bail!(
+            "Ledger recovery for key source '{key_source_label}' requires secret export; rerun with --allow-ledger-secret-export to explicitly allow this non-interactive flow"
+        );
+    }
+
+    let approved = confirm(format!(
+        "Ledger recovery for key source '{key_source_label}' must export recovery secrets into this process temporarily. This is not an on-device signing flow, and you will be prompted on the Ledger device for each identity recovery and account discovery step. Continue?"
+    ))
+    .initial_value(false)
+    .interact()?;
+    if !approved {
+        bail!("Ledger recovery export was not approved; no recovery state was written");
+    }
+    Ok(())
+}
+
+fn ledger_export_network(net: Net) -> ExportPrivateKeyNetwork {
+    match net {
+        Net::Mainnet => ExportPrivateKeyNetwork::Mainnet,
+        Net::Testnet => ExportPrivateKeyNetwork::Testnet,
+    }
+}
+
+fn resolve_sync_ledger_label(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+) -> Result<(signer_owners::SignerOwnerRecord, ResolutionSource)> {
+    match explicit {
+        Some(label) => signer_owners::find_by_label(conn, label)?
+            .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
+            .map(|owner| (owner, ResolutionSource::Explicit))
+            .with_context(|| format!("Ledger key source '{}' is not configured", label)),
+        None if non_interactive => {
+            bail!("Ledger key-source label must be provided in --non-interactive mode")
+        }
+        None => Ok((select_ledger_label(conn)?, ResolutionSource::Prompted)),
+    }
+}
+
+fn select_ledger_label(conn: &Connection) -> Result<signer_owners::SignerOwnerRecord> {
+    let owners = signer_owners::list(conn)?
+        .into_iter()
+        .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
+        .collect::<Vec<_>>();
+    if owners.is_empty() {
+        bail!("no Ledger key sources are configured; run `ccd-wallet ledger setup <LABEL>` first");
+    }
+
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_KEY_SOURCE_KEY)?;
+    let active_ledger = active.as_deref().and_then(|label| {
+        owners
+            .iter()
+            .find(|owner| owner.label == label)
+            .map(|owner| owner.label.clone())
+    });
+    let items = owners
+        .iter()
+        .map(|owner| SelectItem {
+            value: owner.label.clone(),
+            label: owner.label.clone(),
+            hint: "ledger".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let selected = select_or_single("Select Ledger key source", &items, active_ledger.as_ref())?;
+    owners
+        .into_iter()
+        .find(|owner| owner.label == selected)
+        .with_context(|| format!("Ledger key source '{}' is not configured", selected))
 }
 
 fn resolve_label(label: Option<String>, non_interactive: bool) -> Result<String> {
@@ -262,6 +554,53 @@ mod tests {
         let mut app = ConcordiumLedgerApp::new(transport);
         let err = verify_connected_ledger_owner(&conn, &owner.id, &mut app).unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn non_interactive_recovery_export_requires_allow_flag() {
+        let err = approve_ledger_recovery_export("ledger", true, false).unwrap_err();
+        assert!(err.to_string().contains("--allow-ledger-secret-export"));
+    }
+
+    #[test]
+    fn explicit_recovery_export_flag_skips_prompt_guard() {
+        approve_ledger_recovery_export("ledger", true, true).unwrap();
+    }
+
+    #[test]
+    fn sync_label_resolution_requires_ledger_owner() {
+        let conn = conn();
+        signer_owners::create(&conn, SignerOwnerKind::Seed, "seed-main").unwrap();
+        let err = resolve_sync_ledger_label(&conn, Some("seed-main"), true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Ledger key source 'seed-main' is not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_restore_missing_network_errors_before_writing_owner() {
+        let mut conn = conn();
+        let err = setup(
+            &mut conn,
+            LedgerSetupArgs {
+                label: Some("ledger-main".to_owned()),
+                restore: Some("missingnet".to_owned()),
+                allow_ledger_secret_export: true,
+                non_interactive: true,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("network 'missingnet' is not registered")
+        );
+        assert!(
+            signer_owners::find_by_label(&conn, "ledger-main")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

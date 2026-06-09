@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         Command::Transaction(command) => commands::transaction::run(&conn, command.command).await,
         Command::Contract(command) => commands::contract::run(&conn, command.command).await,
         Command::Seed(command) => commands::seed::run(&mut conn, command.command).await,
-        Command::Ledger(command) => commands::ledger::run(&conn, command.command).await,
+        Command::Ledger(command) => commands::ledger::run(&mut conn, command.command).await,
         Command::Identity(command) => commands::identity::run(&mut conn, command.command).await,
         Command::Account(command) => commands::account::run(&mut conn, command.command).await,
         Command::Governance(command) => commands::governance::run(&mut conn, command.command).await,

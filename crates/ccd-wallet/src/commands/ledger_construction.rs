@@ -25,6 +25,12 @@ const EXPORTED_KEY_LENGTH: usize = 32;
 const PURPOSE_IDENTITY_EXPORT_KEY_COUNT: usize = 3;
 const PURPOSE_IDENTITY_EXPORT_RESPONSE_LENGTH: usize =
     PURPOSE_IDENTITY_EXPORT_KEY_COUNT * (1 + EXPORTED_KEY_LENGTH);
+const PURPOSE_ID_RECOVERY_EXPORT_KEY_COUNT: usize = 2;
+const PURPOSE_ID_RECOVERY_EXPORT_RESPONSE_LENGTH: usize =
+    PURPOSE_ID_RECOVERY_EXPORT_KEY_COUNT * (1 + EXPORTED_KEY_LENGTH);
+const PURPOSE_ACCOUNT_DISCOVERY_EXPORT_KEY_COUNT: usize = 1;
+const PURPOSE_ACCOUNT_DISCOVERY_EXPORT_RESPONSE_LENGTH: usize =
+    PURPOSE_ACCOUNT_DISCOVERY_EXPORT_KEY_COUNT * (1 + EXPORTED_KEY_LENGTH);
 
 /// Inputs that identify a Ledger-backed identity issuance construction request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +95,72 @@ pub(crate) fn construct_identity_issuance<T: LedgerTransport>(
     parse_identity_credential_creation_export(&exported)
 }
 
+/// Prepare Ledger-derived identity recovery material.
+///
+/// # Arguments
+/// * `input` - Ledger owner, network, and identity recovery coordinates.
+/// * `app` - Connected Concordium Ledger app client.
+///
+/// # Errors
+/// Returns an error if export approval is missing, APDU exchange fails, the connected app does not
+/// support the 5.5.0+ purpose-based identity recovery export, or the export response is malformed.
+///
+/// # Examples
+///
+/// ```ignore
+/// let id_cred_sec = ledger_construction::construct_identity_recovery(input, &mut app)?;
+/// ```
+pub(crate) fn construct_identity_recovery<T: LedgerTransport>(
+    input: LedgerIdentityIssuanceInput<'_>,
+    app: &mut ConcordiumLedgerApp<T>,
+) -> Result<CredId> {
+    if !input.approved_secret_export {
+        bail!(
+            "Ledger identity recovery for key source '{}' requires explicit secret-export approval; no local identity state was written",
+            input.owner_details.fingerprint,
+        );
+    }
+
+    let exported = export_purpose_material(app, &input, ExportPrivateKeyNewType::IdRecovery)
+        .map_err(|err| map_identity_export_error(err, &input))?;
+    parse_identity_recovery_export(&exported)
+}
+
+/// Prepare Ledger-derived account credential discovery material.
+///
+/// # Arguments
+/// * `input` - Ledger owner, network, and identity coordinates for account discovery.
+/// * `app` - Connected Concordium Ledger app client.
+///
+/// # Errors
+/// Returns an error if export approval is missing, APDU exchange fails, the connected app does not
+/// support the 5.5.0+ purpose-based account-credential discovery export, or the export response is malformed.
+///
+/// # Examples
+///
+/// ```ignore
+/// let prf_key = ledger_construction::construct_account_credential_discovery(input, &mut app)?;
+/// ```
+pub(crate) fn construct_account_credential_discovery<T: LedgerTransport>(
+    input: LedgerIdentityIssuanceInput<'_>,
+    app: &mut ConcordiumLedgerApp<T>,
+) -> Result<PrfKey> {
+    if !input.approved_secret_export {
+        bail!(
+            "Ledger account credential discovery for key source '{}' requires explicit secret-export approval; no local account state was written",
+            input.owner_details.fingerprint,
+        );
+    }
+
+    let exported = export_purpose_material(
+        app,
+        &input,
+        ExportPrivateKeyNewType::AccountCredentialDiscovery,
+    )
+    .map_err(|err| map_identity_export_error(err, &input))?;
+    parse_account_credential_discovery_export(&exported)
+}
+
 /// Prepare a Ledger-backed account credential deployment.
 ///
 /// # Arguments
@@ -121,16 +193,24 @@ fn export_identity_credential_creation_material<T: LedgerTransport>(
     app: &mut ConcordiumLedgerApp<T>,
     input: &LedgerIdentityIssuanceInput<'_>,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let exported = app
-        .export_private_key_new(&ExportPrivateKeyNewRequest {
-            export_type: ExportPrivateKeyNewType::IdentityCredentialCreation,
-            network: input.export_network,
-            payload: build_identity_issuance_export_payload(
-                input.ip_identity,
-                input.identity_index,
-            ),
-        })
-        .map_err(|err| map_identity_export_error(err, input))?;
+    export_purpose_material(
+        app,
+        input,
+        ExportPrivateKeyNewType::IdentityCredentialCreation,
+    )
+    .map_err(|err| map_identity_export_error(err, input))
+}
+
+fn export_purpose_material<T: LedgerTransport>(
+    app: &mut ConcordiumLedgerApp<T>,
+    input: &LedgerIdentityIssuanceInput<'_>,
+    export_type: ExportPrivateKeyNewType,
+) -> std::result::Result<Zeroizing<Vec<u8>>, LedgerError> {
+    let exported = app.export_private_key_new(&ExportPrivateKeyNewRequest {
+        export_type,
+        network: input.export_network,
+        payload: build_identity_issuance_export_payload(input.ip_identity, input.identity_index),
+    })?;
     Ok(Zeroizing::new(exported))
 }
 
@@ -184,6 +264,37 @@ fn parse_identity_credential_creation_export(bytes: &[u8]) -> Result<IdentityIss
         prf_key,
         blinding_randomness,
     })
+}
+
+fn parse_identity_recovery_export(bytes: &[u8]) -> Result<CredId> {
+    if bytes.len() != PURPOSE_ID_RECOVERY_EXPORT_RESPONSE_LENGTH {
+        bail!(
+            "Ledger identity recovery export response was {} bytes; expected {} bytes from Concordium Ledger app 5.5.0+ purpose-based identity recovery export",
+            bytes.len(),
+            PURPOSE_ID_RECOVERY_EXPORT_RESPONSE_LENGTH,
+        );
+    }
+
+    let mut chunks = PurposeExportChunks::new(bytes);
+    let id_cred_sec = bls_scalar_from_export(*chunks.next_key("IDCredSec")?);
+    let _blinding_randomness = chunks.next_key("signature blinding randomness")?;
+    chunks.finish_with_expected_count(PURPOSE_ID_RECOVERY_EXPORT_KEY_COUNT)?;
+    Ok(id_cred_sec)
+}
+
+fn parse_account_credential_discovery_export(bytes: &[u8]) -> Result<PrfKey> {
+    if bytes.len() != PURPOSE_ACCOUNT_DISCOVERY_EXPORT_RESPONSE_LENGTH {
+        bail!(
+            "Ledger account credential discovery export response was {} bytes; expected {} bytes from Concordium Ledger app 5.5.0+ purpose-based account credential discovery export",
+            bytes.len(),
+            PURPOSE_ACCOUNT_DISCOVERY_EXPORT_RESPONSE_LENGTH,
+        );
+    }
+
+    let mut chunks = PurposeExportChunks::new(bytes);
+    let prf_key = PrfKey::new(bls_scalar_from_export(*chunks.next_key("PRFKey")?));
+    chunks.finish_with_expected_count(PURPOSE_ACCOUNT_DISCOVERY_EXPORT_KEY_COUNT)?;
+    Ok(prf_key)
 }
 
 fn bls_scalar_from_export(bytes: [u8; EXPORTED_KEY_LENGTH]) -> CredId {
@@ -270,13 +381,17 @@ mod tests {
         data
     }
 
-    fn exported_identity_material() -> Vec<u8> {
+    fn exported_key_material(values: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        for value in [1u8, 2, 3] {
+        for value in values {
             bytes.push(EXPORTED_KEY_LENGTH as u8);
-            bytes.extend_from_slice(&[value; EXPORTED_KEY_LENGTH]);
+            bytes.extend_from_slice(&[*value; EXPORTED_KEY_LENGTH]);
         }
         bytes
+    }
+
+    fn exported_identity_material() -> Vec<u8> {
+        exported_key_material(&[1, 2, 3])
     }
 
     #[test]
@@ -328,6 +443,68 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].ins, Instruction::ExportPrivateKeyNew.as_u8());
         assert_eq!(commands[0].p1, 0x00);
+        assert_eq!(commands[0].p2, 0x01);
+        assert_eq!(
+            commands[0].data,
+            [7u32.to_be_bytes(), 9u32.to_be_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn identity_recovery_uses_id_recovery_purpose() {
+        let details = details();
+        let mut app =
+            ConcordiumLedgerApp::new(MockTransport::new([ok_reply(exported_key_material(&[
+                1, 2,
+            ]))]));
+
+        construct_identity_recovery(
+            LedgerIdentityIssuanceInput {
+                owner_details: &details,
+                network_genesis_hash: "net",
+                export_network: ExportPrivateKeyNetwork::Testnet,
+                ip_identity: 7,
+                identity_index: 9,
+                approved_secret_export: true,
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        let commands = app.transport().commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].ins, Instruction::ExportPrivateKeyNew.as_u8());
+        assert_eq!(commands[0].p1, 0x02);
+        assert_eq!(commands[0].p2, 0x01);
+        assert_eq!(
+            commands[0].data,
+            [7u32.to_be_bytes(), 9u32.to_be_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn account_discovery_uses_account_credential_discovery_purpose() {
+        let details = details();
+        let mut app =
+            ConcordiumLedgerApp::new(MockTransport::new([ok_reply(exported_key_material(&[3]))]));
+
+        construct_account_credential_discovery(
+            LedgerIdentityIssuanceInput {
+                owner_details: &details,
+                network_genesis_hash: "net",
+                export_network: ExportPrivateKeyNetwork::Testnet,
+                ip_identity: 7,
+                identity_index: 9,
+                approved_secret_export: true,
+            },
+            &mut app,
+        )
+        .unwrap();
+
+        let commands = app.transport().commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].ins, Instruction::ExportPrivateKeyNew.as_u8());
+        assert_eq!(commands[0].p1, 0x03);
         assert_eq!(commands[0].p2, 0x01);
         assert_eq!(
             commands[0].data,

@@ -465,6 +465,8 @@ pub struct LedgerCommand {
 pub enum LedgerSubcommand {
     /// Enroll a Ledger device as a wallet key source.
     Setup(LedgerSetupArgs),
+    /// Recover identities and accounts for an enrolled Ledger key source.
+    Sync(LedgerSyncArgs),
     /// Show connected Concordium Ledger app information.
     Show,
 }
@@ -475,9 +477,44 @@ pub struct LedgerSetupArgs {
     #[arg(value_name = "LABEL")]
     pub label: Option<String>,
 
+    /// Immediately run recovery on the named network after enrolling the Ledger.
+    #[arg(long, value_name = "NETWORK")]
+    pub restore: Option<String>,
+
+    /// Explicitly allow recovery-critical Ledger secret export in non-interactive flows.
+    #[arg(long = "allow-ledger-secret-export")]
+    pub allow_ledger_secret_export: bool,
+
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LedgerSyncArgs {
+    /// Label of the Ledger key source to sync.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Identity provider selection. Repeat for multiple providers, or use `all`.
+    #[arg(long = "provider", value_name = "VALUE")]
+    pub providers: Vec<String>,
+
+    /// Explicitly allow recovery-critical Ledger secret export in non-interactive flows.
+    #[arg(long = "allow-ledger-secret-export")]
+    pub allow_ledger_secret_export: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2011,10 +2048,70 @@ mod tests {
             Command::Ledger(command) => match command.command {
                 LedgerSubcommand::Setup(args) => {
                     assert_eq!(args.label.as_deref(), Some("ledger-main"));
+                    assert_eq!(args.restore.as_deref(), None);
                 }
                 other => panic!("expected ledger setup command, got {other:?}"),
             },
             other => panic!("expected ledger setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_setup_restore_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "ledger",
+            "setup",
+            "ledger-main",
+            "--restore",
+            "testnet",
+            "--allow-ledger-secret-export",
+        ]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Setup(args) => {
+                    assert_eq!(args.label.as_deref(), Some("ledger-main"));
+                    assert_eq!(args.restore.as_deref(), Some("testnet"));
+                    assert!(args.allow_ledger_secret_export);
+                }
+                other => panic!("expected ledger setup command, got {other:?}"),
+            },
+            other => panic!("expected ledger setup command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_sync_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "ledger",
+            "sync",
+            "ledger-main",
+            "--network",
+            "testnet",
+            "--provider",
+            "0",
+            "--provider",
+            "all",
+            "--allow-ledger-secret-export",
+            "--non-interactive",
+            "--no-defaults",
+        ]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Sync(args) => {
+                    assert_eq!(args.label.as_deref(), Some("ledger-main"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert_eq!(args.providers, vec!["0".to_owned(), "all".to_owned()]);
+                    assert!(args.allow_ledger_secret_export);
+                    assert!(args.non_interactive);
+                    assert!(args.no_defaults);
+                }
+                other => panic!("expected ledger sync command, got {other:?}"),
+            },
+            other => panic!("expected ledger sync command, got {other:?}"),
         }
     }
 

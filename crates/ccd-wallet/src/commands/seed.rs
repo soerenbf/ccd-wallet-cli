@@ -8,11 +8,11 @@ use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
 use ccd_wallet_core::{
     config,
-    store::{accounts, config::NetworkEntry, identities, seeds, wallet_state},
-    wallet::{ConcordiumHdWallet, Net},
+    store::{accounts, config::NetworkEntry, crypto::KEY_LEN, identities, seeds, wallet_state},
+    wallet::{ConcordiumHdWallet, CredId, Net, PrfKey},
 };
 use ccd_wallet_identity_provider::{
-    build_recovery_request,
+    build_recovery_request, build_recovery_request_from_id_cred_sec,
     client::{self, RecoveryResult, WalletProxyIpEntry},
 };
 use cliclack::{input, multi_progress, multiselect, password, progress_bar, spinner};
@@ -35,6 +35,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 const SEED_REVEAL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_EMPTY_IDENTITIES: u32 = 20;
@@ -1088,7 +1089,7 @@ async fn run_seed_recovery(
         }
     }
 
-    print_recovery_summary(seed_label, network_name, &summary);
+    print_recovery_summary("seed", seed_label, network_name, &summary);
 
     if summary.inserted_identities == 0
         && summary.updated_identities == 0
@@ -1100,6 +1101,464 @@ async fn run_seed_recovery(
     }
 
     Ok(())
+}
+
+/// Identity recovery material for one provider/identity tuple.
+pub(crate) struct IdentityRecoveryMaterial {
+    /// Identity credential secret used to build identity recovery requests.
+    pub id_cred_sec: CredId,
+}
+
+/// Account discovery material for one recovered provider/identity tuple.
+pub(crate) struct AccountRecoveryMaterial {
+    /// PRF key used to derive credential registration IDs for account discovery.
+    pub prf_key: PrfKey,
+}
+
+/// Run recovery for a Ledger-backed key source using sequential device-backed probing.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_ledger_recovery(
+    conn: &mut Connection,
+    key_source_label: &str,
+    signer_owner_id: &str,
+    signer_owner_dek: &Zeroizing<[u8; KEY_LEN]>,
+    network_name: &str,
+    network_entry: &NetworkEntry,
+    endpoint: v2::Endpoint,
+    explicit_provider_filters: &[String],
+    non_interactive: bool,
+    prompts: &mut impl SeedPrompts,
+    identity_material_for: &mut impl FnMut(u32, u32) -> Result<IdentityRecoveryMaterial>,
+    account_material_for: &mut impl FnMut(u32, u32) -> Result<AccountRecoveryMaterial>,
+) -> Result<()> {
+    let spin = spinner();
+    spin.start(format!(
+        "Connecting to node: {}",
+        network_entry.node_endpoint
+    ));
+    let mut client = config::connect_v2_client(endpoint.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to Concordium node at {}",
+                network_entry.node_endpoint
+            )
+        })?;
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Fetching chain cryptographic parameters...");
+    let global_context = Arc::new(
+        client
+            .get_cryptographic_parameters(v2::BlockIdentifier::LastFinal)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load cryptographic parameters from {}",
+                    network_entry.node_endpoint
+                )
+            })?
+            .response,
+    );
+    spin.clear();
+
+    let spin = spinner();
+    spin.start("Fetching identity providers...");
+    let wallet_proxy = network_entry
+        .wallet_proxy
+        .as_deref()
+        .context("selected network has no wallet_proxy configured")?;
+    let wallet_proxy_entries = client::fetch_wallet_proxy_ip_info(wallet_proxy).await?;
+    spin.clear();
+
+    let (available_providers, skipped_providers) =
+        extract_recovery_providers(&wallet_proxy_entries);
+    let selected_providers = resolve_recovery_providers(
+        &available_providers,
+        explicit_provider_filters,
+        non_interactive,
+        prompts,
+    )?;
+    if selected_providers.is_empty() {
+        bail!("no recovery-capable identity providers are available on the selected network");
+    }
+
+    let existing_identities = identities::list_by_network_and_signer_owner(
+        conn,
+        &network_entry.genesis_hash,
+        signer_owner_id,
+    )?;
+    let existing_accounts = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| {
+            record.network_genesis_hash == network_entry.genesis_hash
+                && record.signer_owner_id == signer_owner_id
+        })
+        .collect::<Vec<_>>();
+
+    let identity_statuses = existing_identities.iter().fold(
+        BTreeMap::<u32, BTreeMap<u32, identities::IdentityStatus>>::new(),
+        |mut acc, record| {
+            acc.entry(record.ip_identity)
+                .or_default()
+                .insert(record.identity_index, record.status);
+            acc
+        },
+    );
+    let used_accounts = existing_accounts.iter().fold(
+        BTreeMap::<(u32, u32), BTreeSet<u32>>::new(),
+        |mut acc, record| {
+            acc.entry((record.ip_identity, record.identity_index))
+                .or_default()
+                .insert(record.credential_counter);
+            acc
+        },
+    );
+
+    let cancellation = CancellationToken::new();
+    let ctrl_c_cancellation = cancellation.clone();
+    let ctrl_c_task = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        ctrl_c_cancellation.cancel();
+    });
+
+    let aggregate = Arc::new(Mutex::new(RecoveryAggregate {
+        total_providers: selected_providers.len() as u64,
+        queued_providers: selected_providers.len() as u64,
+        skipped_providers: skipped_providers.len() as u64,
+        ..Default::default()
+    }));
+    let reporter =
+        TerminalRecoveryReporter::start(key_source_label, network_name, selected_providers.len());
+    reporter.update(&aggregate.lock().unwrap());
+
+    let mut outputs = Vec::new();
+    let mut failed_providers = Vec::new();
+    for provider in selected_providers {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        let statuses = identity_statuses
+            .get(&provider.provider_id)
+            .cloned()
+            .unwrap_or_default();
+        let provider_used_accounts = used_accounts.clone();
+        match recover_ledger_provider(
+            provider,
+            global_context.clone(),
+            endpoint.clone(),
+            statuses,
+            provider_used_accounts,
+            aggregate.clone(),
+            cancellation.clone(),
+            identity_material_for,
+            account_material_for,
+        )
+        .await
+        {
+            Ok(output) => outputs.push(output),
+            Err((provider_name, error)) => {
+                failed_providers.push(format!("{provider_name}: {error}"))
+            }
+        }
+        reporter.update(&aggregate.lock().unwrap());
+    }
+    ctrl_c_task.abort();
+    reporter.finish();
+    if cancellation.is_cancelled() {
+        bail!("recovery cancelled");
+    }
+
+    let mut summary = RecoverySummary {
+        skipped_providers,
+        failed_providers,
+        ..Default::default()
+    };
+
+    for output in outputs {
+        let _ = (&output.provider_id, &output.provider_name);
+        for identity in output.identities {
+            let label = recovered_identity_label(
+                conn,
+                &network_entry.genesis_hash,
+                signer_owner_id,
+                identity.provider_id,
+                identity.identity_index,
+            )?;
+            let (_, inserted) = identities::import_recovered(
+                conn,
+                signer_owner_dek,
+                identities::RecoveredIdentity {
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    signer_owner_id,
+                    ip_identity: identity.provider_id,
+                    identity_index: identity.identity_index,
+                    label: &label,
+                    identity_object: &identity.identity_object,
+                },
+            )?;
+            if inserted {
+                summary.inserted_identities += 1;
+            } else {
+                summary.updated_identities += 1;
+            }
+        }
+        for account in output.accounts {
+            let label = recovered_account_label(
+                conn,
+                &network_entry.genesis_hash,
+                signer_owner_id,
+                account.provider_id,
+                account.identity_index,
+                account.credential_counter,
+            )?;
+            let (_, inserted) = accounts::import_recovered(
+                conn,
+                signer_owner_dek,
+                accounts::RecoveredAccount {
+                    network_genesis_hash: &network_entry.genesis_hash,
+                    signer_owner_id,
+                    ip_identity: account.provider_id,
+                    identity_index: account.identity_index,
+                    credential_counter: account.credential_counter,
+                    label: &label,
+                    account_address: &account.account_address,
+                },
+            )?;
+            if inserted {
+                summary.inserted_accounts += 1;
+            } else {
+                summary.updated_accounts += 1;
+            }
+        }
+    }
+
+    print_recovery_summary(
+        "Ledger key source",
+        key_source_label,
+        network_name,
+        &summary,
+    );
+
+    if summary.inserted_identities == 0
+        && summary.updated_identities == 0
+        && summary.inserted_accounts == 0
+        && summary.updated_accounts == 0
+        && !summary.failed_providers.is_empty()
+    {
+        bail!("recovery failed for all selected providers");
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_ledger_provider(
+    provider: RecoveryProvider,
+    global_context: Arc<GlobalContext<concordium_rust_sdk::id::constants::ArCurve>>,
+    endpoint: v2::Endpoint,
+    existing_statuses: BTreeMap<u32, identities::IdentityStatus>,
+    existing_accounts: BTreeMap<(u32, u32), BTreeSet<u32>>,
+    aggregate: Arc<Mutex<RecoveryAggregate>>,
+    cancellation: CancellationToken,
+    identity_material_for: &mut impl FnMut(u32, u32) -> Result<IdentityRecoveryMaterial>,
+    account_material_for: &mut impl FnMut(u32, u32) -> Result<AccountRecoveryMaterial>,
+) -> std::result::Result<ProviderRecoveryOutput, (String, anyhow::Error)> {
+    update_provider_start(&aggregate, provider.provider_id, &provider.name);
+
+    let run = async {
+        let mut identity_index = 0u32;
+        let mut identities = Vec::new();
+        let mut accounts_found = Vec::new();
+
+        for (known_identity_index, status) in &existing_statuses {
+            cancellation.check()?;
+            if *status != identities::IdentityStatus::Done {
+                continue;
+            }
+            identity_index = identity_index.max(known_identity_index.saturating_add(1));
+            let material = account_material_for(provider.provider_id, *known_identity_index)?;
+            let used = existing_accounts
+                .get(&(provider.provider_id, *known_identity_index))
+                .cloned()
+                .unwrap_or_default();
+            accounts_found.extend(
+                recover_ledger_accounts_for_identity(
+                    material.prf_key,
+                    global_context.clone(),
+                    endpoint.clone(),
+                    provider.provider_id,
+                    *known_identity_index,
+                    provider.name.clone(),
+                    used,
+                    aggregate.clone(),
+                    cancellation.clone(),
+                )
+                .await?,
+            );
+        }
+
+        while existing_statuses.contains_key(&identity_index) {
+            identity_index += 1;
+        }
+
+        loop {
+            cancellation.check()?;
+            set_active(
+                &aggregate,
+                format!("provider:{}", provider.provider_id),
+                format!(
+                    "- {} (id {}): probing identity {}",
+                    provider.name, provider.provider_id, identity_index
+                ),
+            );
+            increment_identity_probes(&aggregate);
+
+            let material = identity_material_for(provider.provider_id, identity_index)?;
+            let recovery_request = build_recovery_request_from_id_cred_sec(
+                material.id_cred_sec,
+                &provider.ip_info,
+                &global_context,
+                now_unix_timestamp()?,
+            )?;
+            match client::recover_identity(&provider.recovery_start, &recovery_request).await? {
+                RecoveryResult::Recovered(identity_object) => {
+                    increment_discovered_identities(&aggregate);
+                    identities.push(DiscoveredIdentity {
+                        provider_id: provider.provider_id,
+                        identity_index,
+                        identity_object,
+                    });
+                    let material = account_material_for(provider.provider_id, identity_index)?;
+                    let used = existing_accounts
+                        .get(&(provider.provider_id, identity_index))
+                        .cloned()
+                        .unwrap_or_default();
+                    accounts_found.extend(
+                        recover_ledger_accounts_for_identity(
+                            material.prf_key,
+                            global_context.clone(),
+                            endpoint.clone(),
+                            provider.provider_id,
+                            identity_index,
+                            provider.name.clone(),
+                            used,
+                            aggregate.clone(),
+                            cancellation.clone(),
+                        )
+                        .await?,
+                    );
+                }
+                RecoveryResult::Missing => break,
+            }
+            identity_index += 1;
+            while existing_statuses.contains_key(&identity_index) {
+                identity_index += 1;
+            }
+        }
+
+        Ok(ProviderRecoveryOutput {
+            provider_id: provider.provider_id,
+            provider_name: provider.name.clone(),
+            identities,
+            accounts: accounts_found,
+        })
+    }
+    .await;
+
+    clear_provider_active(&aggregate, provider.provider_id);
+    match run {
+        Ok(output) => {
+            update_provider_complete(&aggregate, provider.provider_id);
+            Ok(output)
+        }
+        Err(error) => {
+            update_provider_failed(&aggregate, provider.provider_id);
+            Err((provider.name, error))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recover_ledger_accounts_for_identity(
+    prf_key: PrfKey,
+    global_context: Arc<GlobalContext<concordium_rust_sdk::id::constants::ArCurve>>,
+    endpoint: v2::Endpoint,
+    provider_id: u32,
+    identity_index: u32,
+    provider_name: String,
+    mut used_counters: BTreeSet<u32>,
+    aggregate: Arc<Mutex<RecoveryAggregate>>,
+    cancellation: CancellationToken,
+) -> Result<Vec<DiscoveredAccount>> {
+    let mut client = config::connect_v2_client(endpoint.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to Concordium node at {}",
+                config::endpoint_label(&endpoint)
+            )
+        })?;
+
+    let mut accounts = Vec::new();
+    let mut empty = 0u32;
+    let mut credential_counter = next_unused_u32(&used_counters);
+
+    while empty < MAX_EMPTY_CREDENTIALS {
+        cancellation.check()?;
+        if used_counters.contains(&credential_counter) {
+            credential_counter += 1;
+            continue;
+        }
+        let credential_counter_u8 = u8::try_from(credential_counter)
+            .context("credential counter exceeded supported protocol range")?;
+        set_active(
+            &aggregate,
+            format!("account:{provider_id}:{identity_index}"),
+            format!(
+                "- {} (id {}) / identity {}: probing credential {}",
+                provider_name, provider_id, identity_index, credential_counter
+            ),
+        );
+        increment_account_probes(&aggregate);
+
+        let cred_id_exponent = prf_key
+            .prf_exponent(credential_counter_u8)
+            .context("failed to derive credential registration id exponent")?;
+        let cred_id = concordium_rust_sdk::base::base::CredentialRegistrationID::from_exponent(
+            &global_context,
+            cred_id_exponent,
+        );
+        let identifier = AccountIdentifier::CredId(cred_id);
+        match client
+            .get_account_info(&identifier, v2::BlockIdentifier::LastFinal)
+            .await
+        {
+            Ok(info) => {
+                increment_discovered_accounts(&aggregate);
+                let address = format!("{}", info.response.account_address);
+                used_counters.insert(credential_counter);
+                accounts.push(DiscoveredAccount {
+                    provider_id,
+                    identity_index,
+                    credential_counter,
+                    account_address: address,
+                });
+                empty = 0;
+            }
+            Err(err) if is_recoverable_account_miss(&err) => empty += 1,
+            Err(err) => {
+                return Err(err).context("failed to query account information during recovery");
+            }
+        }
+        credential_counter += 1;
+    }
+
+    clear_active(
+        &aggregate,
+        &format!("account:{provider_id}:{identity_index}"),
+    );
+    Ok(accounts)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1470,7 +1929,7 @@ fn resolve_sync_seed_label(
     }
 }
 
-async fn resolve_sync_network_context(
+pub(crate) async fn resolve_sync_network_context(
     conn: &Connection,
     network: Option<&str>,
     non_interactive: bool,
@@ -1554,7 +2013,11 @@ fn prompt_for_network_name(
     select_or_single("Select network", &items, initial.as_ref())
 }
 
-fn infer_net(network_name: &str, wallet_proxy: Option<&str>, endpoint_label: &str) -> Net {
+pub(crate) fn infer_net(
+    network_name: &str,
+    wallet_proxy: Option<&str>,
+    endpoint_label: &str,
+) -> Net {
     let haystack = format!(
         "{network_name} {} {endpoint_label}",
         wallet_proxy.unwrap_or_default()
@@ -1709,8 +2172,13 @@ fn is_recoverable_account_miss(err: &QueryError) -> bool {
     matches!(err, QueryError::NotFound) || err.is_not_found()
 }
 
-fn print_recovery_summary(seed_label: &str, network_name: &str, summary: &RecoverySummary) {
-    println!("Recovery summary for seed '{seed_label}' on '{network_name}':");
+fn print_recovery_summary(
+    subject_kind: &str,
+    subject_label: &str,
+    network_name: &str,
+    summary: &RecoverySummary,
+) {
+    println!("Recovery summary for {subject_kind} '{subject_label}' on '{network_name}':");
     println!(
         "Recovered: {} new identities • {} updated identities • {} new accounts • {} updated accounts",
         summary.inserted_identities,
