@@ -38,7 +38,7 @@ ccd-wallet
 │  ├─ show
 │  └─ use
 ├─ transaction                  [Implemented]
-│  └─ show
+│  └─ show [--show-payload]
 ├─ contract                     [Implemented]
 │  ├─ deploy-module
 │  ├─ init
@@ -113,6 +113,8 @@ The internal storage model calls seed-backed and Ledger-backed derivation author
 The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app. `ledger show` inspects the connected Concordium Ledger app and displays the app name plus app version when the app supports version reporting.
 
 `identity new` can target either a seed-backed or Ledger-backed key source through `--seed <LABEL>` / `--key-source <LABEL>`. Ledger-backed identity issuance uses an explicit export security model and requires a Concordium Ledger app with purpose-based export support (version 5.5.0 or newer): interactive runs require confirmation, and non-interactive runs must include `--allow-ledger-secret-export` before the CLI exports identity issuance material temporarily from the Ledger app. This flow has been validated on a physical Ledger device running Concordium app `5.6.2`.
+
+`transaction show <HASH>` inspects transaction lifecycle and outcome details through a resolved node. The optional `--show-payload` flag additionally attempts to display the original submitted block item payload and account transaction header when the transaction is present in committed or finalized block contents.
 
 ## Planned command spaces
 

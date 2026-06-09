@@ -2,18 +2,54 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, SecondsFormat, Utc};
-use concordium_rust_sdk::types::{
-    AccountCreationDetails, AccountTransactionDetails, BlockItemSummary, BlockItemSummaryDetails,
-    TokenCreationDetails, TransactionStatus, UpdateDetails,
-    hashes::{BlockHash, TransactionHash},
+use concordium_rust_sdk::{
+    base::transactions::{BlockItem, EncodedPayload},
+    types::{
+        AccountCreationDetails, AccountTransactionDetails, BlockItemSummary,
+        BlockItemSummaryDetails, TokenCreationDetails, TransactionStatus, UpdateDetails,
+        hashes::{BlockHash, TransactionHash},
+    },
 };
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
+pub(crate) enum SubmittedPayloadDisplay {
+    Absent,
+    Unavailable(String),
+    ByBlock(BTreeMap<BlockHash, SubmittedPayload>),
+}
+
+impl SubmittedPayloadDisplay {
+    fn for_block(&self, block_hash: &BlockHash) -> Option<&SubmittedPayload> {
+        match self {
+            Self::ByBlock(payloads) => payloads.get(block_hash),
+            Self::Absent | Self::Unavailable(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SubmittedPayload {
+    Known(Box<BlockItem<EncodedPayload>>),
+    Unavailable(String),
+}
+
+#[cfg(test)]
 pub(crate) fn render_transaction_status(
     hash: &TransactionHash,
     query_context: &str,
     status: Option<&TransactionStatus>,
     block_times: &BTreeMap<BlockHash, String>,
+) -> Result<String> {
+    render_transaction_status_with_payloads(hash, query_context, status, block_times, None)
+}
+
+pub(crate) fn render_transaction_status_with_payloads(
+    hash: &TransactionHash,
+    query_context: &str,
+    status: Option<&TransactionStatus>,
+    block_times: &BTreeMap<BlockHash, String>,
+    submitted_payloads: Option<&SubmittedPayloadDisplay>,
 ) -> Result<String> {
     let mut lines = vec![
         "Metadata:".to_owned(),
@@ -30,15 +66,21 @@ pub(crate) fn render_transaction_status(
         }
         Some(TransactionStatus::Received) => {
             lines.push("  Status: received".to_owned());
+            if let Some(SubmittedPayloadDisplay::Unavailable(message)) = submitted_payloads {
+                lines.push(String::new());
+                lines.push("Submitted transaction:".to_owned());
+                lines.push(format!("  {message}"));
+            }
         }
         Some(TransactionStatus::Finalized(blocks)) => {
             lines.push("  Status: finalized".to_owned());
             let (block_hash, summary) = single_block_summary(blocks, "finalized")?;
-            lines.extend(render_block_summary_sections(
+            lines.extend(render_block_summary_sections_with_payload(
                 block_hash,
                 summary,
                 block_times.get(block_hash),
                 false,
+                submitted_payloads.and_then(|payloads| payloads.for_block(block_hash)),
             )?);
         }
         Some(TransactionStatus::Committed(blocks)) => {
@@ -48,11 +90,12 @@ pub(crate) fn render_transaction_status(
                 for (index, (block_hash, summary)) in blocks.iter().enumerate() {
                     lines.push(String::new());
                     lines.push(format!("Block {}:", index + 1));
-                    lines.extend(render_block_summary_sections(
+                    lines.extend(render_block_summary_sections_with_payload(
                         block_hash,
                         summary,
                         block_times.get(block_hash),
                         true,
+                        submitted_payloads.and_then(|payloads| payloads.for_block(block_hash)),
                     )?);
                 }
             }
@@ -100,6 +143,22 @@ pub(crate) fn render_block_summary_sections(
     summary: &BlockItemSummary,
     block_time: Option<&String>,
     include_metadata_header: bool,
+) -> Result<Vec<String>> {
+    render_block_summary_sections_with_payload(
+        block_hash,
+        summary,
+        block_time,
+        include_metadata_header,
+        None,
+    )
+}
+
+fn render_block_summary_sections_with_payload(
+    block_hash: &BlockHash,
+    summary: &BlockItemSummary,
+    block_time: Option<&String>,
+    include_metadata_header: bool,
+    submitted_payload: Option<&SubmittedPayload>,
 ) -> Result<Vec<String>> {
     let mut lines = Vec::new();
 
@@ -152,7 +211,68 @@ pub(crate) fn render_block_summary_sections(
         lines.push(body);
     }
 
+    if let Some(submitted_payload) = submitted_payload {
+        lines.push(String::new());
+        lines.push("Submitted transaction:".to_owned());
+        lines.push(render_submitted_payload(submitted_payload)?);
+    }
+
     Ok(lines)
+}
+
+fn render_submitted_payload(payload: &SubmittedPayload) -> Result<String> {
+    match payload {
+        SubmittedPayload::Known(block_item) => render_submitted_block_item(block_item),
+        SubmittedPayload::Unavailable(message) => Ok(format!("  {message}")),
+    }
+}
+
+fn render_submitted_block_item(block_item: &BlockItem<EncodedPayload>) -> Result<String> {
+    let value = match block_item {
+        BlockItem::AccountTransaction(transaction) => serde_json::json!({
+            "kind": "accountTransaction",
+            "header": transaction.header,
+            "payload": render_encoded_payload_json(&transaction.payload),
+        }),
+        BlockItem::AccountTransactionV1(transaction) => serde_json::json!({
+            "kind": "accountTransactionV1",
+            "header": transaction.header,
+            "payload": render_encoded_payload_json(&transaction.payload),
+        }),
+        BlockItem::CredentialDeployment(deployment) => serde_json::json!({
+            "kind": "credentialDeployment",
+            "payload": deployment,
+        }),
+        BlockItem::UpdateInstruction(instruction) => serde_json::json!({
+            "kind": "updateInstruction",
+            "payload": format!("{instruction:?}"),
+        }),
+    };
+    serde_json::to_string_pretty(&value).context("failed to pretty-print submitted transaction")
+}
+
+fn render_encoded_payload_json(payload: &EncodedPayload) -> serde_json::Value {
+    let raw_hex = hex::encode(payload.as_ref());
+    match payload.decode() {
+        Ok(decoded) => match serde_json::to_value(&decoded) {
+            Ok(decoded) => serde_json::json!({
+                "format": "decoded",
+                "decoded": decoded,
+                "rawHex": raw_hex,
+            }),
+            Err(err) => serde_json::json!({
+                "format": "decodedDebug",
+                "decoded": format!("{decoded:?}"),
+                "rawHex": raw_hex,
+                "note": format!("Decoded payload could not be serialized as JSON: {err}"),
+            }),
+        },
+        Err(err) => serde_json::json!({
+            "format": "rawHex",
+            "rawHex": raw_hex,
+            "decodeError": err.to_string(),
+        }),
+    }
 }
 
 fn summary_type_label(summary: &BlockItemSummary) -> String {
@@ -431,7 +551,7 @@ fn format_transaction_time(seconds: u64) -> Option<String> {
 mod tests {
     use super::*;
     use concordium_rust_sdk::{
-        common::types::Amount,
+        common::types::{Amount, TransactionSignature, TransactionTime},
         id::types::AccountAddress,
         protocol_level_tokens::{
             LockCreateEvent, LockDestroyEvent, MetaEvent, TokenEvent, TokenEventDetails,
@@ -439,8 +559,11 @@ mod tests {
         },
         types::{
             AccountCreationDetails, AccountTransactionDetails, AccountTransactionEffects,
-            BlockItemSummaryDetails, CredentialRegistrationID, RejectReason, TokenCreationDetails,
-            TransactionIndex, TransactionType, UpdateDetails, UpdatePayload,
+            BlockItemSummaryDetails, CredentialRegistrationID, Nonce, RejectReason,
+            TokenCreationDetails, TransactionIndex, TransactionType, UpdateDetails, UpdatePayload,
+            transactions::{
+                AccountTransaction, Payload, PayloadLike, PayloadSize, TransactionHeader,
+            },
         },
         v2::Upward,
     };
@@ -456,6 +579,31 @@ mod tests {
 
     fn account_address() -> AccountAddress {
         AccountAddress::from_str("47b6Qe2XtZANHetanWKP1PbApLKtS3AyiCtcXaqLMbypKjCaRw").unwrap()
+    }
+
+    fn submitted_account_transfer_payload() -> SubmittedPayload {
+        let payload = Payload::Transfer {
+            to_address: account_address(),
+            amount: Amount::from_micro_ccd(42),
+        };
+        let encoded = payload.encode();
+        SubmittedPayload::Known(Box::new(BlockItem::AccountTransaction(
+            AccountTransaction {
+                signature: TransactionSignature {
+                    signatures: BTreeMap::new(),
+                },
+                header: TransactionHeader {
+                    sender: account_address(),
+                    nonce: Nonce { nonce: 7 },
+                    energy_amount: 501u64.into(),
+                    payload_size: PayloadSize::from(encoded.as_ref().len() as u32),
+                    expiry: TransactionTime {
+                        seconds: 1_716_000_100,
+                    },
+                },
+                payload: encoded,
+            },
+        )))
     }
 
     fn rejected_summary(hash: &str) -> BlockItemSummary {
@@ -579,6 +727,103 @@ mod tests {
         assert!(rendered.contains("Metadata:"));
         assert!(rendered.contains("Status: absent"));
         assert!(rendered.contains("wrong network/node"));
+    }
+
+    #[test]
+    fn received_output_with_requested_payload_explains_payload_unavailable() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let rendered = render_transaction_status_with_payloads(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            Some(&TransactionStatus::Received),
+            &BTreeMap::new(),
+            Some(&SubmittedPayloadDisplay::Unavailable(
+                "Original submitted transaction is not available until the transaction is included in a block."
+                    .to_owned(),
+            )),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("Status: received"));
+        assert!(rendered.contains("Submitted transaction:"));
+        assert!(rendered.contains("not available until the transaction is included in a block"));
+    }
+
+    #[test]
+    fn absent_output_with_requested_payload_does_not_show_payload_section() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let rendered = render_transaction_status_with_payloads(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            None,
+            &BTreeMap::new(),
+            Some(&SubmittedPayloadDisplay::Absent),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("Status: absent"));
+        assert!(!rendered.contains("Submitted transaction:"));
+    }
+
+    #[test]
+    fn finalized_account_transaction_payload_shows_header_and_payload_json() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
+        let status = TransactionStatus::Finalized(BTreeMap::from([(
+            block,
+            success_summary(&hash.to_string()),
+        )]));
+        let submitted_payloads = SubmittedPayloadDisplay::ByBlock(BTreeMap::from([(
+            block,
+            submitted_account_transfer_payload(),
+        )]));
+
+        let rendered = render_transaction_status_with_payloads(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            Some(&status),
+            &BTreeMap::from([(block, "2026-05-19T14:23:11Z".to_owned())]),
+            Some(&submitted_payloads),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("Submitted transaction:"));
+        assert!(rendered.contains("\"kind\": \"accountTransaction\""));
+        assert!(rendered.contains("\"header\""));
+        assert!(rendered.contains("\"payload\""));
+        assert!(rendered.contains("\"format\": \"decoded\""));
+        assert!(rendered.contains("\"rawHex\""));
+    }
+
+    #[test]
+    fn committed_account_transaction_payload_is_rendered_in_matching_block_section() {
+        let hash =
+            transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
+        let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
+        let status = TransactionStatus::Committed(BTreeMap::from([(
+            block,
+            success_summary(&hash.to_string()),
+        )]));
+        let submitted_payloads = SubmittedPayloadDisplay::ByBlock(BTreeMap::from([(
+            block,
+            SubmittedPayload::Unavailable("not found".to_owned()),
+        )]));
+
+        let rendered = render_transaction_status_with_payloads(
+            &hash,
+            "testnet @ https://grpc.testnet.concordium.com:20000",
+            Some(&status),
+            &BTreeMap::from([(block, "2026-05-19T14:23:11Z".to_owned())]),
+            Some(&submitted_payloads),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("Block 1:"));
+        assert!(rendered.contains("Submitted transaction:"));
+        assert!(rendered.contains("not found"));
     }
 
     #[test]

@@ -75,6 +75,10 @@ pub struct TransactionShowArgs {
     /// Disable silent use of the active network and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
+
+    /// Show the original submitted transaction payload when it can be retrieved from block contents.
+    #[arg(long = "show-payload")]
+    pub show_payload: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1652,6 +1656,7 @@ mod tests {
             "0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833",
             "--network",
             "testnet",
+            "--show-payload",
         ]);
 
         match cli.command {
@@ -1659,6 +1664,7 @@ mod tests {
                 TransactionSubcommand::Show(args) => {
                     assert_eq!(args.network.as_deref(), Some("testnet"));
                     assert!(args.node.is_none());
+                    assert!(args.show_payload);
                     assert_eq!(
                         args.hash.to_string(),
                         "0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833"
