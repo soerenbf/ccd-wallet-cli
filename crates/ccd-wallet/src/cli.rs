@@ -1624,9 +1624,17 @@ pub struct GovernanceUpdateArgs {
     #[arg(long = "blind")]
     pub blind: bool,
 
-    /// Governance verify key to sign with. Repeat to select multiple signers.
-    #[arg(long = "key", value_name = "VERIFY_KEY")]
+    /// Governance verify key to sign with from the local governance key vault. Repeat to select multiple local signers.
+    #[arg(long = "key", value_name = "VERIFY_KEY", conflicts_with = "ledger")]
     pub keys: Vec<String>,
+
+    /// Sign with the connected Concordium Governance Ledger app instead of the local governance key vault.
+    #[arg(long = "ledger", conflicts_with = "keys")]
+    pub ledger: bool,
+
+    /// Governance Ledger key index to use for the update-family-derived governance path.
+    #[arg(long = "ledger-key-index", value_name = "N", requires = "ledger")]
+    pub ledger_key_index: Option<u32>,
 
     /// Authorization family hint for blind signing, such as protocol, root, level1, or create-plt.
     #[arg(long = "sign-as", value_name = "AUTH_FAMILY")]
@@ -1723,6 +1731,65 @@ mod tests {
             },
             other => panic!("expected transaction command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_governance_update_ledger_flags() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "governance",
+            "update",
+            "--json",
+            "payload.json",
+            "--ledger",
+            "--ledger-key-index",
+            "7",
+        ]);
+
+        match cli.command {
+            Command::Governance(command) => match command.command {
+                GovernanceSubcommand::Update(args) => {
+                    assert!(args.ledger);
+                    assert_eq!(args.ledger_key_index, Some(7));
+                    assert!(args.keys.is_empty());
+                }
+                other => panic!("expected governance update command, got {other:?}"),
+            },
+            other => panic!("expected governance command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_governance_update_ledger_with_local_key() {
+        let err = Cli::try_parse_from([
+            "ccd-wallet",
+            "governance",
+            "update",
+            "--json",
+            "payload.json",
+            "--ledger",
+            "--key",
+            "abc",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn rejects_governance_update_ledger_key_index_without_ledger() {
+        let err = Cli::try_parse_from([
+            "ccd-wallet",
+            "governance",
+            "update",
+            "--json",
+            "payload.json",
+            "--ledger-key-index",
+            "7",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

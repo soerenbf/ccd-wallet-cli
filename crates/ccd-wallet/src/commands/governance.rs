@@ -17,6 +17,7 @@ use ccd_wallet_core::{
         governance, wallet_state,
     },
 };
+use ccd_wallet_ledger_governance as governance_ledger;
 use chrono::{DateTime, Utc};
 use cliclack::{input, password, spinner};
 use concordium_rust_sdk::{
@@ -24,10 +25,11 @@ use concordium_rust_sdk::{
         base::{UpdateKeyPair, UpdateKeysIndex, UpdatePublicKey, UpdateSequenceNumber},
         transactions::{BlockItem, Payload},
         updates::{
-            EncodedUpdatePayload, UpdateHeader, UpdateInstruction, UpdateSigner,
-            update as update_instruction,
+            EncodedUpdatePayload, UpdateHeader, UpdateInstruction, UpdateInstructionSignature,
+            UpdateSigner,
         },
     },
+    common::types::Signature,
     common::{Serial, cbor, types::TransactionTime},
     protocol_level_tokens::{
         CborHolderAccount, MetadataUrl, TokenAmount, TokenModuleInitializationParameters,
@@ -181,7 +183,11 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
 
     let payload_input = resolve_update_payload_input(&args)?;
     let payload = resolve_update_payload(payload_input, &args)?;
-    validate_blind_signing_context(&payload, &args)?;
+    if args.ledger {
+        validate_ledger_signing_context(&payload)?;
+    } else {
+        validate_blind_signing_context(&payload, &args)?;
+    }
     let _timing = resolve_update_timing(&args)?;
     let chain_resolution = spinner();
     chain_resolution.start("Resolving governance authorization context from chain...");
@@ -204,14 +210,22 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
     };
     log_resolved_context(&payload_context_lines(&payload, &chain_context))?;
 
-    ensure_governance_keys_available_for_listing(conn, &network_name, &network_entry.genesis_hash)?;
-    let password_value = password(format!("Governance vault password for '{}':", network_name))
-        .allow_empty()
-        .interact()?;
-    let vault = governance::unlock_vault(conn, &network_entry.genesis_hash, &password_value)?;
-    let decrypted = governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
-    let signers = resolve_update_signers(&args, &decrypted, &chain_context, &payload)?;
-    let block_item = build_signed_update_instruction(&payload, &chain_context, &signers, _timing)?;
+    let block_item = if args.ledger {
+        build_ledger_signed_update_instruction(&payload, &chain_context, _timing, &args)?
+    } else {
+        ensure_governance_keys_available_for_listing(
+            conn,
+            &network_name,
+            &network_entry.genesis_hash,
+        )?;
+        let password_value = password(format!("Governance vault password for '{}':", network_name))
+            .allow_empty()
+            .interact()?;
+        let vault = governance::unlock_vault(conn, &network_entry.genesis_hash, &password_value)?;
+        let decrypted = governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
+        let signers = resolve_update_signers(&args, &decrypted, &chain_context, &payload)?;
+        build_signed_update_instruction(&payload, &chain_context, &signers, _timing)?
+    };
     let transaction_hash =
         submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
             .await?;
@@ -264,6 +278,21 @@ enum ResolvedGovernanceUpdatePayload {
         auth_family_hint: Option<GovernanceAuthFamily>,
         sequence_queue_hint: Option<GovernanceSequenceQueue>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct PreparedGovernanceUpdate {
+    payload: ResolvedGovernanceUpdatePayload,
+    chain_context: GovernanceUpdateChainContext,
+    header: UpdateHeader,
+    encoded_payload: EncodedUpdatePayload,
+    timing: GovernanceUpdateTiming,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GovernanceSignerOutput {
+    index: UpdateKeysIndex,
+    signature: Signature,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,6 +425,14 @@ impl GovernanceAuthFamily {
             GovernanceAuthFamily::Root => "root",
             GovernanceAuthFamily::Level1 => "level1",
             GovernanceAuthFamily::Level2(capability) => capability.label(),
+        }
+    }
+
+    fn ledger_governance_purpose(self) -> u32 {
+        match self {
+            GovernanceAuthFamily::Root => 0,
+            GovernanceAuthFamily::Level1 => 1,
+            GovernanceAuthFamily::Level2(_) => 2,
         }
     }
 
@@ -674,47 +711,441 @@ fn build_signed_update_instruction(
     signers: &[governance::DecryptedGovernanceKey],
     timing: GovernanceUpdateTiming,
 ) -> Result<BlockItem<Payload>> {
+    let prepared = prepare_governance_update(payload, chain_context, timing)?;
+    let signer_outputs = sign_prepared_update_with_local_keys(&prepared, signers)?;
+    assemble_signed_update_instruction(&prepared, signer_outputs)
+}
+
+fn build_ledger_signed_update_instruction(
+    payload: &ResolvedGovernanceUpdatePayload,
+    chain_context: &GovernanceUpdateChainContext,
+    timing: GovernanceUpdateTiming,
+    args: &GovernanceUpdateArgs,
+) -> Result<BlockItem<Payload>> {
+    let prepared = prepare_governance_update(payload, chain_context, timing)?;
+    let key_index = resolve_ledger_key_index(args)?;
+    let spin = spinner();
+    spin.start("Opening Governance Ledger app and resolving signer key...");
+    let result = (|| {
+        let transport = governance_ledger::HidTransport::open_first().map_err(ledger_error)?;
+        let mut app = governance_ledger::GovernanceLedgerApp::new(transport);
+        let outputs = sign_prepared_update_with_ledger(&mut app, &prepared, key_index)?;
+        assemble_signed_update_instruction(&prepared, outputs)
+    })();
+    spin.clear();
+    result
+}
+
+fn prepare_governance_update(
+    payload: &ResolvedGovernanceUpdatePayload,
+    chain_context: &GovernanceUpdateChainContext,
+    timing: GovernanceUpdateTiming,
+) -> Result<PreparedGovernanceUpdate> {
     let sequence_number = chain_context
         .sequence_number
         .context("governance update sequence number could not be resolved")?;
-    let signer = signer_map_for_payload(payload, &chain_context.chain_parameters, signers)?;
-    let effective_time = TransactionTime::from_seconds(timing.effective_time_seconds);
-    let timeout = TransactionTime::from_seconds(timing.timeout_seconds);
-    let update_instruction = match payload {
-        ResolvedGovernanceUpdatePayload::Known { payload, .. } => update_instruction::update(
-            &signer,
-            sequence_number,
-            effective_time,
-            timeout,
-            payload.clone(),
-        ),
+    let encoded_payload = match payload {
+        ResolvedGovernanceUpdatePayload::Known { payload, .. } => {
+            EncodedUpdatePayload::encode(payload)
+        }
         ResolvedGovernanceUpdatePayload::Blind { bytes, .. } => {
-            build_blind_update_instruction(&signer, sequence_number, effective_time, timeout, bytes)
+            EncodedUpdatePayload::from(bytes.clone())
         }
     };
-    Ok(update_instruction.into())
+    let header = UpdateHeader {
+        seq_number: sequence_number,
+        effective_time: TransactionTime::from_seconds(timing.effective_time_seconds),
+        timeout: TransactionTime::from_seconds(timing.timeout_seconds),
+        payload_size: encoded_payload.size(),
+    };
+    Ok(PreparedGovernanceUpdate {
+        payload: payload.clone(),
+        chain_context: chain_context.clone(),
+        header,
+        encoded_payload,
+        timing,
+    })
 }
 
-fn build_blind_update_instruction(
-    signer: &BTreeMap<UpdateKeysIndex, UpdateKeyPair>,
-    seq_number: UpdateSequenceNumber,
-    effective_time: TransactionTime,
-    timeout: TransactionTime,
-    payload_bytes: &[u8],
-) -> UpdateInstruction {
-    let payload = EncodedUpdatePayload::from(payload_bytes.to_vec());
-    let header = UpdateHeader {
-        seq_number,
-        effective_time,
-        timeout,
-        payload_size: payload.size(),
-    };
-    let signatures = signer.sign_update_hash(&compute_update_sign_hash(&header, &payload));
-    UpdateInstruction {
-        header,
-        payload,
-        signatures,
+fn validate_ledger_signing_context(payload: &ResolvedGovernanceUpdatePayload) -> Result<()> {
+    if matches!(payload, ResolvedGovernanceUpdatePayload::Blind { .. }) {
+        bail!(
+            "Ledger governance signing does not support blind signing unknown serialized governance update payloads"
+        );
     }
+    if payload.auth_family_hint().is_none() {
+        bail!(
+            "Ledger governance signing requires a decoded governance update authorization family"
+        );
+    }
+    Ok(())
+}
+
+fn resolve_ledger_key_index(args: &GovernanceUpdateArgs) -> Result<u32> {
+    match args.ledger_key_index {
+        Some(index) => Ok(index),
+        None if args.non_interactive => Ok(0),
+        None => {
+            let value: String = input("Governance Ledger key index:")
+                .default_input("0")
+                .interact()?;
+            value
+                .parse::<u32>()
+                .with_context(|| format!("invalid Governance Ledger key index '{value}'"))
+        }
+    }
+}
+
+fn ledger_auth_family(prepared: &PreparedGovernanceUpdate) -> Result<GovernanceAuthFamily> {
+    prepared
+        .payload
+        .auth_family_hint()
+        .context("Ledger governance signing requires a known authorization family")
+}
+
+fn ledger_derivation_path_for_prepared_update(
+    prepared: &PreparedGovernanceUpdate,
+    key_index: u32,
+) -> Result<governance_ledger::DerivationPath> {
+    let purpose = ledger_auth_family(prepared)?.ledger_governance_purpose();
+    governance_ledger::DerivationPath::new([1, purpose, key_index])
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+fn ledger_public_key_from_bytes(public_key: [u8; 32]) -> Result<UpdatePublicKey> {
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+        .context("Governance Ledger returned an invalid Ed25519 public key")?;
+    Ok(UpdatePublicKey {
+        public: verifying_key.into(),
+    })
+}
+
+fn ledger_signer_index_for_public_key(
+    prepared: &PreparedGovernanceUpdate,
+    public_key: &UpdatePublicKey,
+) -> Result<UpdateKeysIndex> {
+    let family = ledger_auth_family(prepared)?;
+    let authorization =
+        governance_authorization_for_family(&prepared.chain_context.chain_parameters, family)?;
+    if authorization.threshold > 1 {
+        bail!(
+            "all-in-one Ledger governance signing currently supports 1 signer, but '{}' updates require threshold {}",
+            family.label(),
+            authorization.threshold
+        );
+    }
+    let matches = indices_for_public_key(authorization.keys, public_key)
+        .into_iter()
+        .filter(|index| authorization.authorized_indices.contains(index))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => bail!(
+            "Governance Ledger key '{}' is not authorized for '{}' updates",
+            governance::public_key_hex(public_key),
+            family.label()
+        ),
+        _ => bail!(
+            "Governance Ledger key '{}' maps to multiple governance key indices for '{}' updates",
+            governance::public_key_hex(public_key),
+            family.label()
+        ),
+    }
+}
+
+fn sign_prepared_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>(
+    app: &mut governance_ledger::GovernanceLedgerApp<T>,
+    prepared: &PreparedGovernanceUpdate,
+    key_index: u32,
+) -> Result<Vec<GovernanceSignerOutput>> {
+    let path = ledger_derivation_path_for_prepared_update(prepared, key_index)?;
+    let public_key_response = app
+        .get_public_key(path.clone(), governance_ledger::PublicKeyOptions::default())
+        .map_err(ledger_error)?;
+    let public_key = ledger_public_key_from_bytes(public_key_response.public_key)?;
+    let signer_index = ledger_signer_index_for_public_key(prepared, &public_key)?;
+    let signature = sign_prepared_update_with_ledger_path(app, prepared, path)?;
+    Ok(vec![GovernanceSignerOutput {
+        index: signer_index,
+        signature: Signature {
+            sig: signature.0.to_vec(),
+        },
+    }])
+}
+
+fn sign_prepared_update_with_ledger_path<T: governance_ledger::GovernanceLedgerTransport>(
+    app: &mut governance_ledger::GovernanceLedgerApp<T>,
+    prepared: &PreparedGovernanceUpdate,
+    path: governance_ledger::DerivationPath,
+) -> Result<governance_ledger::RawSignature> {
+    let prefix = ledger_update_prefix(prepared, path)?;
+    let ResolvedGovernanceUpdatePayload::Known { payload, .. } = &prepared.payload else {
+        bail!(
+            "Ledger governance signing does not support blind signing unknown serialized governance update payloads"
+        );
+    };
+    match payload {
+        UpdatePayload::Protocol(update) => app
+            .sign_protocol_update(&governance_ledger::ProtocolUpdateRequest::from((
+                prefix,
+                update.clone(),
+            )))
+            .map_err(ledger_error),
+        UpdatePayload::EuroPerEnergy(update) => app
+            .sign_exchange_rate(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::MicroGTUPerEuro(update) => app
+            .sign_exchange_rate(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::FoundationAccount(update) => app
+            .sign_foundation_account(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::MintDistribution(update) => app
+            .sign_mint_distribution(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::MintDistributionCPV1(update) => app
+            .sign_mint_distribution(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::TransactionFeeDistribution(update) => app
+            .sign_transaction_fee_distribution(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::GASRewards(update) => app
+            .sign_gas_rewards(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::GASRewardsCPV2(update) => app
+            .sign_gas_rewards(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::BakerStakeThreshold(update) => app
+            .sign_baker_stake_threshold(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::CooldownParametersCPV1(update) => app
+            .sign_cooldown_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::PoolParametersCPV1(update) => app
+            .sign_pool_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::TimeParametersCPV1(update) => app
+            .sign_time_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::TimeoutParametersCPV2(update) => app
+            .sign_timeout_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::MinBlockTimeCPV2(update) => app
+            .sign_min_block_time(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::BlockEnergyLimitCPV2(update) => app
+            .sign_block_energy_limit(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::FinalizationCommitteeParametersCPV2(update) => app
+            .sign_finalization_committee_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::ValidatorScoreParametersCPV3(update) => app
+            .sign_validator_score_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .map_err(ledger_error),
+        UpdatePayload::AddAnonymityRevoker(update) => app
+            .sign_add_anonymity_revoker(&governance_ledger::AddAnonymityRevokerRequest::from((
+                prefix,
+                (**update).clone(),
+            )))
+            .map_err(ledger_error),
+        UpdatePayload::AddIdentityProvider(update) => app
+            .sign_add_identity_provider(&governance_ledger::AddIdentityProviderRequest::from((
+                prefix,
+                (**update).clone(),
+            )))
+            .map_err(ledger_error),
+        UpdatePayload::CreatePlt(update) => app
+            .sign_create_plt(&governance_ledger::CreatePltRequest::from((
+                prefix,
+                update.clone(),
+            )))
+            .map_err(ledger_error),
+        UpdatePayload::Root(update) => sign_root_update_with_ledger(app, prefix, update),
+        UpdatePayload::Level1(update) => sign_level1_update_with_ledger(app, prefix, update),
+        UpdatePayload::ElectionDifficulty(_) => bail!(
+            "Ledger governance signing does not support election-difficulty governance updates"
+        ),
+    }
+}
+
+fn sign_root_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>(
+    app: &mut governance_ledger::GovernanceLedgerApp<T>,
+    prefix: governance_ledger::GovernanceUpdatePrefix,
+    update: &concordium_rust_sdk::base::updates::RootUpdate,
+) -> Result<governance_ledger::RawSignature> {
+    use concordium_rust_sdk::base::updates::RootUpdate;
+    match update {
+        RootUpdate::RootKeysUpdate(update) => app
+            .sign_update_root_keys(&governance_ledger::HigherLevelKeyUpdateRequest::from((
+                prefix,
+                governance_ledger::HigherLevelKeyUpdateType::RootKeys,
+                update.clone(),
+            )))
+            .map_err(ledger_error),
+        RootUpdate::Level1KeysUpdate(update) => app
+            .sign_update_level1_keys_with_root_keys(
+                &governance_ledger::HigherLevelKeyUpdateRequest::from((
+                    prefix,
+                    governance_ledger::HigherLevelKeyUpdateType::RootKeys,
+                    update.clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        RootUpdate::Level2KeysUpdate(update) => app
+            .sign_update_authorizations_with_root_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::RootKeys,
+                    governance_ledger::AuthorizationsVersion::V0,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        RootUpdate::Level2KeysUpdateV1(update) => app
+            .sign_update_authorizations_with_root_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::RootKeys,
+                    governance_ledger::AuthorizationsVersion::V1,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        RootUpdate::Level2KeysUpdateV2(update) => app
+            .sign_update_authorizations_with_root_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::RootKeys,
+                    governance_ledger::AuthorizationsVersion::V2,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+    }
+}
+
+fn sign_level1_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>(
+    app: &mut governance_ledger::GovernanceLedgerApp<T>,
+    prefix: governance_ledger::GovernanceUpdatePrefix,
+    update: &concordium_rust_sdk::base::updates::Level1Update,
+) -> Result<governance_ledger::RawSignature> {
+    use concordium_rust_sdk::base::updates::Level1Update;
+    match update {
+        Level1Update::Level1KeysUpdate(update) => app
+            .sign_update_level1_keys_with_level1_keys(
+                &governance_ledger::HigherLevelKeyUpdateRequest::from((
+                    prefix,
+                    governance_ledger::HigherLevelKeyUpdateType::Level1Keys,
+                    update.clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        Level1Update::Level2KeysUpdate(update) => app
+            .sign_update_authorizations_with_level1_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::Level1Keys,
+                    governance_ledger::AuthorizationsVersion::V0,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        Level1Update::Level2KeysUpdateV1(update) => app
+            .sign_update_authorizations_with_level1_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::Level1Keys,
+                    governance_ledger::AuthorizationsVersion::V1,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+        Level1Update::Level2KeysUpdateV2(update) => app
+            .sign_update_authorizations_with_level1_keys(
+                &governance_ledger::AuthorizationsUpdateRequest::from((
+                    prefix,
+                    governance_ledger::AuthorizationsKeyUpdateType::Level1Keys,
+                    governance_ledger::AuthorizationsVersion::V2,
+                    (**update).clone(),
+                )),
+            )
+            .map_err(ledger_error),
+    }
+}
+
+fn fixed_ledger_request<P: Serial>(
+    prefix: governance_ledger::GovernanceUpdatePrefix,
+    payload: P,
+) -> governance_ledger::FixedUpdateRequest {
+    governance_ledger::FixedUpdateRequest::from((prefix, payload))
+}
+
+fn ledger_update_prefix(
+    prepared: &PreparedGovernanceUpdate,
+    path: governance_ledger::DerivationPath,
+) -> Result<governance_ledger::GovernanceUpdatePrefix> {
+    let update_type = prepared
+        .encoded_payload
+        .as_ref()
+        .first()
+        .copied()
+        .context("prepared governance update payload is empty")?;
+    let header = governance_ledger::UpdateHeaderBytes::try_from(prepared.header)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    Ok(governance_ledger::GovernanceUpdatePrefix {
+        path,
+        header,
+        update_type,
+    })
+}
+
+fn ledger_error(err: governance_ledger::GovernanceLedgerError) -> anyhow::Error {
+    match err {
+        governance_ledger::GovernanceLedgerError::UserDeclined => {
+            anyhow::anyhow!("Ledger governance signing was declined on the device")
+        }
+        other => anyhow::anyhow!("Governance Ledger operation failed: {other}"),
+    }
+}
+
+fn sign_prepared_update_with_local_keys(
+    prepared: &PreparedGovernanceUpdate,
+    signers: &[governance::DecryptedGovernanceKey],
+) -> Result<Vec<GovernanceSignerOutput>> {
+    let signer = signer_map_for_payload(
+        &prepared.payload,
+        &prepared.chain_context.chain_parameters,
+        signers,
+    )?;
+    let signature_map = signer.sign_update_hash(&compute_update_sign_hash(
+        &prepared.header,
+        &prepared.encoded_payload,
+    ));
+    Ok(signature_map
+        .signatures
+        .into_iter()
+        .map(|(index, signature)| GovernanceSignerOutput { index, signature })
+        .collect())
+}
+
+fn assemble_signed_update_instruction(
+    prepared: &PreparedGovernanceUpdate,
+    signer_outputs: Vec<GovernanceSignerOutput>,
+) -> Result<BlockItem<Payload>> {
+    let _timing = prepared.timing;
+    if signer_outputs.is_empty() {
+        bail!("at least one governance signer output is required");
+    }
+    let signatures = signer_outputs
+        .into_iter()
+        .map(|output| (output.index, output.signature))
+        .collect::<BTreeMap<_, _>>();
+    let update_instruction = UpdateInstruction {
+        header: prepared.header,
+        payload: prepared.encoded_payload.clone(),
+        signatures: UpdateInstructionSignature { signatures },
+    };
+    Ok(update_instruction.into())
 }
 
 fn compute_update_sign_hash(
@@ -789,23 +1220,51 @@ fn signer_map_for_auth_family(
     signers: &[governance::DecryptedGovernanceKey],
     family: GovernanceAuthFamily,
 ) -> Result<BTreeMap<UpdateKeysIndex, UpdateKeyPair>> {
-    let (keys, authorized_indices, threshold) = match family {
+    let authorization = governance_authorization_for_family(chain_parameters, family)?;
+    let signer = signer_map_from_key_list(
+        authorization.keys,
+        Some(&authorization.authorized_indices),
+        signers,
+    )?;
+    let threshold = authorization.threshold;
+    if signer.len() < threshold {
+        bail!(
+            "selected {} governance signer(s), but '{}' updates require threshold {}",
+            signer.len(),
+            family.label(),
+            threshold
+        );
+    }
+    Ok(signer)
+}
+
+struct GovernanceAuthorizationContext<'a> {
+    keys: &'a [UpdatePublicKey],
+    authorized_indices: BTreeSet<UpdateKeysIndex>,
+    threshold: usize,
+}
+
+fn governance_authorization_for_family(
+    chain_parameters: &ChainParameters,
+    family: GovernanceAuthFamily,
+) -> Result<GovernanceAuthorizationContext<'_>> {
+    match family {
         GovernanceAuthFamily::Root => {
             let keys = chain_parameters
                 .keys
                 .root_keys
                 .as_ref()
                 .context("root governance keys are not present in chain parameters")?;
-            let authorized = (0..keys.keys.len())
+            let authorized_indices = (0..keys.keys.len())
                 .map(|index| UpdateKeysIndex {
                     index: index as u16,
                 })
                 .collect::<BTreeSet<_>>();
-            (
-                &keys.keys,
-                authorized,
-                usize::from(u16::from(keys.threshold)),
-            )
+            Ok(GovernanceAuthorizationContext {
+                keys: &keys.keys,
+                authorized_indices,
+                threshold: usize::from(u16::from(keys.threshold)),
+            })
         }
         GovernanceAuthFamily::Level1 => {
             let keys = chain_parameters
@@ -813,16 +1272,16 @@ fn signer_map_for_auth_family(
                 .level_1_keys
                 .as_ref()
                 .context("level 1 governance keys are not present in chain parameters")?;
-            let authorized = (0..keys.keys.len())
+            let authorized_indices = (0..keys.keys.len())
                 .map(|index| UpdateKeysIndex {
                     index: index as u16,
                 })
                 .collect::<BTreeSet<_>>();
-            (
-                &keys.keys,
-                authorized,
-                usize::from(u16::from(keys.threshold)),
-            )
+            Ok(GovernanceAuthorizationContext {
+                keys: &keys.keys,
+                authorized_indices,
+                threshold: usize::from(u16::from(keys.threshold)),
+            })
         }
         GovernanceAuthFamily::Level2(capability) => {
             let level2 = chain_parameters
@@ -837,23 +1296,13 @@ fn signer_map_for_auth_family(
                         capability.label()
                     )
                 })?;
-            (
-                &level2.keys,
-                access.authorized_keys.clone(),
-                usize::from(u16::from(access.threshold)),
-            )
+            Ok(GovernanceAuthorizationContext {
+                keys: &level2.keys,
+                authorized_indices: access.authorized_keys.clone(),
+                threshold: usize::from(u16::from(access.threshold)),
+            })
         }
-    };
-    let signer = signer_map_from_key_list(keys, Some(&authorized_indices), signers)?;
-    if signer.len() < threshold {
-        bail!(
-            "selected {} governance signer(s), but '{}' updates require threshold {}",
-            signer.len(),
-            family.label(),
-            threshold
-        );
     }
-    Ok(signer)
 }
 
 fn signer_map_without_auth_family(
@@ -2233,6 +2682,8 @@ mod tests {
             serialized: None,
             blind: false,
             keys: Vec::new(),
+            ledger: false,
+            ledger_key_index: None,
             sign_as: None,
             sequence_number: None,
             effective_time: None,
@@ -2396,6 +2847,100 @@ mod tests {
     }
 
     #[test]
+    fn ledger_signing_rejects_blind_payloads() {
+        let payload = ResolvedGovernanceUpdatePayload::Blind {
+            bytes: vec![0xff],
+            auth_family_hint: Some(GovernanceAuthFamily::Level2(GovernanceCapability::Protocol)),
+            sequence_queue_hint: Some(GovernanceSequenceQueue::Protocol),
+        };
+        let err = validate_ledger_signing_context(&payload).unwrap_err();
+        assert!(err.to_string().contains("does not support blind signing"));
+    }
+
+    #[test]
+    fn ledger_path_is_derived_from_update_family_and_key_index() {
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let path = ledger_derivation_path_for_prepared_update(&prepared, 9).unwrap();
+        assert_eq!(path.indices(), &[1, 2, 9]);
+    }
+
+    #[test]
+    fn ledger_threshold_above_one_is_rejected_before_signing() {
+        let ledger_key = key();
+        let public_key = UpdatePublicKey::from(&ledger_key);
+        let params = ChainParameters {
+            keys: UpdateKeys {
+                level_2_keys: Some(Level2Keys {
+                    keys: vec![public_key.clone()],
+                    protocol: Some(concordium_rust_sdk::base::updates::AccessStructure {
+                        authorized_keys: [0u16.into()].into_iter().collect(),
+                        threshold: 2u16.try_into().unwrap(),
+                    }),
+                    emergency: None,
+                    consensus: None,
+                    euro_per_energy: None,
+                    micro_ccd_per_euro: None,
+                    foundation_account: None,
+                    mint_distribution: None,
+                    transaction_fee_distribution: None,
+                    param_gas_rewards: None,
+                    pool_parameters: None,
+                    add_anonymity_revoker: None,
+                    add_identity_provider: None,
+                    cooldown_parameters: None,
+                    time_parameters: None,
+                    create_plt: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: params,
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let err = ledger_signer_index_for_public_key(&prepared, &public_key).unwrap_err();
+        assert!(err.to_string().contains("currently supports 1 signer"));
+    }
+
+    #[test]
+    fn ledger_user_decline_error_is_actionable() {
+        let err = ledger_error(governance_ledger::GovernanceLedgerError::UserDeclined);
+        assert!(err.to_string().contains("declined on the device"));
+    }
+
+    #[test]
     fn signer_entries_sort_authorized_keys_first_and_signer_map_uses_indices() {
         let level2_authorized = key();
         let level2_other = key();
@@ -2474,5 +3019,30 @@ mod tests {
         )
         .unwrap();
         assert!(signer.contains_key(&UpdateKeysIndex { index: 0 }));
+
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let chain_context = GovernanceUpdateChainContext {
+            chain_parameters: params,
+            sequence_number: Some(7u64.into()),
+            sequence_number_source: None,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &chain_context,
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let outputs = sign_prepared_update_with_local_keys(&prepared, &[local[1].clone()]).unwrap();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].index, UpdateKeysIndex { index: 0 });
+        let block_item = assemble_signed_update_instruction(&prepared, outputs).unwrap();
+        assert!(matches!(block_item, BlockItem::UpdateInstruction(_)));
     }
 }

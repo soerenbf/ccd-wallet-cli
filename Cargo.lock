@@ -563,6 +563,7 @@ dependencies = [
  "ccd-wallet-core",
  "ccd-wallet-identity-provider",
  "ccd-wallet-ledger",
+ "ccd-wallet-ledger-governance",
  "chrono",
  "clap",
  "cliclack",
