@@ -1,0 +1,8 @@
+{
+  "updateType": "finalizationCommitteeParametersCPV2",
+  "update": {
+    "min_finalizers": 40,
+    "max_finalizers": 1000,
+    "finalizers_relative_stake_threshold": 0.01
+  }
+}

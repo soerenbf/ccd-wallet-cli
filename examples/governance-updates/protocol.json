@@ -1,0 +1,9 @@
+{
+  "updateType": "protocol",
+  "update": {
+    "message": "Example protocol update",
+    "specificationURL": "https://example.com/protocol-update",
+    "specificationHash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "specificationAuxiliaryData": ""
+  }
+}

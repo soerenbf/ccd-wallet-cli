@@ -1,0 +1,6 @@
+{
+  "updateType": "validatorScoreParametersCPV3",
+  "update": {
+    "maxMissedRounds": 10
+  }
+}

@@ -79,6 +79,10 @@ ccd-wallet
 │  │  ├─ import
 │  │  ├─ list
 │  │  └─ remove
+│  ├─ proposal
+│  │  ├─ create
+│  │  ├─ sign
+│  │  └─ submit
 │  └─ update
 ├─ token                        [Implemented]
 │  ├─ show
@@ -116,7 +120,9 @@ The `seed` command family remains the user-facing place for seed phrase manageme
 
 `identity new` can target either a seed-backed or Ledger-backed key source through `--seed <LABEL>` / `--key-source <LABEL>`. Ledger-backed identity issuance uses an explicit export security model and requires a Concordium Ledger app with purpose-based export support (version 5.5.0 or newer): interactive runs require confirmation, and non-interactive runs must include `--allow-ledger-secret-export` before the CLI exports identity issuance material temporarily from the Ledger app. This flow has been validated on a physical Ledger device running Concordium app `5.6.2`.
 
-`governance update` signs and submits on-chain governance updates. By default it signs with selected keys from the local governance key vault. `governance update --ledger` instead signs with a connected device running the Concordium Governance Ledger app. Ledger governance signing is exclusive for a command invocation: it does not mix local governance key vault signatures with Ledger signatures, and it does not support blind signing of unknown serialized payloads. The Ledger signer path is derived from the update authorization family using governance purpose `0` for root, `1` for level 1, and `2` for level 2, with governance key index `0` by default; `--ledger-key-index <N>` selects a different key index. The all-in-one Ledger submission flow currently supports one Ledger signer, so updates whose on-chain threshold is greater than one require a future detached multi-machine signing flow.
+`governance update` signs and submits on-chain governance updates in one invocation. By default it signs with selected keys from the local governance key vault. `governance update --ledger` instead signs with a connected device running the Concordium Governance Ledger app. Ledger governance signing is exclusive for a command invocation: it does not mix local governance key vault signatures with Ledger signatures, and it does not support blind signing of unknown serialized payloads. The Ledger signer path is derived from the update authorization family using governance purpose `0` for root, `1` for level 1, and `2` for level 2, with governance key index `0` by default; `--ledger-key-index <N>` selects a different key index. The all-in-one Ledger submission flow currently supports one Ledger signer, so updates whose on-chain threshold is greater than one should use the detached `governance proposal` flow.
+
+`governance proposal` is the detached multi-party governance update flow. `governance proposal create --json <FILE> --out <FILE> --effective-time <TIME> --timeout <TIME>` creates a proposal file containing the version, network genesis hash, frozen update header, and canonical pretty JSON payload. Proposal creation intentionally requires explicit effective time and timeout inputs so detached signers do not coordinate around accidental timing defaults. `governance proposal sign <PROPOSAL> --out <FILE>` signs a proposal with a local governance key using the same local signer selection behavior as `governance update`; `--ledger --ledger-key-index <N>` signs with a connected Governance Ledger device. Detached signature files contain the version, verify key, and a single-entry `UpdateInstructionSignature`-shaped signature map keyed by the live on-chain governance key index for the signer. `governance proposal submit <PROPOSAL> --signature <FILE>...` submits the proposal after online revalidation; `--signature-dir <DIR>` additionally loads JSON signature files from a directory. All detached proposal stages resolve the selected network and revalidate current on-chain authorization state through the node.
 
 `transaction show <HASH>` inspects transaction lifecycle and outcome details through a resolved node. The optional `--show-payload` flag additionally attempts to display the original submitted block item payload and account transaction header when the transaction is present in committed or finalized block contents.
 

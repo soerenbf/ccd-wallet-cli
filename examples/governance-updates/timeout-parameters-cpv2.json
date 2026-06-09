@@ -1,0 +1,8 @@
+{
+  "updateType": "TimeoutParametersCPV2",
+  "update": {
+    "base": "5s",
+    "increase": 2,
+    "decrease": 0.5
+  }
+}

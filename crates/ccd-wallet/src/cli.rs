@@ -1533,6 +1533,8 @@ pub struct GovernanceCommand {
 pub enum GovernanceSubcommand {
     /// Manage imported governance keys.
     Keys(GovernanceKeysCommand),
+    /// Create, sign, and submit detached governance update proposals.
+    Proposal(GovernanceProposalCommand),
     /// Sign and submit a governance update.
     Update(Box<GovernanceUpdateArgs>),
 }
@@ -1541,6 +1543,22 @@ pub enum GovernanceSubcommand {
 pub struct GovernanceKeysCommand {
     #[command(subcommand)]
     pub command: GovernanceKeysSubcommand,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceProposalCommand {
+    #[command(subcommand)]
+    pub command: GovernanceProposalSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GovernanceProposalSubcommand {
+    /// Create a detached governance update proposal file.
+    Create(Box<GovernanceProposalCreateArgs>),
+    /// Sign a detached governance update proposal file.
+    Sign(Box<GovernanceProposalSignArgs>),
+    /// Submit a detached governance update proposal with detached signatures.
+    Submit(Box<GovernanceProposalSubmitArgs>),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1608,6 +1626,103 @@ pub struct GovernanceKeysRemoveArgs {
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceProposalCreateArgs {
+    /// Read the governance update payload from a JSON file.
+    #[arg(long = "json", value_name = "FILE")]
+    pub json: PathBuf,
+
+    /// Path to write the detached governance proposal JSON file.
+    #[arg(long = "out", value_name = "FILE")]
+    pub out: PathBuf,
+
+    /// Effective time for the update: 0, relative duration, RFC3339, or unix seconds.
+    #[arg(long = "effective-time", value_name = "TIME")]
+    pub effective_time: Option<String>,
+
+    /// Timeout for the update: relative duration, RFC3339, or unix seconds.
+    #[arg(long = "timeout", value_name = "TIME")]
+    pub timeout: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceProposalSignArgs {
+    /// Path to the detached governance proposal JSON file to sign.
+    #[arg(value_name = "PROPOSAL")]
+    pub proposal: PathBuf,
+
+    /// Path to write the detached governance signature JSON file.
+    #[arg(long = "out", value_name = "FILE")]
+    pub out: PathBuf,
+
+    /// Governance verify key to sign with from the local governance key vault.
+    #[arg(long = "key", value_name = "VERIFY_KEY", conflicts_with = "ledger")]
+    pub key: Option<String>,
+
+    /// Sign with the connected Concordium Governance Ledger app instead of the local governance key vault.
+    #[arg(long = "ledger", conflicts_with = "key")]
+    pub ledger: bool,
+
+    /// Governance Ledger key index to use for the update-family-derived governance path.
+    #[arg(long = "ledger-key-index", value_name = "N", requires = "ledger")]
+    pub ledger_key_index: Option<u32>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct GovernanceProposalSubmitArgs {
+    /// Path to the detached governance proposal JSON file to submit.
+    #[arg(value_name = "PROPOSAL")]
+    pub proposal: PathBuf,
+
+    /// Detached governance signature JSON file. Repeat to provide multiple signatures.
+    #[arg(long = "signature", value_name = "FILE")]
+    pub signatures: Vec<PathBuf>,
+
+    /// Directory containing detached governance signature JSON files.
+    #[arg(long = "signature-dir", value_name = "DIR")]
+    pub signature_dir: Option<PathBuf>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1757,6 +1872,112 @@ mod tests {
             },
             other => panic!("expected governance command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_governance_proposal_commands() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "governance",
+            "proposal",
+            "create",
+            "--json",
+            "payload.json",
+            "--out",
+            "proposal.json",
+            "--effective-time",
+            "0",
+            "--timeout",
+            "1800000000",
+        ]);
+        match cli.command {
+            Command::Governance(command) => match command.command {
+                GovernanceSubcommand::Proposal(command) => match command.command {
+                    GovernanceProposalSubcommand::Create(args) => {
+                        assert_eq!(args.json, std::path::PathBuf::from("payload.json"));
+                        assert_eq!(args.out, std::path::PathBuf::from("proposal.json"));
+                    }
+                    other => panic!("expected governance proposal create command, got {other:?}"),
+                },
+                other => panic!("expected governance proposal command, got {other:?}"),
+            },
+            other => panic!("expected governance command, got {other:?}"),
+        }
+
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "governance",
+            "proposal",
+            "sign",
+            "proposal.json",
+            "--ledger",
+            "--ledger-key-index",
+            "3",
+            "--out",
+            "sig.json",
+        ]);
+        match cli.command {
+            Command::Governance(command) => match command.command {
+                GovernanceSubcommand::Proposal(command) => match command.command {
+                    GovernanceProposalSubcommand::Sign(args) => {
+                        assert!(args.ledger);
+                        assert_eq!(args.ledger_key_index, Some(3));
+                        assert_eq!(args.out, std::path::PathBuf::from("sig.json"));
+                    }
+                    other => panic!("expected governance proposal sign command, got {other:?}"),
+                },
+                other => panic!("expected governance proposal command, got {other:?}"),
+            },
+            other => panic!("expected governance command, got {other:?}"),
+        }
+
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "governance",
+            "proposal",
+            "submit",
+            "proposal.json",
+            "--signature",
+            "sig-a.json",
+            "--signature",
+            "sig-b.json",
+            "--signature-dir",
+            "sigs",
+            "--no-wait",
+        ]);
+        match cli.command {
+            Command::Governance(command) => match command.command {
+                GovernanceSubcommand::Proposal(command) => match command.command {
+                    GovernanceProposalSubcommand::Submit(args) => {
+                        assert_eq!(args.signatures.len(), 2);
+                        assert_eq!(args.signature_dir, Some(std::path::PathBuf::from("sigs")));
+                        assert!(args.no_wait);
+                    }
+                    other => panic!("expected governance proposal submit command, got {other:?}"),
+                },
+                other => panic!("expected governance proposal command, got {other:?}"),
+            },
+            other => panic!("expected governance command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_governance_proposal_sign_ledger_with_local_key() {
+        let err = Cli::try_parse_from([
+            "ccd-wallet",
+            "governance",
+            "proposal",
+            "sign",
+            "proposal.json",
+            "--ledger",
+            "--key",
+            "abc",
+            "--out",
+            "sig.json",
+        ])
+        .unwrap_err();
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

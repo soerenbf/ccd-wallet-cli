@@ -1,8 +1,9 @@
 use crate::{
     cli::{
         GovernanceKeysCommand, GovernanceKeysImportArgs, GovernanceKeysListArgs,
-        GovernanceKeysRemoveArgs, GovernanceKeysSubcommand, GovernanceSubcommand,
-        GovernanceUpdateArgs,
+        GovernanceKeysRemoveArgs, GovernanceKeysSubcommand, GovernanceProposalCreateArgs,
+        GovernanceProposalSignArgs, GovernanceProposalSubcommand, GovernanceProposalSubmitArgs,
+        GovernanceSubcommand, GovernanceUpdateArgs,
     },
     commands::ui::{
         ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_multiselect_or_single,
@@ -23,7 +24,7 @@ use cliclack::{input, password, spinner};
 use concordium_rust_sdk::{
     base::{
         base::{UpdateKeyPair, UpdateKeysIndex, UpdatePublicKey, UpdateSequenceNumber},
-        transactions::{BlockItem, Payload},
+        transactions::{BlockItem, Payload, PayloadSize},
         updates::{
             EncodedUpdatePayload, UpdateHeader, UpdateInstruction, UpdateInstructionSignature,
             UpdateSigner,
@@ -41,6 +42,7 @@ use concordium_rust_sdk::{
     v2,
 };
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -162,6 +164,11 @@ pub async fn run(conn: &mut Connection, command: crate::cli::GovernanceSubcomman
             GovernanceKeysSubcommand::Import(args) => import_keys(conn, args).await,
             GovernanceKeysSubcommand::List(args) => list_keys(conn, args).await,
             GovernanceKeysSubcommand::Remove(args) => remove_keys(conn, args).await,
+        },
+        GovernanceSubcommand::Proposal(args) => match args.command {
+            GovernanceProposalSubcommand::Create(args) => create_proposal(conn, *args).await,
+            GovernanceProposalSubcommand::Sign(args) => sign_proposal(conn, *args).await,
+            GovernanceProposalSubcommand::Submit(args) => submit_proposal(conn, *args).await,
         },
         GovernanceSubcommand::Update(args) => update(conn, *args).await,
     }
@@ -287,6 +294,37 @@ struct PreparedGovernanceUpdate {
     header: UpdateHeader,
     encoded_payload: EncodedUpdatePayload,
     timing: GovernanceUpdateTiming,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GovernanceProposalFile {
+    version: u32,
+    genesis_hash: String,
+    header: GovernanceProposalHeaderJson,
+    payload: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GovernanceProposalHeaderJson {
+    seq_number: u64,
+    effective_time: u64,
+    timeout: u64,
+    payload_size: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GovernanceSignatureFile {
+    version: u32,
+    verify_key: String,
+    signature: GovernanceUpdateInstructionSignatureJson,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct GovernanceUpdateInstructionSignatureJson {
+    signatures: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -767,6 +805,194 @@ fn prepare_governance_update(
     })
 }
 
+fn proposal_file_from_prepared(
+    prepared: &PreparedGovernanceUpdate,
+    genesis_hash: &str,
+) -> Result<GovernanceProposalFile> {
+    let payload = match &prepared.payload {
+        ResolvedGovernanceUpdatePayload::Known { payload, .. } => serde_json::to_value(payload)
+            .context("failed to serialize governance update payload for proposal file")?,
+        ResolvedGovernanceUpdatePayload::Blind { .. } => {
+            bail!("detached governance proposals require JSON payloads")
+        }
+    };
+    Ok(GovernanceProposalFile {
+        version: 1,
+        genesis_hash: genesis_hash.to_owned(),
+        header: GovernanceProposalHeaderJson::from_update_header(&prepared.header),
+        payload,
+    })
+}
+
+impl GovernanceProposalHeaderJson {
+    fn from_update_header(header: &UpdateHeader) -> Self {
+        Self {
+            seq_number: header.seq_number.number,
+            effective_time: header.effective_time.seconds,
+            timeout: header.timeout.seconds,
+            payload_size: header.payload_size.into(),
+        }
+    }
+
+    fn to_update_header(self) -> UpdateHeader {
+        UpdateHeader {
+            seq_number: UpdateSequenceNumber {
+                number: self.seq_number,
+            },
+            effective_time: TransactionTime::from_seconds(self.effective_time),
+            timeout: TransactionTime::from_seconds(self.timeout),
+            payload_size: PayloadSize::from(self.payload_size),
+        }
+    }
+}
+
+fn read_governance_proposal_file(path: &Path) -> Result<GovernanceProposalFile> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read governance proposal file {}", path.display()))?;
+    let proposal: GovernanceProposalFile = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse governance proposal file {}",
+            path.display()
+        )
+    })?;
+    if proposal.version != 1 {
+        bail!(
+            "unsupported governance proposal file version {}; expected 1",
+            proposal.version
+        );
+    }
+    Ok(proposal)
+}
+
+fn write_governance_proposal_file(path: &Path, proposal: &GovernanceProposalFile) -> Result<()> {
+    let raw = serde_json::to_string_pretty(proposal)
+        .context("failed to serialize governance proposal file")?;
+    write_json_file(path, &raw)
+}
+
+fn read_governance_signature_file(path: &Path) -> Result<GovernanceSignatureFile> {
+    let raw = fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read governance signature file {}",
+            path.display()
+        )
+    })?;
+    let signature: GovernanceSignatureFile = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse governance signature file {}",
+            path.display()
+        )
+    })?;
+    if signature.version != 1 {
+        bail!(
+            "unsupported governance signature file version {}; expected 1",
+            signature.version
+        );
+    }
+    Ok(signature)
+}
+
+fn write_governance_signature_file(path: &Path, signature: &GovernanceSignatureFile) -> Result<()> {
+    let raw = serde_json::to_string_pretty(signature)
+        .context("failed to serialize governance signature file")?;
+    write_json_file(path, &raw)
+}
+
+fn write_json_file(path: &Path, content: &str) -> Result<()> {
+    if path.exists() {
+        bail!("refusing to overwrite existing file {}", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            bail!("output directory does not exist: {}", parent.display());
+        }
+    }
+    fs::write(path, format!("{content}\n"))
+        .with_context(|| format!("failed to write JSON file {}", path.display()))
+}
+
+fn resolved_payload_from_proposal(
+    proposal: &GovernanceProposalFile,
+) -> Result<ResolvedGovernanceUpdatePayload> {
+    let payload: UpdatePayload = serde_json::from_value(proposal.payload.clone())
+        .context("failed to parse governance proposal payload JSON")?;
+    let update_type = payload.update_type();
+    Ok(ResolvedGovernanceUpdatePayload::Known {
+        payload,
+        auth_family: auth_family_for_update_type(update_type),
+        sequence_queue: GovernanceSequenceQueue::from_update_type(update_type),
+    })
+}
+
+fn prepared_update_from_proposal(
+    proposal: &GovernanceProposalFile,
+    chain_context: GovernanceUpdateChainContext,
+) -> Result<PreparedGovernanceUpdate> {
+    let payload = resolved_payload_from_proposal(proposal)?;
+    let encoded_payload = match &payload {
+        ResolvedGovernanceUpdatePayload::Known { payload, .. } => {
+            EncodedUpdatePayload::encode(payload)
+        }
+        ResolvedGovernanceUpdatePayload::Blind { .. } => unreachable!("proposals are typed JSON"),
+    };
+    let header = proposal.header.to_update_header();
+    if header.payload_size != encoded_payload.size() {
+        bail!(
+            "governance proposal payload size mismatch: header says {}, encoded payload is {}",
+            Into::<u32>::into(header.payload_size),
+            Into::<u32>::into(encoded_payload.size())
+        );
+    }
+    Ok(PreparedGovernanceUpdate {
+        payload,
+        chain_context,
+        header,
+        encoded_payload,
+        timing: GovernanceUpdateTiming {
+            effective_time_seconds: proposal.header.effective_time,
+            timeout_seconds: proposal.header.timeout,
+        },
+    })
+}
+
+fn signature_file_from_signer_output(
+    verify_key: String,
+    output: GovernanceSignerOutput,
+) -> GovernanceSignatureFile {
+    let mut signatures = BTreeMap::new();
+    signatures.insert(
+        output.index.index.to_string(),
+        hex::encode(&output.signature.sig),
+    );
+    GovernanceSignatureFile {
+        version: 1,
+        verify_key,
+        signature: GovernanceUpdateInstructionSignatureJson { signatures },
+    }
+}
+
+fn signer_output_from_signature_file(
+    signature_file: &GovernanceSignatureFile,
+) -> Result<GovernanceSignerOutput> {
+    let entries = signature_file
+        .signature
+        .signatures
+        .iter()
+        .collect::<Vec<_>>();
+    let [(index, signature)] = entries.as_slice() else {
+        bail!("detached governance signature files must contain exactly one signature entry");
+    };
+    let index = index
+        .parse::<u16>()
+        .with_context(|| format!("invalid governance signature index '{index}'"))?;
+    let signature = hex::decode(signature)
+        .with_context(|| format!("invalid hex governance signature for index {index}"))?;
+    Ok(GovernanceSignerOutput {
+        index: UpdateKeysIndex { index },
+        signature: Signature { sig: signature },
+    })
+}
+
 fn validate_ledger_signing_context(payload: &ResolvedGovernanceUpdatePayload) -> Result<()> {
     if matches!(payload, ResolvedGovernanceUpdatePayload::Blind { .. }) {
         bail!(
@@ -820,6 +1046,43 @@ fn ledger_public_key_from_bytes(public_key: [u8; 32]) -> Result<UpdatePublicKey>
     })
 }
 
+fn signer_index_for_verify_key(
+    prepared: &PreparedGovernanceUpdate,
+    verify_key: &str,
+) -> Result<UpdateKeysIndex> {
+    let family = prepared
+        .payload
+        .auth_family_hint()
+        .context("governance proposal requires a known authorization family")?;
+    let authorization =
+        governance_authorization_for_family(&prepared.chain_context.chain_parameters, family)?;
+    let normalized = verify_key.trim().to_ascii_lowercase();
+    let matches = authorization
+        .keys
+        .iter()
+        .enumerate()
+        .filter_map(|(index, public_key)| {
+            (governance::public_key_hex(public_key) == normalized).then_some(UpdateKeysIndex {
+                index: index as u16,
+            })
+        })
+        .filter(|index| authorization.authorized_indices.contains(index))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [index] => Ok(*index),
+        [] => bail!(
+            "governance key '{}' is not authorized for '{}' updates",
+            verify_key,
+            family.label()
+        ),
+        _ => bail!(
+            "governance key '{}' maps to multiple governance key indices for '{}' updates",
+            verify_key,
+            family.label()
+        ),
+    }
+}
+
 fn ledger_signer_index_for_public_key(
     prepared: &PreparedGovernanceUpdate,
     public_key: &UpdatePublicKey,
@@ -871,6 +1134,30 @@ fn sign_prepared_update_with_ledger<T: governance_ledger::GovernanceLedgerTransp
             sig: signature.0.to_vec(),
         },
     }])
+}
+
+fn sign_detached_prepared_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>(
+    app: &mut governance_ledger::GovernanceLedgerApp<T>,
+    prepared: &PreparedGovernanceUpdate,
+    key_index: u32,
+) -> Result<(String, GovernanceSignerOutput)> {
+    let path = ledger_derivation_path_for_prepared_update(prepared, key_index)?;
+    let public_key_response = app
+        .get_public_key(path.clone(), governance_ledger::PublicKeyOptions::default())
+        .map_err(ledger_error)?;
+    let public_key = ledger_public_key_from_bytes(public_key_response.public_key)?;
+    let verify_key = governance::public_key_hex(&public_key);
+    let signer_index = signer_index_for_verify_key(prepared, &verify_key)?;
+    let signature = sign_prepared_update_with_ledger_path(app, prepared, path)?;
+    Ok((
+        verify_key,
+        GovernanceSignerOutput {
+            index: signer_index,
+            signature: Signature {
+                sig: signature.0.to_vec(),
+            },
+        },
+    ))
 }
 
 fn sign_prepared_update_with_ledger_path<T: governance_ledger::GovernanceLedgerTransport>(
@@ -1106,6 +1393,26 @@ fn ledger_error(err: governance_ledger::GovernanceLedgerError) -> anyhow::Error 
         }
         other => anyhow::anyhow!("Governance Ledger operation failed: {other}"),
     }
+}
+
+fn sign_detached_prepared_update_with_local_key(
+    prepared: &PreparedGovernanceUpdate,
+    signer: &governance::DecryptedGovernanceKey,
+) -> Result<GovernanceSignerOutput> {
+    let verify_key = governance::public_key_hex(&signer.public_key);
+    let index = signer_index_for_verify_key(prepared, &verify_key)?;
+    let signer = BTreeMap::from([(index, signer.key_pair.clone())]);
+    let signature_map = signer.sign_update_hash(&compute_update_sign_hash(
+        &prepared.header,
+        &prepared.encoded_payload,
+    ));
+    let signature = signature_map
+        .signatures
+        .into_iter()
+        .next()
+        .map(|(_, signature)| signature)
+        .context("local governance signing produced no signature")?;
+    Ok(GovernanceSignerOutput { index, signature })
 }
 
 fn sign_prepared_update_with_local_keys(
@@ -1768,6 +2075,39 @@ fn decode_hex_payload(raw_hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+fn resolve_proposal_timing(
+    effective_time: Option<&str>,
+    timeout: Option<&str>,
+    non_interactive: bool,
+) -> Result<GovernanceUpdateTiming> {
+    let now = now_unix_seconds()?;
+    let effective_time_seconds = match effective_time {
+        Some(value) => parse_effective_time_input(value, now)?,
+        None if non_interactive => {
+            bail!("`--effective-time <TIME>` is required in --non-interactive proposal creation")
+        }
+        None => {
+            let value: String = input("Effective time:").interact()?;
+            parse_effective_time_input(&value, now)?
+        }
+    };
+    let timeout_seconds = match timeout {
+        Some(value) => parse_time_input(value, now)?,
+        None if non_interactive => {
+            bail!("`--timeout <TIME>` is required in --non-interactive proposal creation")
+        }
+        None => {
+            let value: String = input("Timeout:").interact()?;
+            parse_time_input(&value, now)?
+        }
+    };
+    validate_update_timing(effective_time_seconds, timeout_seconds, now)?;
+    Ok(GovernanceUpdateTiming {
+        effective_time_seconds,
+        timeout_seconds,
+    })
+}
+
 fn resolve_update_timing(args: &GovernanceUpdateArgs) -> Result<GovernanceUpdateTiming> {
     let now = now_unix_seconds()?;
     let effective_time_seconds = match &args.effective_time {
@@ -1889,6 +2229,377 @@ fn now_unix_seconds() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the unix epoch")?
         .as_secs())
+}
+
+async fn create_proposal(conn: &mut Connection, args: GovernanceProposalCreateArgs) -> Result<()> {
+    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
+        conn,
+        args.network.as_deref(),
+        !args.no_defaults,
+        args.non_interactive,
+    )
+    .await?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: format!("{network_name} @ {endpoint_label}"),
+        source,
+    }])?;
+
+    let raw_json = fs::read_to_string(&args.json).with_context(|| {
+        format!(
+            "failed to read governance update JSON file {}",
+            args.json.display()
+        )
+    })?;
+    let payload = resolve_update_payload(
+        GovernanceUpdatePayloadInput::Json(raw_json),
+        &proposal_payload_args(),
+    )?;
+    let timing = resolve_proposal_timing(
+        args.effective_time.as_deref(),
+        args.timeout.as_deref(),
+        args.non_interactive,
+    )?;
+    let chain_context = resolve_update_chain_context(
+        &network_entry.node_endpoint,
+        &endpoint_label,
+        &payload,
+        None,
+    )
+    .await?;
+    let prepared = prepare_governance_update(&payload, &chain_context, timing)?;
+    let proposal = proposal_file_from_prepared(&prepared, &network_entry.genesis_hash)?;
+    write_governance_proposal_file(&args.out, &proposal)?;
+    println!("Wrote governance proposal to {}.", args.out.display());
+    Ok(())
+}
+
+fn proposal_payload_args() -> GovernanceUpdateArgs {
+    GovernanceUpdateArgs {
+        json: None,
+        serialized: None,
+        blind: false,
+        keys: Vec::new(),
+        ledger: false,
+        ledger_key_index: None,
+        sign_as: None,
+        sequence_number: None,
+        effective_time: None,
+        timeout: None,
+        network: None,
+        no_wait: false,
+        non_interactive: true,
+        no_defaults: false,
+    }
+}
+
+async fn proposal_chain_context(
+    node_endpoint: &str,
+    endpoint_label: &str,
+    proposal: &GovernanceProposalFile,
+) -> Result<GovernanceUpdateChainContext> {
+    let payload = resolved_payload_from_proposal(proposal)?;
+    let chain_parameters = fetch_chain_parameters(node_endpoint, endpoint_label).await?;
+    let queue = payload
+        .sequence_queue_hint()
+        .context("governance proposal payload has no update sequence queue")?;
+    let next = fetch_next_update_sequence_numbers(node_endpoint, endpoint_label).await?;
+    let live_sequence = queue.next_sequence_number(&next);
+    let proposal_sequence = validate_proposal_sequence(proposal, queue, live_sequence)?;
+    Ok(GovernanceUpdateChainContext {
+        chain_parameters,
+        sequence_number: Some(proposal_sequence),
+        sequence_number_source: Some(ResolutionSource::Explicit),
+    })
+}
+
+async fn load_and_prepare_proposal(
+    node_endpoint: &str,
+    endpoint_label: &str,
+    expected_genesis_hash: &str,
+    proposal_path: &Path,
+) -> Result<(GovernanceProposalFile, PreparedGovernanceUpdate)> {
+    let proposal = read_governance_proposal_file(proposal_path)?;
+    if proposal.genesis_hash != expected_genesis_hash {
+        bail!(
+            "governance proposal targets genesis hash '{}', but selected network has genesis hash '{}'",
+            proposal.genesis_hash,
+            expected_genesis_hash
+        );
+    }
+    let chain_context = proposal_chain_context(node_endpoint, endpoint_label, &proposal).await?;
+    let prepared = prepared_update_from_proposal(&proposal, chain_context)?;
+    Ok((proposal, prepared))
+}
+
+async fn sign_proposal(conn: &mut Connection, args: GovernanceProposalSignArgs) -> Result<()> {
+    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
+        conn,
+        args.network.as_deref(),
+        !args.no_defaults,
+        args.non_interactive,
+    )
+    .await?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: format!("{network_name} @ {endpoint_label}"),
+        source,
+    }])?;
+    let (_proposal, prepared) = load_and_prepare_proposal(
+        &network_entry.node_endpoint,
+        &endpoint_label,
+        &network_entry.genesis_hash,
+        &args.proposal,
+    )
+    .await?;
+
+    let signature = if args.ledger {
+        let key_index = match args.ledger_key_index {
+            Some(index) => index,
+            None if args.non_interactive => 0,
+            None => {
+                let value: String = input("Governance Ledger key index:")
+                    .default_input("0")
+                    .interact()?;
+                value
+                    .parse::<u32>()
+                    .with_context(|| format!("invalid Governance Ledger key index '{value}'"))?
+            }
+        };
+        let spin = spinner();
+        spin.start("Opening Governance Ledger app and signing proposal...");
+        let result: Result<GovernanceSignatureFile> = (|| {
+            let transport = governance_ledger::HidTransport::open_first().map_err(ledger_error)?;
+            let mut app = governance_ledger::GovernanceLedgerApp::new(transport);
+            let (verify_key, output) =
+                sign_detached_prepared_update_with_ledger(&mut app, &prepared, key_index)?;
+            Ok(signature_file_from_signer_output(verify_key, output))
+        })();
+        spin.clear();
+        result?
+    } else {
+        ensure_governance_keys_available_for_listing(
+            conn,
+            &network_name,
+            &network_entry.genesis_hash,
+        )?;
+        let password_value = password(format!("Governance vault password for '{}':", network_name))
+            .allow_empty()
+            .interact()?;
+        let vault = governance::unlock_vault(conn, &network_entry.genesis_hash, &password_value)?;
+        let decrypted = governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
+        let selected = resolve_proposal_local_signer(
+            args.key.as_deref(),
+            args.non_interactive,
+            &decrypted,
+            &prepared,
+        )?;
+        let verify_key = governance::public_key_hex(&selected.public_key);
+        let output = sign_detached_prepared_update_with_local_key(&prepared, &selected)?;
+        signature_file_from_signer_output(verify_key, output)
+    };
+    write_governance_signature_file(&args.out, &signature)?;
+    println!("Wrote governance signature to {}.", args.out.display());
+    Ok(())
+}
+
+fn resolve_proposal_local_signer(
+    key: Option<&str>,
+    non_interactive: bool,
+    decrypted: &[governance::DecryptedGovernanceKey],
+    prepared: &PreparedGovernanceUpdate,
+) -> Result<governance::DecryptedGovernanceKey> {
+    if decrypted.is_empty() {
+        bail!("no governance keys are stored for the selected network");
+    }
+    if let Some(verify_key) = key {
+        return find_decrypted_key_by_verify_key(decrypted, verify_key)
+            .with_context(|| format!("governance key '{verify_key}' is not stored locally"));
+    }
+    if non_interactive {
+        bail!("`--key <VERIFY_KEY>` must be provided in --non-interactive mode");
+    }
+    let entries = governance_signer_entries(
+        decrypted,
+        &prepared.chain_context.chain_parameters,
+        prepared.payload.auth_family_hint(),
+    );
+    let items = entries
+        .iter()
+        .map(|entry| SelectItem {
+            value: entry.list_entry.verify_key.clone(),
+            label: render_governance_list_row(&entry.list_entry, true),
+            hint: entry.list_entry.detail().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    let selected = select_or_single("Select governance proposal signer", &items, None)?;
+    find_decrypted_key_by_verify_key(decrypted, &selected)
+        .with_context(|| format!("selected governance key '{selected}' is not stored locally"))
+}
+
+async fn submit_proposal(conn: &mut Connection, args: GovernanceProposalSubmitArgs) -> Result<()> {
+    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
+        conn,
+        args.network.as_deref(),
+        !args.no_defaults,
+        args.non_interactive,
+    )
+    .await?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: format!("{network_name} @ {endpoint_label}"),
+        source,
+    }])?;
+    let (_proposal, prepared) = load_and_prepare_proposal(
+        &network_entry.node_endpoint,
+        &endpoint_label,
+        &network_entry.genesis_hash,
+        &args.proposal,
+    )
+    .await?;
+    let signature_paths = collect_signature_files(&args.signatures, args.signature_dir.as_deref())?;
+    if signature_paths.is_empty() {
+        bail!("at least one detached governance signature file is required");
+    }
+    let mut outputs = Vec::new();
+    let mut seen_indices = BTreeSet::new();
+    for path in signature_paths {
+        let signature = read_governance_signature_file(&path)?;
+        let output = signer_output_from_signature_file(&signature)?;
+        let expected_index = signer_index_for_verify_key(&prepared, &signature.verify_key)?;
+        if output.index != expected_index {
+            bail!(
+                "detached signature {} stores index {}, but verify key '{}' currently maps to index {}",
+                path.display(),
+                output.index,
+                signature.verify_key,
+                expected_index
+            );
+        }
+        verify_detached_signature(&prepared, &output)?;
+        if !seen_indices.insert(output.index) {
+            bail!(
+                "duplicate detached governance signature for key index {}",
+                output.index
+            );
+        }
+        outputs.push(output);
+    }
+    ensure_signature_threshold(&prepared, outputs.len())?;
+    let block_item = assemble_signed_update_instruction(&prepared, outputs)?;
+    let transaction_hash =
+        submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
+            .await?;
+    let message = format!("Submitted governance update: {transaction_hash}");
+    if args.no_wait {
+        println!("{message}");
+        return Ok(());
+    }
+    let _ = cliclack::log::success(message);
+    wait_for_governance_update_finalization(
+        &network_entry.node_endpoint,
+        &endpoint_label,
+        &transaction_hash,
+    )
+    .await?;
+    Ok(())
+}
+
+fn collect_signature_files(explicit: &[PathBuf], dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let mut files = explicit.to_vec();
+    if let Some(dir) = dir {
+        if !dir.is_dir() {
+            bail!("signature directory does not exist: {}", dir.display());
+        }
+        let mut directory_files = fs::read_dir(dir)
+            .with_context(|| format!("failed to read signature directory {}", dir.display()))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .with_context(|| format!("failed to read entry in {}", dir.display()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        directory_files
+            .retain(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"));
+        directory_files.sort();
+        files.extend(directory_files);
+    }
+    Ok(files)
+}
+
+fn validate_proposal_sequence(
+    proposal: &GovernanceProposalFile,
+    queue: GovernanceSequenceQueue,
+    live_sequence: UpdateSequenceNumber,
+) -> Result<UpdateSequenceNumber> {
+    let proposal_sequence = UpdateSequenceNumber {
+        number: proposal.header.seq_number,
+    };
+    if live_sequence != proposal_sequence {
+        bail!(
+            "governance proposal is stale for '{}' updates: proposal sequence {}, current next sequence {}",
+            queue.label(),
+            proposal_sequence,
+            live_sequence
+        );
+    }
+    Ok(proposal_sequence)
+}
+
+fn verify_detached_signature(
+    prepared: &PreparedGovernanceUpdate,
+    output: &GovernanceSignerOutput,
+) -> Result<()> {
+    let family = prepared
+        .payload
+        .auth_family_hint()
+        .context("governance proposal requires a known authorization family")?;
+    let authorization =
+        governance_authorization_for_family(&prepared.chain_context.chain_parameters, family)?;
+    let public_key = authorization
+        .keys
+        .get(usize::from(output.index.index))
+        .with_context(|| {
+            format!(
+                "governance signature index {} is out of range",
+                output.index
+            )
+        })?;
+    if !authorization.authorized_indices.contains(&output.index) {
+        bail!(
+            "governance signature index {} is not authorized for '{}' updates",
+            output.index,
+            family.label()
+        );
+    }
+    let signature = ed25519_dalek::Signature::from_slice(&output.signature.sig)
+        .context("detached governance signature is not a valid Ed25519 signature")?;
+    let hash = compute_update_sign_hash(&prepared.header, &prepared.encoded_payload);
+    match &public_key.public {
+        concordium_rust_sdk::id::types::VerifyKey::Ed25519VerifyKey(key) => {
+            ed25519_dalek::Verifier::verify(key, hash.as_ref(), &signature)
+                .context("detached governance signature is not valid for the proposal")?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_signature_threshold(prepared: &PreparedGovernanceUpdate, count: usize) -> Result<()> {
+    let family = prepared
+        .payload
+        .auth_family_hint()
+        .context("governance proposal requires a known authorization family")?;
+    let authorization =
+        governance_authorization_for_family(&prepared.chain_context.chain_parameters, family)?;
+    if count < authorization.threshold {
+        bail!(
+            "provided {} valid governance signature(s), but '{}' updates require threshold {}",
+            count,
+            family.label(),
+            authorization.threshold
+        );
+    }
+    Ok(())
 }
 
 async fn import_keys(conn: &mut Connection, args: GovernanceKeysImportArgs) -> Result<()> {
@@ -2847,6 +3558,133 @@ mod tests {
     }
 
     #[test]
+    fn proposal_file_round_trips_as_canonical_json() {
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let proposal = proposal_file_from_prepared(&prepared, "genesis").unwrap();
+        let json = serde_json::to_string_pretty(&proposal).unwrap();
+        assert!(json.contains("\n  \"version\": 1,"));
+        let decoded: GovernanceProposalFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.genesis_hash, "genesis");
+        let round_tripped = prepared_update_from_proposal(
+            &decoded,
+            GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(round_tripped.header.seq_number, prepared.header.seq_number);
+        assert_eq!(
+            round_tripped.encoded_payload.as_ref(),
+            prepared.encoded_payload.as_ref()
+        );
+    }
+
+    #[test]
+    fn proposal_payload_size_mismatch_is_rejected() {
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let mut proposal = proposal_file_from_prepared(&prepared, "genesis").unwrap();
+        proposal.header.payload_size += 1;
+        let err = prepared_update_from_proposal(
+            &proposal,
+            GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("payload size mismatch"));
+    }
+
+    #[test]
+    fn stale_proposal_sequence_is_rejected() {
+        let proposal = GovernanceProposalFile {
+            version: 1,
+            genesis_hash: "genesis".to_owned(),
+            header: GovernanceProposalHeaderJson {
+                seq_number: 7,
+                effective_time: 0,
+                timeout: 1_800_000_000,
+                payload_size: 1,
+            },
+            payload: serde_json::json!({}),
+        };
+        let err = validate_proposal_sequence(
+            &proposal,
+            GovernanceSequenceQueue::Protocol,
+            UpdateSequenceNumber { number: 8 },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("stale"));
+    }
+
+    #[test]
+    fn detached_signature_file_converts_to_single_signer_output() {
+        let output = GovernanceSignerOutput {
+            index: UpdateKeysIndex { index: 3 },
+            signature: Signature { sig: vec![1, 2, 3] },
+        };
+        let file = signature_file_from_signer_output("abcd".to_owned(), output.clone());
+        let json = serde_json::to_string_pretty(&file).unwrap();
+        assert!(json.contains("\"verifyKey\": \"abcd\""));
+        assert_eq!(signer_output_from_signature_file(&file).unwrap(), output);
+    }
+
+    #[test]
+    fn signature_directory_collects_json_files_after_explicit_files() {
+        let temp = std::env::temp_dir().join(format!("gov-sigs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let explicit = temp.join("explicit.sig");
+        let a = temp.join("a.json");
+        let b = temp.join("b.json");
+        std::fs::write(&explicit, "{}").unwrap();
+        std::fs::write(&b, "{}").unwrap();
+        std::fs::write(&a, "{}").unwrap();
+        std::fs::write(temp.join("ignore.txt"), "{}").unwrap();
+        let files = collect_signature_files(std::slice::from_ref(&explicit), Some(&temp)).unwrap();
+        assert_eq!(files, vec![explicit, a, b]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
     fn ledger_signing_rejects_blind_payloads() {
         let payload = ResolvedGovernanceUpdatePayload::Blind {
             bytes: vec![0xff],
@@ -2879,6 +3717,143 @@ mod tests {
         .unwrap();
         let path = ledger_derivation_path_for_prepared_update(&prepared, 9).unwrap();
         assert_eq!(path.indices(), &[1, 2, 9]);
+    }
+
+    #[test]
+    fn detached_local_signing_allows_threshold_above_one_and_verifies_signature() {
+        let signer = key();
+        let other = key();
+        let local = governance_store::DecryptedGovernanceKey {
+            record: governance_store::GovernanceKeyRecord {
+                id: 1,
+                network_genesis_hash: "g".to_owned(),
+                vault_id: "v".to_owned(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            raw_json: serde_json::to_string(&signer).unwrap(),
+            public_key: UpdatePublicKey::from(&signer),
+            key_pair: signer.clone(),
+        };
+        let params = ChainParameters {
+            keys: UpdateKeys {
+                level_2_keys: Some(Level2Keys {
+                    keys: vec![
+                        UpdatePublicKey::from(&signer),
+                        UpdatePublicKey::from(&other),
+                    ],
+                    protocol: Some(concordium_rust_sdk::base::updates::AccessStructure {
+                        authorized_keys: [0u16.into(), 1u16.into()].into_iter().collect(),
+                        threshold: 2u16.try_into().unwrap(),
+                    }),
+                    emergency: None,
+                    consensus: None,
+                    euro_per_energy: None,
+                    micro_ccd_per_euro: None,
+                    foundation_account: None,
+                    mint_distribution: None,
+                    transaction_fee_distribution: None,
+                    param_gas_rewards: None,
+                    pool_parameters: None,
+                    add_anonymity_revoker: None,
+                    add_identity_provider: None,
+                    cooldown_parameters: None,
+                    time_parameters: None,
+                    create_plt: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: params,
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let output = sign_detached_prepared_update_with_local_key(&prepared, &local).unwrap();
+        assert_eq!(output.index, UpdateKeysIndex { index: 0 });
+        verify_detached_signature(&prepared, &output).unwrap();
+        let err = ensure_signature_threshold(&prepared, 1).unwrap_err();
+        assert!(err.to_string().contains("require threshold 2"));
+    }
+
+    #[test]
+    fn detached_signature_verification_rejects_tampering() {
+        let signer = key();
+        let local = governance_store::DecryptedGovernanceKey {
+            record: governance_store::GovernanceKeyRecord {
+                id: 1,
+                network_genesis_hash: "g".to_owned(),
+                vault_id: "v".to_owned(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            raw_json: serde_json::to_string(&signer).unwrap(),
+            public_key: UpdatePublicKey::from(&signer),
+            key_pair: signer.clone(),
+        };
+        let params = ChainParameters {
+            keys: UpdateKeys {
+                level_2_keys: Some(Level2Keys {
+                    keys: vec![UpdatePublicKey::from(&signer)],
+                    protocol: Some(concordium_rust_sdk::base::updates::AccessStructure {
+                        authorized_keys: [0u16.into()].into_iter().collect(),
+                        threshold: 1u16.try_into().unwrap(),
+                    }),
+                    emergency: None,
+                    consensus: None,
+                    euro_per_energy: None,
+                    micro_ccd_per_euro: None,
+                    foundation_account: None,
+                    mint_distribution: None,
+                    transaction_fee_distribution: None,
+                    param_gas_rewards: None,
+                    pool_parameters: None,
+                    add_anonymity_revoker: None,
+                    add_identity_provider: None,
+                    cooldown_parameters: None,
+                    time_parameters: None,
+                    create_plt: None,
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: params,
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: None,
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let mut output = sign_detached_prepared_update_with_local_key(&prepared, &local).unwrap();
+        output.signature.sig[0] ^= 0xff;
+        let err = verify_detached_signature(&prepared, &output).unwrap_err();
+        assert!(err.to_string().contains("not valid"));
     }
 
     #[test]
