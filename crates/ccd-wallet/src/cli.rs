@@ -469,6 +469,8 @@ pub enum LedgerSubcommand {
     Sync(LedgerSyncArgs),
     /// Show connected Concordium Ledger app information.
     Show,
+    /// Remove an enrolled Ledger key source from local wallet state.
+    Remove(LedgerRemoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -515,6 +517,17 @@ pub struct LedgerSyncArgs {
     /// Disable silent use of active network defaults and force explicit selection.
     #[arg(long = "no-defaults")]
     pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct LedgerRemoveArgs {
+    /// Label of the Ledger key source to remove from local wallet state.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2123,6 +2136,38 @@ mod tests {
             Command::Ledger(command) => match command.command {
                 LedgerSubcommand::Show => {}
                 other => panic!("expected ledger show command, got {other:?}"),
+            },
+            other => panic!("expected ledger command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_remove_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "ledger", "remove", "ledger-main"]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Remove(args) => {
+                    assert_eq!(args.label.as_deref(), Some("ledger-main"));
+                    assert!(!args.non_interactive);
+                }
+                other => panic!("expected ledger remove command, got {other:?}"),
+            },
+            other => panic!("expected ledger command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ledger_remove_non_interactive_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "ledger", "remove", "--non-interactive"]);
+
+        match cli.command {
+            Command::Ledger(command) => match command.command {
+                LedgerSubcommand::Remove(args) => {
+                    assert_eq!(args.label.as_deref(), None);
+                    assert!(args.non_interactive);
+                }
+                other => panic!("expected ledger remove command, got {other:?}"),
             },
             other => panic!("expected ledger command, got {other:?}"),
         }

@@ -60,7 +60,8 @@ ccd-wallet
 ├─ ledger                       [Implemented]
 │  ├─ setup                     (supports --restore <NETWORK>)
 │  ├─ sync
-│  └─ show
+│  ├─ show
+│  └─ remove
 ├─ identity                     [Implemented]
 │  ├─ list
 │  ├─ new
@@ -111,7 +112,7 @@ ccd-wallet
 
 The internal storage model calls seed-backed and Ledger-backed derivation authorities **signer owners**. User-facing CLI text should call the same concept a **key source** when a command or prompt needs to cover both seed phrases and Ledger devices.
 
-The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app. `ledger setup <LABEL> --restore <NETWORK>` enrolls the Ledger key source and then immediately runs Ledger-backed recovery on the selected network. `ledger sync <LABEL>` recovers identities and accounts for an enrolled Ledger key source. Ledger recovery belongs to the `ledger` command space because it requires a connected matching Ledger device and explicit recovery-secret export approval. `ledger show` inspects the connected Concordium Ledger app and displays the app name plus app version when the app supports version reporting.
+The `seed` command family remains the user-facing place for seed phrase management. Ledger setup uses the separate `ledger setup` flow and enrolls a Ledger-backed key source by reading a canonical public key from the Concordium Ledger app. `ledger setup <LABEL> --restore <NETWORK>` enrolls the Ledger key source and then immediately runs Ledger-backed recovery on the selected network. `ledger sync <LABEL>` recovers identities and accounts for an enrolled Ledger key source. Ledger recovery belongs to the `ledger` command space because it requires a connected matching Ledger device and explicit recovery-secret export approval. `ledger show` inspects the connected Concordium Ledger app and displays the app name plus app version when the app supports version reporting. `ledger remove <LABEL>` removes an enrolled Ledger key source from local wallet state after explicit confirmation, including locally stored Ledger-owned identities and accounts by cascade; it does not modify the physical Ledger device.
 
 `identity new` can target either a seed-backed or Ledger-backed key source through `--seed <LABEL>` / `--key-source <LABEL>`. Ledger-backed identity issuance uses an explicit export security model and requires a Concordium Ledger app with purpose-based export support (version 5.5.0 or newer): interactive runs require confirmation, and non-interactive runs must include `--allow-ledger-secret-export` before the CLI exports identity issuance material temporarily from the Ledger app. This flow has been validated on a physical Ledger device running Concordium app `5.6.2`.
 

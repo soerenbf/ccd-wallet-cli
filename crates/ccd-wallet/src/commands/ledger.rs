@@ -5,7 +5,7 @@
 //! persisted model in signer-owner tables.
 
 use crate::{
-    cli::{LedgerSetupArgs, LedgerSubcommand, LedgerSyncArgs},
+    cli::{LedgerRemoveArgs, LedgerSetupArgs, LedgerSubcommand, LedgerSyncArgs},
     commands::{
         ledger_construction::{self, LedgerIdentityIssuanceInput},
         seed::{self, AccountRecoveryMaterial, IdentityRecoveryMaterial, TerminalSeedPrompts},
@@ -15,7 +15,9 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     store::{
+        accounts,
         config::NetworkEntry,
+        identities,
         signer_owners::{
             self, LEDGER_OWNER_ENROLLMENT_PATH, NewLedgerOwnerDetails, SignerOwnerKind,
         },
@@ -30,6 +32,41 @@ use ccd_wallet_ledger::{
 use cliclack::{confirm, input, password};
 use rusqlite::Connection;
 use std::{cell::RefCell, str::FromStr};
+
+trait LedgerPrompts {
+    fn prompt_remove_confirmation(
+        &mut self,
+        label: &str,
+        identity_count: usize,
+        account_count: usize,
+    ) -> Result<String>;
+}
+
+struct TerminalLedgerPrompts;
+
+impl LedgerPrompts for TerminalLedgerPrompts {
+    fn prompt_remove_confirmation(
+        &mut self,
+        label: &str,
+        identity_count: usize,
+        account_count: usize,
+    ) -> Result<String> {
+        cliclack::log::warning(format!(
+            "This will remove Ledger key source '{label}' from this wallet and delete {} and {} owned by it. This does not modify the physical Ledger device.",
+            format_count(identity_count, "identity", "identities"),
+            format_count(account_count, "account", "accounts"),
+        ))?;
+        Ok(input(format!("Type '{label}' to confirm:"))
+            .validate(|value: &String| {
+                if value.is_empty() {
+                    Err("Confirmation is required.")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact()?)
+    }
+}
 
 /// Run a Ledger command.
 ///
@@ -51,6 +88,7 @@ pub async fn run(conn: &mut Connection, command: LedgerSubcommand) -> Result<()>
         LedgerSubcommand::Setup(args) => setup(conn, args).await,
         LedgerSubcommand::Sync(args) => sync(conn, args).await,
         LedgerSubcommand::Show => show().await,
+        LedgerSubcommand::Remove(args) => remove(conn, args).await,
     }
 }
 
@@ -67,6 +105,46 @@ async fn show() -> Result<()> {
         Some(version) => println!("  version: {version}"),
         None => println!("  version: unavailable (requires Concordium Ledger app 5.4.1 or newer)"),
     }
+    Ok(())
+}
+
+async fn remove(conn: &Connection, args: LedgerRemoveArgs) -> Result<()> {
+    let mut prompts = TerminalLedgerPrompts;
+    remove_with_prompts(conn, args, &mut prompts).await
+}
+
+async fn remove_with_prompts(
+    conn: &Connection,
+    args: LedgerRemoveArgs,
+    prompts: &mut impl LedgerPrompts,
+) -> Result<()> {
+    let owner = resolve_remove_ledger_owner(conn, args.label.as_deref(), args.non_interactive)?;
+    let identity_count = identities::list(conn)?
+        .into_iter()
+        .filter(|record| record.signer_owner_id == owner.id)
+        .count();
+    let account_count = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.signer_owner_id == owner.id)
+        .count();
+    let confirmation =
+        prompts.prompt_remove_confirmation(&owner.label, identity_count, account_count)?;
+    if confirmation != owner.label {
+        bail!(
+            "Ledger key-source removal aborted: confirmation did not match '{}'",
+            owner.label
+        );
+    }
+
+    signer_owners::delete_by_id(conn, &owner.id)?;
+    if wallet_state::get(conn, wallet_state::ACTIVE_KEY_SOURCE_KEY)?.as_deref()
+        == Some(owner.label.as_str())
+    {
+        wallet_state::remove(conn, wallet_state::ACTIVE_KEY_SOURCE_KEY)?;
+    }
+
+    println!("Ledger key source '{}' removed successfully.", owner.label);
+
     Ok(())
 }
 
@@ -351,15 +429,34 @@ fn resolve_sync_ledger_label(
     explicit: Option<&str>,
     non_interactive: bool,
 ) -> Result<(signer_owners::SignerOwnerRecord, ResolutionSource)> {
+    match resolve_ledger_owner(conn, explicit, non_interactive)? {
+        (owner, Some(source)) => Ok((owner, source)),
+        (owner, None) => Ok((owner, ResolutionSource::Prompted)),
+    }
+}
+
+fn resolve_remove_ledger_owner(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+) -> Result<signer_owners::SignerOwnerRecord> {
+    Ok(resolve_ledger_owner(conn, explicit, non_interactive)?.0)
+}
+
+fn resolve_ledger_owner(
+    conn: &Connection,
+    explicit: Option<&str>,
+    non_interactive: bool,
+) -> Result<(signer_owners::SignerOwnerRecord, Option<ResolutionSource>)> {
     match explicit {
         Some(label) => signer_owners::find_by_label(conn, label)?
             .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
-            .map(|owner| (owner, ResolutionSource::Explicit))
+            .map(|owner| (owner, Some(ResolutionSource::Explicit)))
             .with_context(|| format!("Ledger key source '{}' is not configured", label)),
         None if non_interactive => {
             bail!("Ledger key-source label must be provided in --non-interactive mode")
         }
-        None => Ok((select_ledger_label(conn)?, ResolutionSource::Prompted)),
+        None => Ok((select_ledger_label(conn)?, None)),
     }
 }
 
@@ -423,6 +520,14 @@ fn validate_key_source_label(label: &str) -> Result<()> {
     Ok(())
 }
 
+fn format_count(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 pub(crate) fn verify_connected_ledger_owner<T: LedgerTransport>(
     conn: &Connection,
     signer_owner_id: &str,
@@ -483,6 +588,26 @@ mod tests {
     use super::*;
     use ccd_wallet_core::store::migrations;
     use ccd_wallet_ledger::MockTransport;
+    use rusqlite::params;
+
+    #[derive(Debug, Default)]
+    struct TestLedgerPrompts {
+        confirmation: String,
+        confirmations: Vec<(String, usize, usize)>,
+    }
+
+    impl LedgerPrompts for TestLedgerPrompts {
+        fn prompt_remove_confirmation(
+            &mut self,
+            label: &str,
+            identity_count: usize,
+            account_count: usize,
+        ) -> Result<String> {
+            self.confirmations
+                .push((label.to_owned(), identity_count, account_count));
+            Ok(self.confirmation.clone())
+        }
+    }
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -495,6 +620,71 @@ mod tests {
         let mut reply = vec![byte; 32];
         reply.extend_from_slice(&[0x90, 0x00]);
         reply
+    }
+
+    fn ledger_owner(
+        conn: &Connection,
+        label: &str,
+        key_byte: u8,
+    ) -> signer_owners::SignerOwnerRecord {
+        let owner = signer_owners::create(conn, SignerOwnerKind::Ledger, label).unwrap();
+        signer_owners::create_vault(conn, &owner.id, "password").unwrap();
+        let key = [key_byte; 32];
+        signer_owners::insert_ledger_details(
+            conn,
+            NewLedgerOwnerDetails {
+                signer_owner_id: &owner.id,
+                canonical_public_key: &key,
+                fingerprint: &signer_owners::ledger_owner_fingerprint(&key),
+                enrollment_path: LEDGER_OWNER_ENROLLMENT_PATH,
+                app_name: Some("Concordium"),
+            },
+        )
+        .unwrap();
+        owner
+    }
+
+    fn insert_owned_identity_and_account(conn: &Connection, owner_id: &str) -> (i64, i64) {
+        conn.execute(
+            "INSERT INTO identities (
+                signer_owner_id, network_genesis_hash, ip_identity, identity_index,
+                label, status, created_at
+             ) VALUES (?1, 'net', 7, 0, 'ledger-identity', 'done', 1)",
+            params![owner_id],
+        )
+        .unwrap();
+        let identity_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO identity_private_payloads (identity_id, cipher_version, ciphertext, nonce)
+             VALUES (?1, 1, x'01', x'02')",
+            params![identity_id],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO accounts (
+                network_genesis_hash, label, status, source_kind, signer_owner_id,
+                ip_identity, identity_index, credential_counter, created_at, updated_at
+             ) VALUES ('net', 'ledger-account', 'finalized', 'derived', ?1, 7, 0, 0, 1, 1)",
+            params![owner_id],
+        )
+        .unwrap();
+        let account_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO derived_account_private_payloads (account_id, cipher_version, ciphertext, nonce)
+             VALUES (?1, 1, x'03', x'04')",
+            params![account_id],
+        )
+        .unwrap();
+
+        (identity_id, account_id)
+    }
+
+    fn table_count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -575,6 +765,186 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("Ledger key source 'seed-main' is not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_ledger_owner_and_cascades_owned_state() {
+        let conn = conn();
+        let owner = ledger_owner(&conn, "ledger-main", 7);
+        let (identity_id, account_id) = insert_owned_identity_and_account(&conn, &owner.id);
+        wallet_state::set(&conn, wallet_state::ACTIVE_KEY_SOURCE_KEY, "ledger-main").unwrap();
+        let mut prompts = TestLedgerPrompts {
+            confirmation: "ledger-main".to_owned(),
+            ..Default::default()
+        };
+
+        remove_with_prompts(
+            &conn,
+            LedgerRemoveArgs {
+                label: Some("ledger-main".to_owned()),
+                non_interactive: false,
+            },
+            &mut prompts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prompts.confirmations,
+            vec![("ledger-main".to_owned(), 1, 1)]
+        );
+        assert!(
+            signer_owners::find_by_label(&conn, "ledger-main")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(table_count(&conn, "signer_owner_vaults"), 0);
+        assert_eq!(table_count(&conn, "ledger_owner_details"), 0);
+        assert_eq!(table_count(&conn, "identities"), 0);
+        assert_eq!(table_count(&conn, "accounts"), 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM identity_private_payloads WHERE identity_id = ?1",
+                params![identity_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM derived_account_private_payloads WHERE account_id = ?1",
+                params![account_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_KEY_SOURCE_KEY).unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_confirmation_mismatch_preserves_ledger_owner() {
+        let conn = conn();
+        ledger_owner(&conn, "ledger-main", 7);
+        let mut prompts = TestLedgerPrompts {
+            confirmation: "wrong".to_owned(),
+            ..Default::default()
+        };
+
+        let err = remove_with_prompts(
+            &conn,
+            LedgerRemoveArgs {
+                label: Some("ledger-main".to_owned()),
+                non_interactive: false,
+            },
+            &mut prompts,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("confirmation did not match"));
+        assert!(
+            signer_owners::find_by_label(&conn, "ledger-main")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(table_count(&conn, "signer_owner_vaults"), 1);
+        assert_eq!(table_count(&conn, "ledger_owner_details"), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_inactive_ledger_leaves_active_key_source_unchanged() {
+        let conn = conn();
+        ledger_owner(&conn, "ledger-main", 7);
+        ledger_owner(&conn, "other-ledger", 8);
+        wallet_state::set(&conn, wallet_state::ACTIVE_KEY_SOURCE_KEY, "other-ledger").unwrap();
+        let mut prompts = TestLedgerPrompts {
+            confirmation: "ledger-main".to_owned(),
+            ..Default::default()
+        };
+
+        remove_with_prompts(
+            &conn,
+            LedgerRemoveArgs {
+                label: Some("ledger-main".to_owned()),
+                non_interactive: false,
+            },
+            &mut prompts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            wallet_state::get(&conn, wallet_state::ACTIVE_KEY_SOURCE_KEY).unwrap(),
+            Some("other-ledger".to_owned())
+        );
+        assert!(
+            signer_owners::find_by_label(&conn, "other-ledger")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_rejects_seed_key_source_without_deleting_it() {
+        let conn = conn();
+        signer_owners::create(&conn, SignerOwnerKind::Seed, "seed-main").unwrap();
+        let mut prompts = TestLedgerPrompts::default();
+
+        let err = remove_with_prompts(
+            &conn,
+            LedgerRemoveArgs {
+                label: Some("seed-main".to_owned()),
+                non_interactive: false,
+            },
+            &mut prompts,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Ledger key source 'seed-main' is not configured")
+        );
+        assert!(prompts.confirmations.is_empty());
+        assert!(
+            signer_owners::find_by_label(&conn, "seed-main")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_missing_label_errors_in_non_interactive_mode() {
+        let conn = conn();
+        ledger_owner(&conn, "ledger-main", 7);
+        let mut prompts = TestLedgerPrompts::default();
+
+        let err = remove_with_prompts(
+            &conn,
+            LedgerRemoveArgs {
+                label: None,
+                non_interactive: true,
+            },
+            &mut prompts,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Ledger key-source label must be provided")
+        );
+        assert!(prompts.confirmations.is_empty());
+        assert!(
+            signer_owners::find_by_label(&conn, "ledger-main")
+                .unwrap()
+                .is_some()
         );
     }
 
