@@ -936,8 +936,7 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
     let identity_payload =
         identities::decrypt_private_payload(conn, identity.id, &unlocked_seed.dek)?;
     let identity_object = identity_payload
-        .identity_object
-        .as_ref()
+        .identity_object()
         .context("identity has no stored identity object")?;
     let identity_object = parse_identity_object(identity_object)?;
     let credential_counter = accounts::next_credential_counter(
@@ -2313,7 +2312,10 @@ async fn confirm_identity_if_pending(
     }
 
     let payload = identities::decrypt_private_payload(conn, identity.id, seed_dek)?;
-    match client::poll_code_uri(&payload.code_uri).await? {
+    let code_uri = payload
+        .code_uri()
+        .context("pending identity has no stored code URI")?;
+    match client::poll_code_uri(code_uri).await? {
         PollResult::Pending => bail!(
             "identity '{}' is still pending and cannot be used for account creation yet",
             identity.label

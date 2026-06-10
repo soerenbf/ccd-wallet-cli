@@ -63,8 +63,10 @@ ccd-wallet
 │  ├─ show
 │  └─ remove
 ├─ identity                     [Implemented]
+│  ├─ export
 │  ├─ list
 │  ├─ new
+│  ├─ show
 │  └─ rename
 ├─ account                      [Implemented]
 │  ├─ export

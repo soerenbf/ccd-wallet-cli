@@ -218,14 +218,22 @@ pub async fn poll_code_uri(code_uri: &str) -> Result<PollResult> {
 
     match body.status.as_str() {
         "pending" => Ok(PollResult::Pending),
-        "done" => Ok(PollResult::Done(body.token.context(
+        "done" => Ok(PollResult::Done(normalize_done_token(body.token.context(
             "identity provider response with status 'done' was missing token",
-        )?)),
+        )?))),
         "error" => Ok(PollResult::ProviderError(body.detail.unwrap_or_else(
             || "identity provider reported an unspecified error".to_owned(),
         ))),
         other => bail!("identity provider returned unknown status '{other}'"),
     }
+}
+
+fn normalize_done_token(token: Value) -> Value {
+    token
+        .as_object()
+        .and_then(|map| map.get("identityObject"))
+        .cloned()
+        .unwrap_or(token)
 }
 
 #[cfg(test)]
@@ -337,13 +345,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_done_token_prefers_inner_identity_object_when_present() {
+        assert_eq!(
+            normalize_done_token(serde_json::json!({
+                "identityObject": {"v": 0},
+                "signature": "ignored"
+            })),
+            serde_json::json!({"v": 0})
+        );
+        assert_eq!(
+            normalize_done_token(serde_json::json!({"v": 0})),
+            serde_json::json!({"v": 0})
+        );
+    }
+
     #[tokio::test]
     async fn poll_code_uri_parses_done_pending_and_error() {
         let done_url = serve_once(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 47\r\n\r\n{\"status\":\"done\",\"token\":{\"identityObject\":{}}}",
         );
         match poll_code_uri(&done_url).await.unwrap() {
-            PollResult::Done(value) => assert_eq!(value, serde_json::json!({"identityObject": {}})),
+            PollResult::Done(value) => assert_eq!(value, serde_json::json!({})),
             other => panic!("expected done result, got {other:?}"),
         }
 

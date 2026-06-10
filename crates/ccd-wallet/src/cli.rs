@@ -652,12 +652,38 @@ pub struct IdentityCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum IdentitySubcommand {
+    /// Export a stored identity as a JSON file.
+    Export(IdentityExportArgs),
     /// List stored identities.
     List(IdentityListArgs),
     /// Issue a new identity.
     New(Box<IdentityNewArgs>),
+    /// Show stored identity details in a temporary sensitive view.
+    Show(IdentityShowArgs),
     /// Rename a stored identity.
     Rename(IdentityRenameArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IdentityExportArgs {
+    /// Identity label to export.
+    #[arg(value_name = "LABEL")]
+    pub label: String,
+
+    /// Path to write the exported identity JSON file.
+    #[arg(long = "out", value_name = "FILE")]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct IdentityShowArgs {
+    /// Identity label to inspect. If omitted, interactive mode opens an identity selector.
+    #[arg(value_name = "LABEL")]
+    pub label: Option<String>,
+
+    /// Registered network name used to filter identity selection.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -2307,6 +2333,71 @@ mod tests {
                     assert!(args.allow_ledger_secret_export);
                 }
                 other => panic!("expected identity new command, got {other:?}"),
+            },
+            other => panic!("expected identity command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_identity_show_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "identity",
+            "show",
+            "alice-id",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Identity(command) => match command.command {
+                IdentitySubcommand::Show(args) => {
+                    assert_eq!(args.label.as_deref(), Some("alice-id"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                }
+                other => panic!("expected identity show command, got {other:?}"),
+            },
+            other => panic!("expected identity command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_identity_show_without_label() {
+        let cli = Cli::parse_from(["ccd-wallet", "identity", "show", "--network", "testnet"]);
+
+        match cli.command {
+            Command::Identity(command) => match command.command {
+                IdentitySubcommand::Show(args) => {
+                    assert_eq!(args.label, None);
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                }
+                other => panic!("expected identity show command, got {other:?}"),
+            },
+            other => panic!("expected identity command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_identity_export_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "identity",
+            "export",
+            "alice-id",
+            "--out",
+            "alice-id.json",
+        ]);
+
+        match cli.command {
+            Command::Identity(command) => match command.command {
+                IdentitySubcommand::Export(args) => {
+                    assert_eq!(args.label, "alice-id");
+                    assert_eq!(
+                        args.output.as_deref(),
+                        Some(std::path::Path::new("alice-id.json"))
+                    );
+                }
+                other => panic!("expected identity export command, got {other:?}"),
             },
             other => panic!("expected identity command, got {other:?}"),
         }

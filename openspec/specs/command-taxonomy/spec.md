@@ -89,6 +89,14 @@ The canonical command taxonomy SHALL document Ledger-backed on-chain governance 
 ### Requirement: Governance proposal workflow is documented under the governance command space
 The canonical command taxonomy SHALL document a detached governance proposal workflow under the implemented `governance` command space alongside the existing all-in-one `governance update` command.
 
+### Requirement: Identity inspection and export are documented under the identity command space
+The canonical command taxonomy SHALL document `identity show` and `identity export` as implemented identity commands for local identity inspection and explicit JSON export.
+
+#### Scenario: Contributor reviews identity command grouping
+- **WHEN** a contributor reads `docs/commands.md`
+- **THEN** they can find `identity show` and `identity export` documented alongside identity list, issue, and rename commands
+- **AND** they can identify both as implemented commands
+
 #### Scenario: Contributor reviews detached governance proposal command grouping
 - **WHEN** a contributor reads `docs/commands.md`
 - **THEN** they can find a documented `governance proposal` command family

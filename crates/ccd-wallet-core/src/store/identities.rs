@@ -24,9 +24,36 @@ pub struct IdentityRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IdentityPrivatePayload {
-    pub code_uri: String,
-    pub identity_object: Option<serde_json::Value>,
+#[serde(untagged)]
+pub enum IdentityPrivatePayload {
+    Pending { code_uri: String },
+    Done { identity_object: serde_json::Value },
+}
+
+impl IdentityPrivatePayload {
+    pub fn pending(code_uri: impl Into<String>) -> Self {
+        Self::Pending {
+            code_uri: code_uri.into(),
+        }
+    }
+
+    pub fn done(identity_object: serde_json::Value) -> Self {
+        Self::Done { identity_object }
+    }
+
+    pub fn code_uri(&self) -> Option<&str> {
+        match self {
+            Self::Pending { code_uri } => Some(code_uri.as_str()),
+            Self::Done { .. } => None,
+        }
+    }
+
+    pub fn identity_object(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Pending { .. } => None,
+            Self::Done { identity_object } => Some(identity_object),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,10 +168,7 @@ pub fn insert_pending(
         created_at,
         expires_at: None,
     };
-    let payload = IdentityPrivatePayload {
-        code_uri: pending.code_uri.to_owned(),
-        identity_object: None,
-    };
+    let payload = IdentityPrivatePayload::pending(pending.code_uri);
     upsert_private_payload_in_tx(&tx, &record, signer_owner_dek, &payload)?;
     tx.commit()
         .context("failed to commit identity insert transaction")?;
@@ -163,8 +187,7 @@ pub fn set_done(
         .context("failed to start identity update transaction")?;
     let mut record = find_by_id_in_tx(&tx, id)?;
     let expires_at = extract_identity_expires_at(&identity_object);
-    let mut payload = decrypt_private_payload_in_tx(&tx, &record, signer_owner_dek)?;
-    payload.identity_object = Some(identity_object);
+    let payload = IdentityPrivatePayload::done(identity_object);
 
     let affected = tx
         .execute(
@@ -210,8 +233,7 @@ pub fn import_recovered(
         recovered.ip_identity,
         recovered.identity_index,
     )? {
-        let mut payload = decrypt_private_payload_in_tx(&tx, &existing, signer_owner_dek)?;
-        payload.identity_object = Some(recovered.identity_object.clone());
+        let payload = IdentityPrivatePayload::done(recovered.identity_object.clone());
         let expires_at = extract_identity_expires_at(recovered.identity_object);
 
         tx.execute(
@@ -269,10 +291,7 @@ pub fn import_recovered(
         created_at,
         expires_at,
     };
-    let payload = IdentityPrivatePayload {
-        code_uri: String::new(),
-        identity_object: Some(recovered.identity_object.clone()),
-    };
+    let payload = IdentityPrivatePayload::done(recovered.identity_object.clone());
     upsert_private_payload_in_tx(&tx, &record, signer_owner_dek, &payload)?;
     tx.commit()
         .context("failed to commit recovered identity insert transaction")?;
@@ -486,30 +505,6 @@ fn decrypt_private_payload_for_record(
     signer_owner_dek: &[u8; KEY_LEN],
 ) -> Result<IdentityPrivatePayload> {
     conn.query_row(
-        "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
-        params![record.id],
-        |row| {
-            Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        },
-    )
-    .optional()
-    .with_context(|| format!("failed to query private payload for identity {}", record.id))?
-    .with_context(|| format!("identity {} has no private payload", record.id))
-    .and_then(|(cipher_version, ciphertext, nonce)| {
-        decrypt_payload_bytes(record, signer_owner_dek, cipher_version, &ciphertext, &nonce)
-    })
-}
-
-fn decrypt_private_payload_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    record: &IdentityRecord,
-    signer_owner_dek: &[u8; KEY_LEN],
-) -> Result<IdentityPrivatePayload> {
-    tx.query_row(
         "SELECT cipher_version, ciphertext, nonce FROM identity_private_payloads WHERE identity_id = ?1",
         params![record.id],
         |row| {
@@ -881,7 +876,7 @@ mod tests {
         assert_eq!(updated.label, "identity_1");
 
         let payload = decrypt_private_payload(&conn, record.id, &dek).unwrap();
-        assert_eq!(payload.identity_object, Some(identity_object));
+        assert_eq!(payload.identity_object(), Some(&identity_object));
     }
 
     #[test]
@@ -947,7 +942,7 @@ mod tests {
         .unwrap();
 
         let ledger_payload = decrypt_private_payload(&conn, ledger_id, &ledger_key).unwrap();
-        assert_eq!(ledger_payload.code_uri, "https://ledger-code");
+        assert_eq!(ledger_payload.code_uri(), Some("https://ledger-code"));
         assert!(decrypt_private_payload(&conn, ledger_id, &seed_key).is_err());
         assert_eq!(next_index(&conn, MAINNET, &seed_owner, 7).unwrap(), 1);
         assert_eq!(next_index(&conn, MAINNET, &ledger_owner, 7).unwrap(), 1);
@@ -979,8 +974,8 @@ mod tests {
         assert!(!String::from_utf8_lossy(&raw).contains("https://code"));
 
         let payload = decrypt_private_payload(&conn, id, &key).unwrap();
-        assert_eq!(payload.code_uri, "https://code");
-        assert!(payload.identity_object.is_none());
+        assert_eq!(payload.code_uri(), Some("https://code"));
+        assert!(payload.identity_object().is_none());
 
         let wrong_key = test_key(9);
         assert!(decrypt_private_payload(&conn, id, &wrong_key).is_err());
@@ -1157,10 +1152,10 @@ mod tests {
             .unwrap();
         assert_eq!(record.status, IdentityStatus::Done);
         let payload = decrypt_private_payload(&conn, id, &key).unwrap();
-        assert_eq!(payload.code_uri, "https://code");
+        assert_eq!(payload.code_uri(), None);
         assert_eq!(
-            payload.identity_object,
-            Some(serde_json::json!({"identityObject": {"name": "Alice"}}))
+            payload.identity_object(),
+            Some(&serde_json::json!({"identityObject": {"name": "Alice"}}))
         );
 
         delete(&conn, id).unwrap();
