@@ -17,26 +17,33 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Node-related commands.
-    Node(Box<NodeCommand>),
+    // --- Entities ---
+    /// Account creation and management commands.
+    Account(Box<AccountCommand>),
+    /// Identity issuance commands.
+    Identity(Box<IdentityCommand>),
     /// Network configuration commands.
     Network(Box<NetworkCommand>),
-    /// Transaction inspection commands.
-    Transaction(Box<TransactionCommand>),
-    /// Smart contract transaction commands.
-    Contract(Box<ContractCommand>),
+
+    // --- Key sources ---
     /// Seed phrase commands.
     Seed(SeedCommand),
     /// Ledger hardware-wallet setup commands.
     Ledger(LedgerCommand),
-    /// Identity issuance commands.
-    Identity(Box<IdentityCommand>),
-    /// Account creation and management commands.
-    Account(Box<AccountCommand>),
-    /// Governance key management commands.
-    Governance(Box<GovernanceCommand>),
+
+    // --- Chain interaction ---
+    /// Node-related commands.
+    Node(Box<NodeCommand>),
+    /// Transaction inspection commands.
+    Transaction(Box<TransactionCommand>),
+    /// Smart contract transaction commands.
+    Contract(Box<ContractCommand>),
     /// Protocol-level token commands.
     Token(Box<TokenCommand>),
+    /// Governance key management commands.
+    Governance(Box<GovernanceCommand>),
+
+    // --- Misc ---
     /// Start a temporary browser pairing session.
     Connect(ConnectArgs),
 }
