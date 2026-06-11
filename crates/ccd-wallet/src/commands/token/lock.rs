@@ -45,6 +45,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .iter()
         .map(|grant| shared::resolve_lock_grant(conn, &mut context, grant))
         .collect::<Result<Vec<_>>>()?;
+    let keep_alive = shared::resolve_lock_keep_alive(args.keep_alive, args.non_interactive)?;
     let token_summary = args
         .tokens
         .iter()
@@ -56,8 +57,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let config =
-        shared::build_lock_config(recipients, expiry, grants, args.tokens, args.keep_alive);
+    let config = shared::build_lock_config(recipients, expiry, grants, args.tokens, keep_alive);
 
     cliclack::log::info(format!(
         "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nkeep alive: {}",
@@ -67,7 +67,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         recipient_summary,
         args.expiry,
         token_summary,
-        if args.keep_alive { "yes" } else { "no" },
+        if keep_alive { "yes" } else { "no" },
     ))?;
     if !shared::confirm_submission(
         "Approve and submit this token lock creation? Type y to approve:",

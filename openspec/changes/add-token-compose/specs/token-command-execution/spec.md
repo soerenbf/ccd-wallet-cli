@@ -9,7 +9,7 @@ The CLI SHALL expose a top-level `token` command space for protocol-level token 
 - **AND** they can find `show`, `transfer`, `mint`, `burn`, `allow-list`, `deny-list`, `pause`, `unpause`, `admin-roles`, `metadata`, `lock`, and `compose` under it
 
 ### Requirement: Token lock commands manage protocol-level locks
-The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, returns, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For fund, send, return, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and return SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted.
+The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, returns, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For lock creation, omitted `--keep-alive` SHALL prompt in interactive mode with No selected by default and SHALL default to false in non-interactive mode. For fund, send, return, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and return SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted.
 
 #### Scenario: User creates a token lock
 - **WHEN** a user runs `ccd-wallet token lock create` with the required lock configuration and signing account context
@@ -21,6 +21,11 @@ The CLI SHALL let a user manage protocol-level token locks through nested `token
 - **THEN** the CLI prompts for at least one grant account
 - **AND** the CLI lets the user select one or more lock capabilities from the known capability set for each grant
 - **AND** the CLI asks whether another grant should be added
+
+#### Scenario: User creates a token lock without keep-alive flag interactively
+- **WHEN** a user runs `ccd-wallet token lock create` without `--keep-alive` in interactive mode
+- **THEN** the CLI asks whether to keep the lock alive after funds are returned
+- **AND** the default selected answer is No
 
 #### Scenario: Token lock create rejects unknown grant capability
 - **WHEN** a user runs `ccd-wallet token lock create --grant alice:fund,nonsense`

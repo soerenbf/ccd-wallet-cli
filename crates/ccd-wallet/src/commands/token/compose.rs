@@ -2,10 +2,18 @@
 
 use crate::{
     cli::{TokenComposeArgs, TokenComposePreviewArgs, TokenComposeSubmitArgs},
-    commands::token::shared,
+    commands::{
+        account::{
+            AccountReferenceContext, AccountReferenceUnlocks, resolve_account_network_context,
+            resolve_account_reference,
+        },
+        token::shared,
+        ui::{SelectItem, select_always},
+    },
 };
-use anyhow::{Context, Result, bail};
-use cliclack::input;
+use anyhow::{Context, Result, bail, ensure};
+use ccd_wallet_core::{config as node_config, store::config as app_config};
+use cliclack::{confirm, input};
 use concordium_rust_sdk::{
     base::{
         common::types::TransactionTime,
@@ -64,10 +72,11 @@ pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> R
         args.node,
         args.non_interactive,
         args.no_defaults,
-        false,
+        true,
     )
     .await?;
 
+    validate_plan_network_matches_context(&plan, &context)?;
     let operations = resolve_meta_update_operations(conn, &mut context, &plan).await?;
     let summary = render_plan_preview(&plan, Some(args.plan.as_path()))?;
     cliclack::log::info(format!(
@@ -104,6 +113,26 @@ pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> R
 fn validate_submit_args(args: &TokenComposeSubmitArgs) -> Result<()> {
     if args.non_interactive && args.sender.is_none() {
         bail!("sender must be provided with --sender in --non-interactive mode");
+    }
+    Ok(())
+}
+
+fn validate_plan_network_matches_context(
+    plan: &Plan,
+    context: &shared::MutationContext,
+) -> Result<()> {
+    let Some(plan_genesis_hash) = plan.network_genesis_hash.as_deref() else {
+        bail!(
+            "token composition plan is missing network genesis hash; reopen it with `token compose <PLAN>` and add or re-add an operation"
+        );
+    };
+    if plan_genesis_hash != context.network_genesis_hash {
+        bail!(
+            "token composition plan is for genesis hash {}, but selected network '{}' has genesis hash {}",
+            plan_genesis_hash,
+            context.network_name,
+            context.network_genesis_hash
+        );
     }
     Ok(())
 }
@@ -221,10 +250,7 @@ async fn resolve_meta_update_operations(
                 let expiry = shared::parse_expiry_time(expiry)?;
                 let grants = grants
                     .iter()
-                    .map(|grant| grant.to_unresolved())
-                    .map(|grant| {
-                        grant.and_then(|grant| shared::resolve_lock_grant(conn, context, &grant))
-                    })
+                    .map(|grant| resolve_plan_lock_grant(conn, context, grant))
                     .collect::<Result<Vec<_>>>()?;
                 let tokens = tokens
                     .iter()
@@ -307,6 +333,26 @@ async fn predict_created_locks(
     Ok(locks)
 }
 
+fn resolve_plan_lock_grant(
+    conn: &Connection,
+    context: &mut shared::MutationContext,
+    grant: &PlanLockGrant,
+) -> Result<concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Grant> {
+    if grant.account == "@sender" {
+        let unresolved = grant.to_unresolved()?;
+        return Ok(
+            concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Grant {
+                account: concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from(
+                    context.wallet.address,
+                ),
+                roles: unresolved.roles,
+            },
+        );
+    }
+    let unresolved = grant.to_unresolved()?;
+    shared::resolve_lock_grant(conn, context, &unresolved)
+}
+
 fn resolve_lock_reference(input: &str, predicted_locks: &[LockId]) -> Result<LockId> {
     match ParsedLockReference::parse(input)? {
         ParsedLockReference::Latest => bail!("saved plans must use explicit lock references"),
@@ -319,7 +365,16 @@ fn resolve_lock_reference(input: &str, predicted_locks: &[LockId]) -> Result<Loc
 }
 
 fn parse_token_id(input: &str) -> Result<TokenId> {
-    TokenId::from_str(input).context("invalid token identifier")
+    TokenId::from_str(input).with_context(|| format!("invalid token identifier '{input}'"))
+}
+
+async fn query_plan_token_info(
+    client: &mut concordium_rust_sdk::v2::Client,
+    token_id: TokenId,
+) -> Result<concordium_rust_sdk::protocol_level_tokens::TokenInfo> {
+    shared::query_token_info(client, token_id.clone())
+        .await
+        .with_context(|| format!("token '{}' was not found on the plan network", token_id))
 }
 
 async fn resolve_amount(
@@ -328,8 +383,9 @@ async fn resolve_amount(
     amount: &str,
 ) -> Result<TokenAmount> {
     let mut client = context.client.clone();
-    let token_info = shared::query_token_info(&mut client, token_id).await?;
+    let token_info = query_plan_token_info(&mut client, token_id.clone()).await?;
     shared::parse_token_amount(amount, token_info.token_state.decimals)
+        .with_context(|| format!("invalid amount '{amount}' for token '{}'", token_id))
 }
 
 fn resolve_account(
@@ -338,6 +394,9 @@ fn resolve_account(
     value: &str,
     label: &str,
 ) -> Result<AccountAddress> {
+    if value == "@sender" {
+        return Ok(context.wallet.address);
+    }
     shared::resolve_account_address(
         conn,
         context,
@@ -395,6 +454,9 @@ async fn sign_and_send_meta_update(
 
 async fn run_composer(conn: &Connection, plan_path: &Path) -> Result<()> {
     let mut plan = load_or_new_plan(plan_path)?;
+    if bind_plan_network(conn, &mut plan, true).await? {
+        save_plan_atomic(plan_path, &plan)?;
+    }
     cliclack::log::info(format!(
         "Token composer loaded {} operation(s) from {}.",
         plan.operations.len(),
@@ -404,16 +466,11 @@ async fn run_composer(conn: &Connection, plan_path: &Path) -> Result<()> {
 
     let mut line_editor = Reedline::create();
     let prompt = DefaultPrompt::default();
-    loop {
-        match line_editor.read_line(&prompt)? {
-            Signal::Success(line) => {
-                match handle_repl_line(conn, plan_path, &mut plan, &line).await {
-                    Ok(ReplControl::Continue) => {}
-                    Ok(ReplControl::Exit) => break,
-                    Err(error) => cliclack::log::error(format!("{error:#}"))?,
-                }
-            }
-            Signal::CtrlC | Signal::CtrlD => break,
+    while let Signal::Success(line) = line_editor.read_line(&prompt)? {
+        match handle_repl_line(conn, plan_path, &mut plan, &line).await {
+            Ok(ReplControl::Continue) => {}
+            Ok(ReplControl::Exit) => break,
+            Err(error) => cliclack::log::error(format!("{error:#}"))?,
         }
     }
     Ok(())
@@ -425,18 +482,488 @@ enum ReplControl {
     Exit,
 }
 
+async fn prepare_added_operation(
+    conn: &Connection,
+    plan: &mut Plan,
+    operation: PlanOperation,
+) -> Result<PlanOperation> {
+    bind_plan_network(conn, plan, false).await?;
+    let genesis_hash = plan
+        .network_genesis_hash
+        .as_deref()
+        .context("token composition plan is missing network genesis hash")?;
+    let mut unlocks = AccountReferenceUnlocks::new();
+    let operation =
+        resolve_operation_account_references(conn, genesis_hash, operation, &mut unlocks)?;
+    validate_added_operation_against_network(plan, &operation).await?;
+    Ok(operation)
+}
+
+async fn validate_added_operation_against_network(
+    plan: &Plan,
+    operation: &PlanOperation,
+) -> Result<()> {
+    let mut client = plan_network_client(plan).await?;
+    validate_operation_tokens_and_amounts(&mut client, plan, operation).await
+}
+
+async fn plan_network_client(plan: &Plan) -> Result<concordium_rust_sdk::v2::Client> {
+    let genesis_hash = plan
+        .network_genesis_hash
+        .as_deref()
+        .context("token composition plan is missing network genesis hash")?;
+    let app_config = app_config::load()?;
+    let (network_name, entry) = app_config
+        .networks
+        .iter()
+        .find(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .with_context(|| {
+            format!("no configured network matches token composition genesis hash {genesis_hash}")
+        })?;
+    let endpoint = entry
+        .node_endpoint
+        .parse()
+        .with_context(|| format!("invalid node endpoint for network '{network_name}'"))?;
+    node_config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to node for network '{network_name}'"))
+}
+
+async fn validate_operation_tokens_and_amounts(
+    client: &mut concordium_rust_sdk::v2::Client,
+    plan: &Plan,
+    operation: &PlanOperation,
+) -> Result<()> {
+    match operation {
+        PlanOperation::Transfer { token, amount, .. }
+        | PlanOperation::Mint { token, amount }
+        | PlanOperation::Burn { token, amount } => {
+            let token_id = parse_token_id(token)?;
+            validate_token_amount(client, token_id, amount).await?;
+        }
+        PlanOperation::Pause { token }
+        | PlanOperation::Unpause { token }
+        | PlanOperation::MetadataUpdate { token, .. } => {
+            let token_id = parse_token_id(token)?;
+            query_plan_token_info(client, token_id).await?;
+        }
+        PlanOperation::AllowListAdd { token, .. }
+        | PlanOperation::AllowListRemove { token, .. }
+        | PlanOperation::DenyListAdd { token, .. }
+        | PlanOperation::DenyListRemove { token, .. }
+        | PlanOperation::AdminRolesAssign { token, .. }
+        | PlanOperation::AdminRolesRevoke { token, .. } => {
+            let token_id = parse_token_id(token)?;
+            query_plan_token_info(client, token_id).await?;
+        }
+        PlanOperation::LockCreate { tokens, .. } => {
+            for token in tokens {
+                let token_id = parse_token_id(token)?;
+                query_plan_token_info(client, token_id).await?;
+            }
+        }
+        PlanOperation::LockFund {
+            lock,
+            token,
+            amount,
+        }
+        | PlanOperation::LockReturn {
+            lock,
+            token,
+            amount,
+            ..
+        } => {
+            let token_id = parse_token_id(token)?;
+            validate_lock_token(client, plan, lock, &token_id).await?;
+            validate_token_amount(client, token_id, amount).await?;
+        }
+        PlanOperation::LockSend {
+            lock,
+            token,
+            recipient,
+            amount,
+            ..
+        } => {
+            let token_id = parse_token_id(token)?;
+            validate_lock_token(client, plan, lock, &token_id).await?;
+            validate_lock_recipient(client, plan, lock, recipient).await?;
+            validate_token_amount(client, token_id, amount).await?;
+        }
+        PlanOperation::LockCancel { lock } => {
+            if matches!(
+                ParsedLockReference::parse(lock)?,
+                ParsedLockReference::Existing(_)
+            ) {
+                let lock_id = lock.parse().context("invalid lock identifier")?;
+                shared::query_lock_info(client, lock_id).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_token_amount(
+    client: &mut concordium_rust_sdk::v2::Client,
+    token_id: TokenId,
+    amount: &str,
+) -> Result<()> {
+    let token_info = query_plan_token_info(client, token_id.clone()).await?;
+    shared::parse_token_amount(amount, token_info.token_state.decimals)
+        .with_context(|| format!("invalid amount '{amount}' for token '{}'", token_id))?;
+    Ok(())
+}
+
+async fn validate_lock_token(
+    client: &mut concordium_rust_sdk::v2::Client,
+    plan: &Plan,
+    lock: &str,
+    token_id: &TokenId,
+) -> Result<()> {
+    let configured = configured_tokens_for_lock_reference(Some(client), plan, lock).await?;
+    ensure!(
+        configured.iter().any(|configured| configured == token_id),
+        "token '{}' is not configured for lock '{}'",
+        token_id,
+        lock
+    );
+    Ok(())
+}
+
+async fn select_token_for_lock_reference(plan: &Plan, lock: &str) -> Result<String> {
+    let mut client = if matches!(
+        ParsedLockReference::parse(lock)?,
+        ParsedLockReference::Existing(_)
+    ) {
+        Some(plan_network_client(plan).await?)
+    } else {
+        None
+    };
+    let tokens = configured_tokens_for_lock_reference(client.as_mut(), plan, lock).await?;
+    if tokens.is_empty() {
+        bail!("lock '{lock}' has no configured tokens");
+    }
+    let items = tokens
+        .into_iter()
+        .map(|token| SelectItem {
+            value: token.to_string(),
+            label: token.to_string(),
+            hint: String::new(),
+        })
+        .collect::<Vec<_>>();
+    select_always("Select token", &items, None)
+}
+
+async fn validate_lock_recipient(
+    client: &mut concordium_rust_sdk::v2::Client,
+    plan: &Plan,
+    lock: &str,
+    recipient: &str,
+) -> Result<()> {
+    if recipient == "@sender"
+        && matches!(
+            ParsedLockReference::parse(lock)?,
+            ParsedLockReference::Existing(_)
+        )
+    {
+        return Ok(());
+    }
+    let configured = configured_recipients_for_lock_reference(Some(client), plan, lock).await?;
+    ensure!(
+        configured.iter().any(|configured| configured == recipient),
+        "recipient '{}' is not configured for lock '{}'",
+        recipient,
+        lock
+    );
+    Ok(())
+}
+
+async fn select_recipient_for_lock_reference(plan: &Plan, lock: &str) -> Result<String> {
+    let mut client = if matches!(
+        ParsedLockReference::parse(lock)?,
+        ParsedLockReference::Existing(_)
+    ) {
+        Some(plan_network_client(plan).await?)
+    } else {
+        None
+    };
+    let recipients = configured_recipients_for_lock_reference(client.as_mut(), plan, lock).await?;
+    if recipients.is_empty() {
+        bail!("lock '{lock}' has no configured recipients");
+    }
+    let items = recipients
+        .into_iter()
+        .map(|recipient| SelectItem {
+            value: recipient.clone(),
+            label: recipient,
+            hint: String::new(),
+        })
+        .collect::<Vec<_>>();
+    select_always("Select recipient", &items, None)
+}
+
+async fn configured_tokens_for_lock_reference(
+    client: Option<&mut concordium_rust_sdk::v2::Client>,
+    plan: &Plan,
+    lock: &str,
+) -> Result<Vec<TokenId>> {
+    match ParsedLockReference::parse(lock)? {
+        ParsedLockReference::Latest => latest_lock_create_tokens(plan),
+        ParsedLockReference::Created(index) => nth_lock_create_tokens(plan, index),
+        ParsedLockReference::Existing(_) => {
+            let Some(client) = client else {
+                bail!("node client is required to resolve existing lock '{lock}'");
+            };
+            let lock_id = lock.parse().context("invalid lock identifier")?;
+            let info = shared::query_lock_info(client, lock_id).await?;
+            Ok(shared::configured_lock_tokens(&info))
+        }
+    }
+}
+
+async fn configured_recipients_for_lock_reference(
+    client: Option<&mut concordium_rust_sdk::v2::Client>,
+    plan: &Plan,
+    lock: &str,
+) -> Result<Vec<String>> {
+    match ParsedLockReference::parse(lock)? {
+        ParsedLockReference::Latest => latest_lock_create_recipients(plan),
+        ParsedLockReference::Created(index) => nth_lock_create_recipients(plan, index),
+        ParsedLockReference::Existing(_) => {
+            let Some(client) = client else {
+                bail!("node client is required to resolve existing lock '{lock}'");
+            };
+            let lock_id = lock.parse().context("invalid lock identifier")?;
+            let info = shared::query_lock_info(client, lock_id).await?;
+            Ok(info
+                .recipients
+                .iter()
+                .map(|recipient| recipient.address.to_string())
+                .collect())
+        }
+    }
+}
+
+fn latest_lock_create_recipients(plan: &Plan) -> Result<Vec<String>> {
+    let index = plan
+        .operations
+        .iter()
+        .filter(|operation| operation.is_lock_create())
+        .count();
+    if index == 0 {
+        bail!("lock reference '@' requires a preceding lock-create operation")
+    }
+    nth_lock_create_recipients(plan, index)
+}
+
+fn nth_lock_create_recipients(plan: &Plan, target: usize) -> Result<Vec<String>> {
+    let mut index = 0usize;
+    for operation in &plan.operations {
+        let PlanOperation::LockCreate { recipients, .. } = operation else {
+            continue;
+        };
+        index += 1;
+        if index == target {
+            return Ok(recipients.clone());
+        }
+    }
+    bail!("same-plan lock reference '@{target}' could not be resolved")
+}
+
+fn latest_lock_create_tokens(plan: &Plan) -> Result<Vec<TokenId>> {
+    let index = plan
+        .operations
+        .iter()
+        .filter(|operation| operation.is_lock_create())
+        .count();
+    if index == 0 {
+        bail!("lock reference '@' requires a preceding lock-create operation")
+    }
+    nth_lock_create_tokens(plan, index)
+}
+
+fn nth_lock_create_tokens(plan: &Plan, target: usize) -> Result<Vec<TokenId>> {
+    let mut index = 0usize;
+    for operation in &plan.operations {
+        let PlanOperation::LockCreate { tokens, .. } = operation else {
+            continue;
+        };
+        index += 1;
+        if index == target {
+            return tokens.iter().map(|token| parse_token_id(token)).collect();
+        }
+    }
+    bail!("same-plan lock reference '@{target}' could not be resolved")
+}
+
+async fn bind_plan_network(conn: &Connection, plan: &mut Plan, force_prompt: bool) -> Result<bool> {
+    if plan.network_genesis_hash.is_some() {
+        return Ok(false);
+    }
+    let (network_name, network_entry, _endpoint, _endpoint_label, _source) =
+        resolve_account_network_context(conn, None, None, false, force_prompt).await?;
+    let genesis_hash = network_entry.genesis_hash;
+    plan.network_genesis_hash = Some(genesis_hash.clone());
+    cliclack::log::info(format!(
+        "Token composition plan bound to network {network_name} ({genesis_hash})."
+    ))?;
+    Ok(true)
+}
+
+fn resolve_operation_account_references(
+    conn: &Connection,
+    genesis_hash: &str,
+    operation: PlanOperation,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<PlanOperation> {
+    Ok(match operation {
+        PlanOperation::Transfer {
+            token,
+            recipient,
+            amount,
+        } => PlanOperation::Transfer {
+            token,
+            recipient: resolve_plan_account(conn, genesis_hash, &recipient, "recipient", unlocks)?,
+            amount,
+        },
+        PlanOperation::AllowListAdd { token, targets } => PlanOperation::AllowListAdd {
+            token,
+            targets: resolve_plan_accounts(conn, genesis_hash, &targets, "target", unlocks)?,
+        },
+        PlanOperation::AllowListRemove { token, targets } => PlanOperation::AllowListRemove {
+            token,
+            targets: resolve_plan_accounts(conn, genesis_hash, &targets, "target", unlocks)?,
+        },
+        PlanOperation::DenyListAdd { token, targets } => PlanOperation::DenyListAdd {
+            token,
+            targets: resolve_plan_accounts(conn, genesis_hash, &targets, "target", unlocks)?,
+        },
+        PlanOperation::DenyListRemove { token, targets } => PlanOperation::DenyListRemove {
+            token,
+            targets: resolve_plan_accounts(conn, genesis_hash, &targets, "target", unlocks)?,
+        },
+        PlanOperation::AdminRolesAssign {
+            token,
+            target,
+            roles,
+        } => PlanOperation::AdminRolesAssign {
+            token,
+            target: resolve_plan_account(conn, genesis_hash, &target, "target", unlocks)?,
+            roles,
+        },
+        PlanOperation::AdminRolesRevoke {
+            token,
+            target,
+            roles,
+        } => PlanOperation::AdminRolesRevoke {
+            token,
+            target: resolve_plan_account(conn, genesis_hash, &target, "target", unlocks)?,
+            roles,
+        },
+        PlanOperation::LockCreate {
+            recipients,
+            expiry,
+            grants,
+            tokens,
+            keep_alive,
+        } => PlanOperation::LockCreate {
+            recipients: resolve_plan_accounts(
+                conn,
+                genesis_hash,
+                &recipients,
+                "recipient",
+                unlocks,
+            )?,
+            expiry,
+            grants: grants
+                .into_iter()
+                .map(|grant| grant.resolve_account(conn, genesis_hash, unlocks))
+                .collect::<Result<Vec<_>>>()?,
+            tokens,
+            keep_alive,
+        },
+        PlanOperation::LockSend {
+            lock,
+            token,
+            source,
+            recipient,
+            amount,
+        } => PlanOperation::LockSend {
+            lock,
+            token,
+            source: resolve_plan_account(conn, genesis_hash, &source, "source", unlocks)?,
+            recipient: resolve_plan_account(conn, genesis_hash, &recipient, "recipient", unlocks)?,
+            amount,
+        },
+        PlanOperation::LockReturn {
+            lock,
+            token,
+            source,
+            amount,
+        } => PlanOperation::LockReturn {
+            lock,
+            token,
+            source: resolve_plan_account(conn, genesis_hash, &source, "source", unlocks)?,
+            amount,
+        },
+        other => other,
+    })
+}
+
+fn resolve_plan_accounts(
+    conn: &Connection,
+    genesis_hash: &str,
+    values: &[String],
+    label: &str,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<Vec<String>> {
+    values
+        .iter()
+        .map(|value| resolve_plan_account(conn, genesis_hash, value, label, unlocks))
+        .collect()
+}
+
+fn resolve_plan_account(
+    conn: &Connection,
+    genesis_hash: &str,
+    value: &str,
+    label: &str,
+    unlocks: &mut AccountReferenceUnlocks,
+) -> Result<String> {
+    if value == "@sender" {
+        return Ok(value.to_owned());
+    }
+    let address = resolve_account_reference(
+        conn,
+        AccountReferenceContext {
+            network_name: genesis_hash,
+            network_genesis_hash: genesis_hash,
+        },
+        Some(value),
+        "Account address or local label:",
+        label,
+        true,
+        unlocks,
+    )?;
+    Ok(address.to_string())
+}
+
 async fn handle_repl_line(
     conn: &Connection,
     plan_path: &Path,
     plan: &mut Plan,
     line: &str,
 ) -> Result<ReplControl> {
-    match parse_repl_command(line)? {
+    let trimmed = line.trim();
+    if !trimmed.is_empty() {
+        *plan = read_plan(plan_path)?;
+    }
+    match parse_repl_command_for_plan(plan, line).await? {
         ReplCommand::Empty => {}
         ReplCommand::Help => println!("{}", help_text()),
         ReplCommand::Exit => return Ok(ReplControl::Exit),
         ReplCommand::Preview => println!("{}", render_plan_preview(plan, Some(plan_path))?),
         ReplCommand::Add(operation) => {
+            let operation = prepare_added_operation(conn, plan, operation).await?;
             let mut candidate = plan.clone();
             candidate.operations.push(operation);
             canonicalize_lock_references(&mut candidate)?;
@@ -462,6 +989,7 @@ async fn handle_repl_line(
                 },
             )
             .await?;
+            return Ok(ReplControl::Exit);
         }
     }
     Ok(ReplControl::Continue)
@@ -474,7 +1002,7 @@ enum ReplCommand {
     Exit,
     Preview,
     Add(PlanOperation),
-    Submit(SubmitCommandArgs),
+    Submit(Box<SubmitCommandArgs>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -487,9 +1015,34 @@ struct SubmitCommandArgs {
     no_defaults: bool,
 }
 
+async fn parse_repl_command_for_plan(plan: &Plan, line: &str) -> Result<ReplCommand> {
+    let Some(words) = shlex::split(line) else {
+        bail!("failed to parse command line; check quoting")
+    };
+    if matches!(words.first().map(String::as_str), Some("lock"))
+        && matches!(
+            words.get(1).map(String::as_str),
+            Some("fund" | "send" | "return")
+        )
+    {
+        return parse_plan_aware_lock_op(plan, &words)
+            .await
+            .map(ReplCommand::Add);
+    }
+    parse_repl_words(words)
+}
+
+#[cfg(test)]
 fn parse_repl_command(line: &str) -> Result<ReplCommand> {
     let Some(words) = shlex::split(line) else {
         bail!("failed to parse command line; check quoting")
+    };
+    parse_repl_words(words)
+}
+
+fn parse_repl_words(words: Vec<String>) -> Result<ReplCommand> {
+    let Some(_first) = words.first() else {
+        return Ok(ReplCommand::Empty);
     };
     let mut words = WordCursor::new(words);
     let Some(command) = words.pop() else {
@@ -502,14 +1055,61 @@ fn parse_repl_command(line: &str) -> Result<ReplCommand> {
             words.ensure_empty()?;
             Ok(ReplCommand::Preview)
         }
-        "add" => parse_add_command(words).map(ReplCommand::Add),
-        "submit" => parse_submit_command(words).map(ReplCommand::Submit),
+        "submit" => parse_submit_command(words)
+            .map(Box::new)
+            .map(ReplCommand::Submit),
+        "transfer" | "mint" | "burn" | "pause" | "unpause" | "allow-list" | "deny-list"
+        | "admin-roles" | "metadata" | "lock" => {
+            parse_operation_command(command, words).map(ReplCommand::Add)
+        }
         other => bail!("unknown token compose command '{other}'. Type 'help' for usage."),
     }
 }
 
-fn parse_add_command(mut words: WordCursor) -> Result<PlanOperation> {
-    let family = words.required_word("operation family")?;
+async fn parse_plan_aware_lock_op(plan: &Plan, words: &[String]) -> Result<PlanOperation> {
+    let action = words
+        .get(1)
+        .map(String::as_str)
+        .context("missing lock action")?;
+    let tail = words.iter().skip(2).cloned().collect::<Vec<_>>();
+    let mut args = OperationArgs::from_words(WordCursor::new(tail))?;
+    match action {
+        "fund" => {
+            let lock = args.take_positional_or_prompt("lock", "Lock id or @ reference:")?;
+            let token = args.take_token_or_select_for_lock(plan, &lock).await?;
+            Ok(PlanOperation::LockFund {
+                lock,
+                token,
+                amount: args.take_or_prompt("amount", "Token amount:")?,
+            })
+        }
+        "send" => {
+            let lock = args.take_positional_or_prompt("lock", "Lock id or @ reference:")?;
+            let token = args.take_token_or_select_for_lock(plan, &lock).await?;
+            let recipient = args.take_recipient_or_select_for_lock(plan, &lock).await?;
+            Ok(PlanOperation::LockSend {
+                lock,
+                token,
+                source: args.take_or_prompt("source", "Source account address or @sender:")?,
+                recipient,
+                amount: args.take_or_prompt("amount", "Token amount:")?,
+            })
+        }
+        "return" => {
+            let lock = args.take_positional_or_prompt("lock", "Lock id or @ reference:")?;
+            let token = args.take_token_or_select_for_lock(plan, &lock).await?;
+            Ok(PlanOperation::LockReturn {
+                lock,
+                token,
+                source: args.take_or_prompt("source", "Source account address or @sender:")?,
+                amount: args.take_or_prompt("amount", "Token amount:")?,
+            })
+        }
+        other => bail!("unknown lock action '{other}'"),
+    }
+}
+
+fn parse_operation_command(family: String, words: WordCursor) -> Result<PlanOperation> {
     match family.as_str() {
         "transfer" => parse_transfer(words),
         "mint" => parse_amount_op(words, AmountOperation::Mint),
@@ -650,7 +1250,7 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
             expiry: args.take_or_prompt("expiry", "Lock expiry:")?,
             grants: args.take_lock_grants()?,
             tokens: args.take_many_or_prompt("token", "Tokens (comma-separated):")?,
-            keep_alive: args.flag("keep-alive"),
+            keep_alive: args.take_keep_alive()?,
         }),
         "fund" => Ok(PlanOperation::LockFund {
             lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
@@ -660,14 +1260,14 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
         "send" => Ok(PlanOperation::LockSend {
             lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
             token: args.take_or_prompt("token", "Token identifier:")?,
-            source: args.take_or_prompt("source", "Source account address or label:")?,
-            recipient: args.take_or_prompt("recipient", "Recipient account address or label:")?,
+            source: args.take_or_prompt("source", "Source account address or @sender:")?,
+            recipient: args.take_or_prompt("recipient", "Recipient account address or @sender:")?,
             amount: args.take_or_prompt("amount", "Token amount:")?,
         }),
         "return" => Ok(PlanOperation::LockReturn {
             lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
             token: args.take_or_prompt("token", "Token identifier:")?,
-            source: args.take_or_prompt("source", "Source account address or label:")?,
+            source: args.take_or_prompt("source", "Source account address or @sender:")?,
             amount: args.take_or_prompt("amount", "Token amount:")?,
         }),
         "cancel" => Ok(PlanOperation::LockCancel {
@@ -708,6 +1308,15 @@ impl OperationArgs {
 
     fn flag(&self, name: &str) -> bool {
         self.flags.iter().any(|flag| flag == name)
+    }
+
+    fn take_keep_alive(&self) -> Result<bool> {
+        if self.flag("keep-alive") {
+            return Ok(true);
+        }
+        Ok(confirm("Keep the lock alive after funds are returned?")
+            .initial_value(false)
+            .interact()?)
     }
 
     fn take_optional(&mut self, name: &str) -> Option<String> {
@@ -781,6 +1390,24 @@ impl OperationArgs {
                 .collect()
         })
     }
+
+    async fn take_token_or_select_for_lock(&mut self, plan: &Plan, lock: &str) -> Result<String> {
+        if let Some(token) = self.take_optional("token") {
+            return Ok(token);
+        }
+        select_token_for_lock_reference(plan, lock).await
+    }
+
+    async fn take_recipient_or_select_for_lock(
+        &mut self,
+        plan: &Plan,
+        lock: &str,
+    ) -> Result<String> {
+        if let Some(recipient) = self.take_optional("recipient") {
+            return Ok(recipient);
+        }
+        select_recipient_for_lock_reference(plan, lock).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -814,39 +1441,50 @@ impl WordCursor {
 }
 
 fn help_text() -> &'static str {
-    r#"Commands:
-  add transfer --token TOKEN --recipient ACCOUNT --amount AMOUNT
-  add mint --token TOKEN --amount AMOUNT
-  add burn --token TOKEN --amount AMOUNT
-  add pause --token TOKEN
-  add unpause --token TOKEN
-  add allow-list add --token TOKEN --target ACCOUNT [--target ACCOUNT...]
-  add allow-list remove --token TOKEN --target ACCOUNT [--target ACCOUNT...]
-  add deny-list add --token TOKEN --target ACCOUNT [--target ACCOUNT...]
-  add deny-list remove --token TOKEN --target ACCOUNT [--target ACCOUNT...]
-  add admin-roles assign --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
-  add admin-roles revoke --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
-  add metadata update --token TOKEN --url URL [--checksum-sha256 HEX]
-  add lock create --recipient ACCOUNT --expiry TIME --grant GRANT --token TOKEN [--keep-alive]
-  add lock fund LOCK --token TOKEN --amount AMOUNT
-  add lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
-  add lock return LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
-  add lock cancel LOCK
+    r#"Operation commands:
+  transfer --token TOKEN --recipient ACCOUNT --amount AMOUNT
+  mint --token TOKEN --amount AMOUNT
+  burn --token TOKEN --amount AMOUNT
+  pause --token TOKEN
+  unpause --token TOKEN
+  allow-list add --token TOKEN --target ACCOUNT [--target ACCOUNT...]
+  allow-list remove --token TOKEN --target ACCOUNT [--target ACCOUNT...]
+  deny-list add --token TOKEN --target ACCOUNT [--target ACCOUNT...]
+  deny-list remove --token TOKEN --target ACCOUNT [--target ACCOUNT...]
+  admin-roles assign --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
+  admin-roles revoke --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
+  metadata update --token TOKEN --url URL [--checksum-sha256 HEX]
+  lock create --recipient ACCOUNT --expiry TIME --grant GRANT --token TOKEN [--keep-alive]
+  lock fund LOCK --token TOKEN --amount AMOUNT
+  lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
+  lock return LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
+  lock cancel LOCK
+
+Plan commands:
   preview
   submit [--sender LABEL] [--network NAME] [--node ENDPOINT] [--no-wait] [--non-interactive] [--no-defaults]
+
+Session commands:
   help | ?
   exit
 
 Lock references:
-  @   most recent preceding lock-create, canonicalized to @N on save
-  @1  first lock created in this plan
-  @2  second lock created in this plan
+  @          most recent preceding lock-create, canonicalized to @N on save
+  @N         Nth lock created in this plan; for example @2 references the second lock-create
+  <lock-id>  base58check lock id for an existing on-chain lock
+
+Account references:
+  <address>  concrete account address saved directly
+  <label>    finalized local account label resolved to an address before save
+  @sender    selected submit sender, resolved when submitting
 "#
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Plan {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network_genesis_hash: Option<String>,
     #[serde(default)]
     operations: Vec<PlanOperation>,
 }
@@ -855,6 +1493,7 @@ impl Plan {
     fn empty() -> Self {
         Self {
             version: PLAN_VERSION,
+            network_genesis_hash: None,
             operations: Vec::new(),
         }
     }
@@ -919,7 +1558,7 @@ enum PlanOperation {
         expiry: String,
         grants: Vec<PlanLockGrant>,
         tokens: Vec<String>,
-        #[serde(default, skip_serializing_if = "is_false")]
+        #[serde(default)]
         keep_alive: bool,
     },
     LockFund {
@@ -984,6 +1623,16 @@ impl PlanLockGrant {
 
     fn preview(&self) -> String {
         format!("{}:{}", self.account, self.capabilities.join(","))
+    }
+
+    fn resolve_account(
+        mut self,
+        conn: &Connection,
+        genesis_hash: &str,
+        unlocks: &mut AccountReferenceUnlocks,
+    ) -> Result<Self> {
+        self.account = resolve_plan_account(conn, genesis_hash, &self.account, "grant", unlocks)?;
+        Ok(self)
     }
 }
 
@@ -1126,10 +1775,6 @@ impl fmt::Display for ParsedLockReference<'_> {
             Self::Existing(lock) => f.write_str(lock),
         }
     }
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 fn load_or_new_plan(path: &Path) -> Result<Plan> {
@@ -1291,6 +1936,7 @@ mod tests {
     fn sample_plan() -> Plan {
         Plan {
             version: PLAN_VERSION,
+            network_genesis_hash: Some("genesis-a".to_owned()),
             operations: vec![
                 PlanOperation::Mint {
                     token: "CCD".to_owned(),
@@ -1320,6 +1966,7 @@ mod tests {
         let plan: Plan = toml::from_str(
             r#"
 version = 1
+network_genesis_hash = "genesis-a"
 
 [[operations]]
 type = "mint"
@@ -1368,6 +2015,7 @@ amount = "100"
     fn rejects_latest_reference_without_preceding_lock_create() {
         let mut plan = Plan {
             version: PLAN_VERSION,
+            network_genesis_hash: Some("genesis-a".to_owned()),
             operations: vec![PlanOperation::LockFund {
                 lock: "@".to_owned(),
                 token: "CCD".to_owned(),
@@ -1400,9 +2048,41 @@ amount = "100"
     }
 
     #[test]
+    fn local_lock_recipient_lookup_returns_recipients() {
+        let recipients = nth_lock_create_recipients(&sample_plan(), 1).expect("recipients resolve");
+        assert_eq!(recipients, vec!["bob".to_owned()]);
+    }
+
+    #[test]
+    fn help_text_includes_reference_legends() {
+        let help = help_text();
+        assert!(help.contains("Operation commands:"));
+        assert!(help.contains("Plan commands:"));
+        assert!(help.contains("Session commands:"));
+        assert!(!help.contains("add mint"));
+        assert!(help.contains("Lock references:"));
+        assert!(help.contains("@N"));
+        assert!(help.contains("@2 references the second lock-create"));
+        assert!(help.contains("<lock-id>"));
+        assert!(help.contains("base58check lock id"));
+        assert!(help.contains("Account references:"));
+        assert!(help.contains("@sender"));
+    }
+
+    #[test]
+    fn preserves_sender_account_reference_without_local_lookup() {
+        let mut unlocks = AccountReferenceUnlocks::new();
+        let conn = Connection::open_in_memory().expect("in-memory db opens");
+        let resolved = resolve_plan_account(&conn, "genesis-a", "@sender", "source", &mut unlocks)
+            .expect("@sender resolves symbolically");
+        assert_eq!(resolved, "@sender");
+    }
+
+    #[test]
     fn rejects_out_of_range_numbered_reference() {
         let plan = Plan {
             version: PLAN_VERSION,
+            network_genesis_hash: Some("genesis-a".to_owned()),
             operations: vec![PlanOperation::LockFund {
                 lock: "@2".to_owned(),
                 token: "CCD".to_owned(),
@@ -1415,8 +2095,7 @@ amount = "100"
 
     #[test]
     fn parses_add_mint_command() {
-        let command =
-            parse_repl_command("add mint --token CCD --amount 100").expect("parse succeeds");
+        let command = parse_repl_command("mint --token CCD --amount 100").expect("parse succeeds");
         assert!(matches!(
             command,
             ReplCommand::Add(PlanOperation::Mint { token, amount }) if token == "CCD" && amount == "100"
@@ -1426,12 +2105,12 @@ amount = "100"
     #[test]
     fn parses_add_lock_create_with_inline_structured_grant() {
         let command = parse_repl_command(
-            "add lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD",
+            "lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD --keep-alive",
         )
         .expect("parse succeeds");
         assert!(matches!(
             command,
-            ReplCommand::Add(PlanOperation::LockCreate { grants, .. })
+            ReplCommand::Add(PlanOperation::LockCreate { grants, keep_alive: true, .. })
                 if grants == vec![PlanLockGrant {
                     account: "alice".to_owned(),
                     capabilities: vec!["fund".to_owned(), "send".to_owned()],
@@ -1442,7 +2121,7 @@ amount = "100"
     #[test]
     fn rejects_add_lock_create_with_unknown_inline_grant_capability() {
         let err = parse_repl_command(
-            "add lock create --recipient bob --expiry 1d --grant alice:fund,nonsense --token CCD",
+            "lock create --recipient bob --expiry 1d --grant alice:fund,nonsense --token CCD --keep-alive",
         )
         .expect_err("parse must fail");
         assert!(err.to_string().contains("nonsense"));
@@ -1451,7 +2130,7 @@ amount = "100"
     #[test]
     fn parses_add_lock_fund_command() {
         let command =
-            parse_repl_command("add lock fund @ --token CCD --amount 100").expect("parse succeeds");
+            parse_repl_command("lock fund @ --token CCD --amount 100").expect("parse succeeds");
         assert!(matches!(
             command,
             ReplCommand::Add(PlanOperation::LockFund { lock, token, amount })
@@ -1508,6 +2187,7 @@ amount = "100"
     fn saved_plan_uses_structured_lock_grants() {
         let plan = sample_plan();
         let serialized = toml::to_string_pretty(&plan).expect("serialize succeeds");
+        assert!(serialized.contains("keep_alive = false"));
         assert!(serialized.contains("[[operations.grants]]"));
         assert!(serialized.contains("account = \"alice\""));
         assert!(serialized.contains("capabilities = [\"fund\"]"));

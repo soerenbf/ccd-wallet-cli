@@ -334,7 +334,7 @@ pub(super) fn resolve_lock_token(
     }
 }
 
-fn configured_lock_tokens(lock_info: &LockInfo) -> Vec<TokenId> {
+pub(super) fn configured_lock_tokens(lock_info: &LockInfo) -> Vec<TokenId> {
     match &lock_info.controller {
         LockController::SimpleV0(controller) => controller.tokens.clone(),
     }
@@ -853,6 +853,19 @@ pub(super) fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV
             bail!("unknown lock capability '{other}'; expected one of: fund, send, return, cancel")
         }
     }
+}
+
+/// Resolve whether a lock should be kept alive after funds are returned.
+pub(super) fn resolve_lock_keep_alive(
+    explicit_keep_alive: bool,
+    non_interactive: bool,
+) -> Result<bool> {
+    if explicit_keep_alive || non_interactive {
+        return Ok(explicit_keep_alive);
+    }
+    Ok(confirm("Keep the lock alive after funds are returned?")
+        .initial_value(false)
+        .interact()?)
 }
 
 /// Build a simple-v0 lock configuration from CLI inputs.

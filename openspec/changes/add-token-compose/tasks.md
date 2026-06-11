@@ -22,9 +22,9 @@
 
 ## 4. Interactive Composer
 
-- [x] 4.1 Implement the Reedline command loop for `token compose <PLAN>` with `add`, `preview`, `submit`, `help`, `?`, and `exit` commands.
-- [x] 4.2 Add command help text and examples for all supported add operations.
-- [x] 4.3 Implement inline argument parsing for add and submit commands entered inside the composer.
+- [x] 4.1 Implement the Reedline command loop for `token compose <PLAN>` with top-level operation commands, `preview`, `submit`, `help`, `?`, and `exit` commands.
+- [x] 4.2 Add grouped command help text and examples for all supported operation commands.
+- [x] 4.3 Implement inline argument parsing for operation and submit commands entered inside the composer.
 - [x] 4.4 Reuse existing `cliclack` prompt helpers to collect missing operation fields and confirmations after a REPL line has been submitted.
 - [x] 4.5 Ensure Ctrl-C exits or interrupts the composer cleanly without corrupting the plan file.
 - [x] 4.6 Add tests for REPL command parsing and command dispatch logic independent of terminal IO.
@@ -56,3 +56,26 @@
 - [x] 7.4 Reject unknown lock grant capabilities during compose add and token lock create before saving or submitting.
 - [x] 7.5 Add tests for structured grant serialization, inline grant validation, prompted grant helper parsing, and optional `--grant` clap behavior.
 - [x] 7.6 Run `cargo fmt`, `cargo test -p ccd-wallet`, and `openspec validate add-token-compose`.
+
+## 8. Portable Network-Bound Plans
+
+- [x] 8.1 Store the target network genesis hash in token composition plans.
+- [x] 8.2 Resolve local account labels to raw account addresses before saving added operations.
+- [x] 8.3 Reject submit attempts when the selected network genesis hash differs from the plan genesis hash.
+- [x] 8.4 Make token compose submit always prompt for sender account selection in interactive mode when no sender is supplied.
+- [x] 8.5 Run `cargo fmt`, `cargo test -p ccd-wallet`, and `openspec validate add-token-compose`.
+- [x] 8.6 Exit the interactive composer after an in-session submit command completes successfully.
+- [x] 8.7 Prompt for explicit network selection and save the network genesis hash when creating a new composition plan.
+- [x] 8.8 Validate token existence, lock token configuration, and amount decimals before saving added compose operations.
+- [x] 8.9 Present a token selector for compose lock fund/send/return when the token is omitted, using local lock-create tokens or queried on-chain lock tokens.
+
+## 9. Sender References and Lock Recipient Selection
+
+- [x] 9.1 Add `@sender` as a preserved symbolic account reference in composition plans.
+- [x] 9.2 Resolve `@sender` to the selected sender account during submit for all account-reference fields.
+- [x] 9.3 Present a recipient selector for compose lock send when recipient is omitted, using local lock-create recipients or queried on-chain lock recipients.
+- [x] 9.4 Validate explicit lock send recipients against the referenced lock's configured recipient set before saving.
+- [x] 9.5 Add tests for `@sender` preservation/resolution and lock recipient validation helpers.
+- [x] 9.6 Run `cargo fmt`, `cargo test -p ccd-wallet`, and `openspec validate add-token-compose`.
+- [x] 9.7 Reload the plan from disk before executing each non-empty interactive composer command.
+- [x] 9.8 Prompt for keep-alive in both composer lock create and token lock create when `--keep-alive` is omitted interactively.

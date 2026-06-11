@@ -39,9 +39,11 @@ This avoids hidden active draft state and ensures `preview`/`submit` always oper
 
 ### Use a versioned canonical TOML plan model
 
-Plans will be represented internally as typed operation structs and serialized as TOML with `version = 1` and an ordered `operations` array. Saving may canonicalize formatting and shorthand references; preserving comments is out of scope.
+Plans will be represented internally as typed operation structs and serialized as TOML with `version = 1`, the target network genesis hash, and an ordered `operations` array. Saving may canonicalize formatting and shorthand references; preserving comments is out of scope.
 
-Lock grants are stored structurally instead of as opaque `ACCOUNT:ROLE,ROLE` strings. Inline `--grant ACCOUNT:ROLE,ROLE` remains accepted for power users, but it is parsed, validated, and serialized as `{ account, capabilities }` TOML data. Interactive lock creation uses a guided grant composition flow with an account prompt and a capability multiselect, repeated until the user declines adding more grants.
+The composer resolves local account labels to raw account addresses before saving operations. This keeps saved plans portable between wallets and avoids persisting local wallet database labels. The network genesis hash is saved with the plan so label resolution is scoped correctly and submit can reject attempts to submit a plan on the wrong network.
+
+Lock grants are stored structurally instead of as opaque `ACCOUNT:ROLE,ROLE` strings. Inline `--grant ACCOUNT:ROLE,ROLE` remains accepted for power users, but it is parsed, validated, label-resolved, and serialized as `{ account, capabilities }` TOML data. Interactive lock creation uses a guided grant composition flow with an account prompt and a capability multiselect, repeated until the user declines adding more grants.
 
 The implementation should keep parsing/rendering/building separate from the Reedline UI so future non-interactive add commands or other UIs can reuse the same model.
 
@@ -55,7 +57,7 @@ During submission, `@N` is resolved to the deterministic lock id for the Nth loc
 
 `compose preview <PLAN>` renders the ordered operation list exactly as the plan describes it. It does not require sender or network context and does not display signed transaction payloads.
 
-`compose submit <PLAN>` resolves sender, network, account labels, token amounts, token metadata needed for decimals, existing locks, and same-plan lock references. It then shows a final confirmation summary and submits one MetaUpdate transaction.
+`compose submit <PLAN>` resolves sender, network, token amounts, token metadata needed for decimals, existing locks, and same-plan lock references. It verifies that the selected network genesis hash matches the plan's stored genesis hash, then shows a final confirmation summary and submits one MetaUpdate transaction. Sender account selection is always explicit in interactive mode, matching the other token mutation commands.
 
 ### Validate only transaction-external invariants
 
