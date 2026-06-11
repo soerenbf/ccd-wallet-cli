@@ -15,7 +15,7 @@ use crate::commands::{
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::config as node_config;
 use chrono::{DateTime, SecondsFormat, Utc};
-use cliclack::{input, spinner};
+use cliclack::{confirm, input, spinner};
 use concordium_rust_sdk::{
     base::{
         common::types::TransactionTime,
@@ -731,35 +731,103 @@ fn format_transaction_time(value: TransactionTime) -> Result<String> {
     Ok(datetime.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
-/// Parse a lock create grant in the form `<ACCOUNT:ROLE[,ROLE...]>`.
-pub(super) fn parse_lock_grant(
-    conn: &Connection,
-    context: &mut MutationContext,
-    input: &str,
-) -> Result<LockControllerSimpleV0Grant> {
+/// A lock grant before account labels have been resolved to addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct UnresolvedLockGrant {
+    /// Raw account address or finalized local account label.
+    pub(super) account: String,
+    /// Capabilities granted to the account.
+    pub(super) roles: Vec<LockControllerSimpleV0Capability>,
+}
+
+/// Return the user-facing spelling for a lock capability.
+pub(super) fn lock_capability_cli_name(value: LockControllerSimpleV0Capability) -> &'static str {
+    match value {
+        LockControllerSimpleV0Capability::Fund => "fund",
+        LockControllerSimpleV0Capability::Return => "return",
+        LockControllerSimpleV0Capability::Send => "send",
+        LockControllerSimpleV0Capability::Cancel => "cancel",
+    }
+}
+
+/// Parse an unresolved lock create grant in the form `<ACCOUNT:ROLE[,ROLE...]>`.
+pub(super) fn parse_unresolved_lock_grant(input: &str) -> Result<UnresolvedLockGrant> {
     let (account, roles) = input
         .split_once(':')
         .with_context(|| format!("invalid grant '{input}'; expected <ACCOUNT:ROLE[,ROLE...]>"))?;
+    let account = account.trim();
+    if account.is_empty() {
+        bail!("grant '{input}' must include an account before ':'");
+    }
+    let roles = parse_lock_grant_roles(input, roles)?;
+    Ok(UnresolvedLockGrant {
+        account: account.to_owned(),
+        roles,
+    })
+}
+
+/// Resolve an unresolved lock grant against local account labels in the current network context.
+pub(super) fn resolve_lock_grant(
+    conn: &Connection,
+    context: &mut MutationContext,
+    grant: &UnresolvedLockGrant,
+) -> Result<LockControllerSimpleV0Grant> {
     let account = resolve_account_reference(
         conn,
         AccountReferenceContext {
             network_name: &context.network_name,
             network_genesis_hash: &context.network_genesis_hash,
         },
-        Some(account),
+        Some(&grant.account),
         "Grant account address or local label:",
         "grant",
         true,
         &mut context.account_unlocks,
     )?;
-    let roles = parse_lock_grant_roles(input, roles)?;
     Ok(LockControllerSimpleV0Grant {
         account: concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from(account),
-        roles,
+        roles: grant.roles.clone(),
     })
 }
 
-fn parse_lock_grant_roles(
+/// Prompt for one or more unresolved lock grants.
+pub(super) fn prompt_unresolved_lock_grants() -> Result<Vec<UnresolvedLockGrant>> {
+    let mut grants = Vec::new();
+    loop {
+        let account: String = input("Grant account address or local label:").interact()?;
+        let roles = prompt_lock_capabilities()?;
+        grants.push(UnresolvedLockGrant { account, roles });
+        let another = confirm("Add another grant?")
+            .initial_value(false)
+            .interact()?;
+        if !another {
+            break;
+        }
+    }
+    Ok(grants)
+}
+
+fn prompt_lock_capabilities() -> Result<Vec<LockControllerSimpleV0Capability>> {
+    let items = lock_capability_items();
+    fuzzy_multiselect_or_single("Select grant capabilities", &items)
+}
+
+fn lock_capability_items() -> Vec<FuzzySelectItem<LockControllerSimpleV0Capability>> {
+    [
+        LockControllerSimpleV0Capability::Fund,
+        LockControllerSimpleV0Capability::Send,
+        LockControllerSimpleV0Capability::Return,
+        LockControllerSimpleV0Capability::Cancel,
+    ]
+    .into_iter()
+    .map(|capability| FuzzySelectItem {
+        text: lock_capability_cli_name(capability.clone()).to_owned(),
+        value: capability,
+    })
+    .collect()
+}
+
+pub(super) fn parse_lock_grant_roles(
     input: &str,
     roles: &str,
 ) -> Result<Vec<LockControllerSimpleV0Capability>> {
@@ -775,13 +843,15 @@ fn parse_lock_grant_roles(
     Ok(roles)
 }
 
-fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV0Capability> {
+pub(super) fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV0Capability> {
     match input {
         "fund" => Ok(LockControllerSimpleV0Capability::Fund),
         "return" => Ok(LockControllerSimpleV0Capability::Return),
         "send" => Ok(LockControllerSimpleV0Capability::Send),
         "cancel" => Ok(LockControllerSimpleV0Capability::Cancel),
-        other => bail!("unknown lock capability '{other}'"),
+        other => {
+            bail!("unknown lock capability '{other}'; expected one of: fund, send, return, cancel")
+        }
     }
 }
 
@@ -870,7 +940,10 @@ fn now_unix_seconds() -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_lock_grant_roles, parse_token_admin_role, parse_token_amount};
+    use super::{
+        parse_lock_grant_roles, parse_token_admin_role, parse_token_amount,
+        parse_unresolved_lock_grant,
+    };
     use concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Capability;
     use concordium_rust_sdk::base::protocol_level_tokens::TokenAdminRole;
 
@@ -904,5 +977,20 @@ mod tests {
         assert_eq!(roles.len(), 2);
         assert_eq!(roles[0], LockControllerSimpleV0Capability::Fund);
         assert_eq!(roles[1], LockControllerSimpleV0Capability::Send);
+    }
+
+    #[test]
+    fn parses_unresolved_lock_grant() {
+        let grant = parse_unresolved_lock_grant("alice:fund,send").unwrap();
+        assert_eq!(grant.account, "alice");
+        assert_eq!(grant.roles.len(), 2);
+        assert_eq!(grant.roles[0], LockControllerSimpleV0Capability::Fund);
+        assert_eq!(grant.roles[1], LockControllerSimpleV0Capability::Send);
+    }
+
+    #[test]
+    fn rejects_unknown_lock_capability() {
+        let err = parse_unresolved_lock_grant("alice:fund,nonsense").unwrap_err();
+        assert!(err.to_string().contains("nonsense"));
     }
 }

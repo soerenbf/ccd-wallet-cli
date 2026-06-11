@@ -24,7 +24,7 @@ The new composer adds an interactive planning layer above those primitives. User
 
 ### Use a Reedline-backed composer with cliclack field prompts
 
-`token compose <PLAN>` will run a command loop backed by Reedline for line editing, history, completions, Ctrl-C handling, and in-session help. Command handlers will parse inline arguments where provided. When an operation command lacks required non-secret fields, the handler will collect them through existing `cliclack` prompt helpers.
+`token compose <PLAN>` will run a command loop backed by Reedline for line editing, history, completions, Ctrl-C handling, and in-session help. Command handlers will parse inline arguments where provided. When an operation command lacks required non-secret fields, the handler will collect them through existing `cliclack` prompt helpers. The lock grant composition helper is shared with the original `token lock create` command so both flows validate capabilities and guide users through the same account/capability selection model.
 
 Alternatives considered:
 - Pipeline transformers were rejected because they require stdout to remain machine-only and make intermediary interactivity fragile.
@@ -40,6 +40,8 @@ This avoids hidden active draft state and ensures `preview`/`submit` always oper
 ### Use a versioned canonical TOML plan model
 
 Plans will be represented internally as typed operation structs and serialized as TOML with `version = 1` and an ordered `operations` array. Saving may canonicalize formatting and shorthand references; preserving comments is out of scope.
+
+Lock grants are stored structurally instead of as opaque `ACCOUNT:ROLE,ROLE` strings. Inline `--grant ACCOUNT:ROLE,ROLE` remains accepted for power users, but it is parsed, validated, and serialized as `{ account, capabilities }` TOML data. Interactive lock creation uses a guided grant composition flow with an account prompt and a capability multiselect, repeated until the user declines adding more grants.
 
 The implementation should keep parsing/rendering/building separate from the Reedline UI so future non-interactive add commands or other UIs can reuse the same model.
 

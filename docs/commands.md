@@ -104,13 +104,17 @@ ccd-wallet
 │  │  └─ revoke
 │  ├─ metadata
 │  │  └─ update
-│  └─ lock
-│     ├─ create
-│     ├─ fund
-│     ├─ send
-│     ├─ return
-│     ├─ cancel
-│     └─ show
+│  ├─ lock
+│  │  ├─ create
+│  │  ├─ fund
+│  │  ├─ send
+│  │  ├─ return
+│  │  ├─ cancel
+│  │  └─ show
+│  └─ compose
+│     ├─ <PLAN>
+│     ├─ preview <PLAN>
+│     └─ submit <PLAN>
 └─ connect                      [Implemented]
 ```
 
@@ -127,6 +131,8 @@ The `seed` command family remains the user-facing place for seed phrase manageme
 `governance proposal` is the detached multi-party governance update flow. `governance proposal create --json <FILE> --out <FILE> --effective-time <TIME> --timeout <TIME>` creates a proposal file containing the version, network genesis hash, frozen update header, and canonical pretty JSON payload. Proposal creation intentionally requires explicit effective time and timeout inputs so detached signers do not coordinate around accidental timing defaults. `governance proposal sign <PROPOSAL> --out <FILE>` signs a proposal with a local governance key using the same local signer selection behavior as `governance update`; `--ledger --ledger-key-index <N>` signs with a connected Governance Ledger device. Detached signature files contain the version, verify key, and a single-entry `UpdateInstructionSignature`-shaped signature map keyed by the live on-chain governance key index for the signer. `governance proposal submit <PROPOSAL> --signature <FILE>...` submits the proposal after online revalidation; `--signature-dir <DIR>` additionally loads JSON signature files from a directory. All detached proposal stages resolve the selected network and revalidate current on-chain authorization state through the node.
 
 `transaction show <HASH>` inspects transaction lifecycle and outcome details through a resolved node. The optional `--show-payload` flag additionally attempts to display the original submitted block item payload and account transaction header when the transaction is present in committed or finalized block contents.
+
+`token compose <PLAN>` opens an interactive token MetaUpdate composer backed by a saved TOML plan. The composer supports adding token and lock operations, previewing the plan, and submitting the saved composition. `token compose preview <PLAN>` lists the operations recorded in the plan without requiring sender or network context. `token compose submit <PLAN> --sender <LABEL>` resolves the saved plan and submits the ordered operations as a single MetaUpdate account transaction.
 
 ## Planned command spaces
 
@@ -161,6 +167,6 @@ Some future transaction authoring areas remain intentionally unresolved in this 
 In particular:
 - this document does not define a dedicated top-level `ccd` command space
 - this document does not finalize where miscellaneous non-token account transaction authoring will live
-- this document does not define the exact future token-composition syntax beyond the implemented single-command token workflows
+- this document does not define any future token-composition syntax beyond the implemented `token compose` plan workflow
 
 These areas can be added later, but they should not conflict with the implemented `token` taxonomy and planned `stake` taxonomy defined here.

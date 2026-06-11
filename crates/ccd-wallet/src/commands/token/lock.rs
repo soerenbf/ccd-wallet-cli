@@ -29,11 +29,21 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
     let recipients =
         shared::parse_account_addresses(conn, &mut context, &args.recipients, "recipient")?;
     let expiry = shared::parse_expiry_time(&args.expiry)?;
-    let grants = args
-        .grants
+    let unresolved_grants = if args.grants.is_empty() {
+        if args.non_interactive {
+            anyhow::bail!("at least one --grant must be provided in --non-interactive mode");
+        }
+        shared::prompt_unresolved_lock_grants()?
+    } else {
+        args.grants
+            .iter()
+            .map(String::as_str)
+            .map(shared::parse_unresolved_lock_grant)
+            .collect::<Result<Vec<_>>>()?
+    };
+    let grants = unresolved_grants
         .iter()
-        .map(String::as_str)
-        .map(|grant| shared::parse_lock_grant(conn, &mut context, grant))
+        .map(|grant| shared::resolve_lock_grant(conn, &mut context, grant))
         .collect::<Result<Vec<_>>>()?;
     let token_summary = args
         .tokens

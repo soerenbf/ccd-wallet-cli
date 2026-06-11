@@ -30,6 +30,7 @@ The interactive composer SHALL let users add every user-facing token and lock Me
 #### Scenario: User adds an operation through prompts
 - **WHEN** a user enters `add lock create` in the interactive composer without all required lock configuration fields
 - **THEN** the composer prompts for the missing lock creation fields using `cliclack`
+- **AND** lock grants are composed by prompting for a grant account and selecting one or more known lock capabilities
 - **AND** appends the completed lock creation operation only after all required fields are collected
 
 #### Scenario: Cancelled add does not mutate the plan
@@ -38,11 +39,16 @@ The interactive composer SHALL let users add every user-facing token and lock Me
 - **AND** the saved plan remains unchanged
 
 ### Requirement: Composer autosaves plans after successful additions
-The composer SHALL persist the full canonical plan to the supplied TOML path after every successful `add` command. The write SHALL be atomic so a failed write does not leave a partially-written plan file.
+The composer SHALL persist the full canonical plan to the supplied TOML path after every successful `add` command. The write SHALL be atomic so a failed write does not leave a partially-written plan file. Saved lock grants SHALL use structured account and capability fields rather than opaque comma-delimited grant strings.
 
 #### Scenario: Successful add is immediately persisted
 - **WHEN** a user successfully adds an operation in the interactive composer
 - **THEN** the TOML plan file contains the newly added operation before the composer accepts the next command
+
+#### Scenario: Lock grant is saved structurally
+- **WHEN** a user successfully adds a lock creation operation with a grant for account `alice` and capabilities `fund` and `send`
+- **THEN** the saved TOML records the grant with account `alice` and capabilities `fund` and `send` as structured fields
+- **AND** the saved TOML does not split grant capability commas into separate grants
 
 #### Scenario: Failed add preserves previous plan
 - **WHEN** an add command fails validation or cannot be parsed
@@ -67,6 +73,14 @@ Composition plans SHALL represent references to locks created earlier in the sam
 - **AND** the plan has fewer than three lock creation operations
 - **THEN** the composer rejects the operation with an actionable error
 - **AND** the saved plan remains unchanged
+
+### Requirement: Composer validates lock grant capabilities before saving
+The composer SHALL validate lock grant capability names before saving a lock creation operation. Unknown capabilities SHALL be rejected with an actionable error that lists the supported capability names.
+
+#### Scenario: Inline grant with unknown capability is rejected
+- **WHEN** a user enters `add lock create --grant alice:fund,nonsense` in the interactive composer
+- **THEN** the composer rejects the operation before saving it
+- **AND** the error identifies `nonsense` as an unknown lock capability
 
 ### Requirement: Compose preview lists planned operations
 The CLI SHALL provide `ccd-wallet token compose preview <PLAN>` to render the ordered operation list in a token composition plan. Preview SHALL not require sender, network, node, or signing context and SHALL not display a signed transaction payload.

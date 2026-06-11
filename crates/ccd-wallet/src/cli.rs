@@ -1012,6 +1012,64 @@ pub enum TokenSubcommand {
     Metadata(Box<TokenMetadataCommand>),
     /// Manage token locks.
     Lock(Box<TokenLockCommand>),
+    /// Build, preview, and submit composed token MetaUpdate transactions.
+    Compose(Box<TokenComposeArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenComposeArgs {
+    /// Plan file to create or continue in the interactive composer.
+    #[arg(value_name = "PLAN")]
+    pub plan: Option<std::path::PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<TokenComposeSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenComposeSubcommand {
+    /// List the operations recorded in a token composition plan.
+    Preview(Box<TokenComposePreviewArgs>),
+    /// Submit a token composition plan as one MetaUpdate transaction.
+    Submit(Box<TokenComposeSubmitArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenComposePreviewArgs {
+    /// Plan file to preview.
+    #[arg(value_name = "PLAN")]
+    pub plan: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenComposeSubmitArgs {
+    /// Plan file to submit.
+    #[arg(value_name = "PLAN")]
+    pub plan: std::path::PathBuf,
+
+    /// Account label to sign with. If omitted, interactive mode opens an account selector.
+    #[arg(long = "sender", alias = "account", value_name = "LABEL")]
+    pub sender: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1328,8 +1386,8 @@ pub struct TokenLockCreateArgs {
     #[arg(long = "expiry", value_name = "TIME")]
     pub expiry: String,
 
-    /// Controller grant in the form `<ACCOUNT_OR_LABEL:ROLE[,ROLE...]>`. Repeat for multiple grants.
-    #[arg(long = "grant", value_name = "GRANT", required = true)]
+    /// Controller grant in the form `<ACCOUNT_OR_LABEL:ROLE[,ROLE...]>`. Repeat for multiple grants. If omitted interactively, the CLI prompts for grants.
+    #[arg(long = "grant", value_name = "GRANT")]
     pub grants: Vec<String>,
 
     /// Token identifiers governed by the lock controller. Repeat to add multiple tokens.
@@ -2576,6 +2634,77 @@ mod tests {
     }
 
     #[test]
+    fn parses_token_compose_interactive_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "compose", "plan.toml"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Compose(args) => {
+                    assert_eq!(
+                        args.plan.as_deref(),
+                        Some(std::path::Path::new("plan.toml"))
+                    );
+                    assert!(args.command.is_none());
+                }
+                other => panic!("expected token compose command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_compose_preview_command() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "compose", "preview", "plan.toml"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Compose(args) => match args.command {
+                    Some(TokenComposeSubcommand::Preview(args)) => {
+                        assert_eq!(args.plan, std::path::PathBuf::from("plan.toml"));
+                    }
+                    other => panic!("expected token compose preview command, got {other:?}"),
+                },
+                other => panic!("expected token compose command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_compose_submit_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "compose",
+            "submit",
+            "plan.toml",
+            "--sender",
+            "alice",
+            "--network",
+            "testnet",
+            "--no-wait",
+            "--non-interactive",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Compose(args) => match args.command {
+                    Some(TokenComposeSubcommand::Submit(args)) => {
+                        assert_eq!(args.plan, std::path::PathBuf::from("plan.toml"));
+                        assert_eq!(args.sender.as_deref(), Some("alice"));
+                        assert_eq!(args.network.as_deref(), Some("testnet"));
+                        assert!(args.no_wait);
+                        assert!(args.non_interactive);
+                    }
+                    other => panic!("expected token compose submit command, got {other:?}"),
+                },
+                other => panic!("expected token compose command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_token_admin_roles_assign_command() {
         let cli = Cli::parse_from([
             "ccd-wallet",
@@ -2639,6 +2768,38 @@ mod tests {
                         assert_eq!(args.tokens.len(), 1);
                         assert_eq!(args.tokens[0].to_string(), "CCD");
                         assert_eq!(args.account.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_create_without_grants_for_interactive_prompting() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--recipient",
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+            "--expiry",
+            "1h",
+            "--token",
+            "CCD",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert!(args.grants.is_empty());
+                        assert_eq!(args.expiry, "1h");
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
                 },

@@ -1,6 +1,7 @@
 //! Protocol-level token command orchestration.
 
 mod admin_roles;
+mod compose;
 mod holder;
 mod lists;
 mod lock;
@@ -51,5 +52,6 @@ pub async fn run(conn: &Connection, command: TokenSubcommand) -> Result<()> {
             TokenLockSubcommand::Cancel(args) => lock::cancel(conn, *args).await,
             TokenLockSubcommand::Show(args) => lock::show(conn, *args).await,
         },
+        TokenSubcommand::Compose(args) => compose::compose(conn, *args).await,
     }
 }
