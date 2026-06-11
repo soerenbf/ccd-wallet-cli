@@ -488,11 +488,8 @@ async fn run_composer(conn: &Connection, plan_path: &Path) -> Result<()> {
     if bind_plan_network(conn, &mut plan, true).await? {
         save_plan_atomic(plan_path, &plan)?;
     }
-    cliclack::log::info(format!(
-        "Token composer loaded {} operation(s) from {}.",
-        plan.operations.len(),
-        plan_path.display()
-    ))?;
+    println!("{}", render_plan_preview(&plan, Some(plan_path))?);
+    println!();
     println!("Type 'help' or '?' for commands. Type 'exit' or press Ctrl-C to quit.");
 
     let mut line_editor = Reedline::create()
@@ -2059,6 +2056,9 @@ fn render_plan_preview(plan: &Plan, path: Option<&Path>) -> Result<String> {
         Some(path) => lines.push(format!("Token composition plan: {}", path.display())),
         None => lines.push("Token composition plan".to_owned()),
     }
+    if let Some(network) = plan_preview_network(plan)? {
+        lines.push(format!("Network: {network}"));
+    }
     lines.push(String::new());
     lines.push("Operations:".to_owned());
     if plan.operations.is_empty() {
@@ -2081,6 +2081,24 @@ fn render_plan_preview(plan: &Plan, path: Option<&Path>) -> Result<String> {
         ));
     }
     Ok(lines.join("\n"))
+}
+
+fn plan_preview_network(plan: &Plan) -> Result<Option<String>> {
+    let Some(genesis_hash) = plan.network_genesis_hash.as_deref() else {
+        return Ok(None);
+    };
+    let app_config = app_config::load()?;
+    let aliases = app_config
+        .networks
+        .iter()
+        .filter(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if aliases.is_empty() {
+        Ok(Some(genesis_hash.to_owned()))
+    } else {
+        Ok(Some(format!("{} ({genesis_hash})", aliases.join(", "))))
+    }
 }
 
 fn canonicalize_lock_references(plan: &mut Plan) -> Result<()> {
@@ -2209,6 +2227,7 @@ amount = "100"
         .expect("valid plan");
         assert_eq!(plan, sample_plan());
         let rendered = render_plan_preview(&plan, None).expect("preview renders");
+        assert!(rendered.contains("Network:"));
         assert!(rendered.contains("1. Mint 100 CCD"));
         assert!(rendered.contains("2. Create lock @1"));
         assert!(rendered.contains("3. Fund lock @1 with 100 CCD"));
@@ -2442,6 +2461,7 @@ amount = "100"
             render_plan_preview(&loaded, Some(path.as_path())).expect("preview succeeds");
         fs::remove_file(&path).expect("cleanup succeeds");
         assert!(rendered.contains(&format!("Token composition plan: {}", path.display())));
+        assert!(rendered.contains("Network:"));
         assert!(rendered.contains("Fund lock @1 with 100 CCD"));
     }
 

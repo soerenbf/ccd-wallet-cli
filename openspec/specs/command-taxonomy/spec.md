@@ -12,13 +12,14 @@ The repository SHALL include a canonical command taxonomy document at `docs/comm
 - **AND** they can determine which documented command branches are implemented versus planned
 
 ### Requirement: Token operations are documented under the `token` command space
-The canonical command taxonomy SHALL document protocol-level token inspection, protocol-level token transfers, token policy operations, token admin-role changes, token metadata updates, and protocol-level lock operations under the `token` command space, using nested grouping where needed instead of exposing `metaupdate` as a user-facing command path. The documented user-facing branch SHALL use `show` for token inspection, `transfer` for holder transfers, `admin-roles` for token admin-role operations, and `lock show` for lock inspection. For lock fund, send, and return, the token identifier SHALL be documented as `--token` rather than a positional argument.
+The canonical command taxonomy SHALL document protocol-level token inspection, protocol-level token transfers, token policy operations, token admin-role changes, token metadata updates, protocol-level lock operations, and token composition operations under the `token` command space, using nested grouping where needed instead of exposing `metaupdate` as a user-facing command path. The documented user-facing branch SHALL use `show` for token inspection, `transfer` for holder transfers, `admin-roles` for token admin-role operations, `lock show` for lock inspection, and `compose` for token MetaUpdate composition. For lock fund, send, and return, the token identifier SHALL be documented as `--token` rather than a positional argument.
 
 #### Scenario: Contributor reviews token command grouping
 - **WHEN** a contributor reads the token section of `docs/commands.md`
-- **THEN** they can find token show, token transfer, metadata, admin-role, and lock operations grouped under `token`
+- **THEN** they can find token show, token transfer, metadata, admin-role, lock operations, and compose operations grouped under `token`
 - **AND** they can find `token lock show` documented alongside the lock mutation commands
 - **AND** they can see that `token lock fund`, `token lock send`, and `token lock return` accept `--token` for the token identifier
+- **AND** they can find `token compose <PLAN>`, `token compose preview <PLAN>`, and `token compose submit <PLAN>` documented as token composition commands
 - **AND** they do not see `metaupdate` documented as a required user-facing command namespace
 
 ### Requirement: Staking taxonomy groups validator and delegation flows
@@ -85,17 +86,8 @@ The canonical command taxonomy SHALL document Ledger-backed on-chain governance 
 - **THEN** they can see that Ledger governance signing is exclusive for a command invocation
 - **AND** they can see that local governance key vault signatures are not mixed with Ledger signatures
 
-
 ### Requirement: Governance proposal workflow is documented under the governance command space
 The canonical command taxonomy SHALL document a detached governance proposal workflow under the implemented `governance` command space alongside the existing all-in-one `governance update` command.
-
-### Requirement: Identity inspection and export are documented under the identity command space
-The canonical command taxonomy SHALL document `identity show` and `identity export` as implemented identity commands for local identity inspection and explicit JSON export.
-
-#### Scenario: Contributor reviews identity command grouping
-- **WHEN** a contributor reads `docs/commands.md`
-- **THEN** they can find `identity show` and `identity export` documented alongside identity list, issue, and rename commands
-- **AND** they can identify both as implemented commands
 
 #### Scenario: Contributor reviews detached governance proposal command grouping
 - **WHEN** a contributor reads `docs/commands.md`
@@ -106,3 +98,12 @@ The canonical command taxonomy SHALL document `identity show` and `identity expo
 - **WHEN** a contributor reads the governance section of `docs/commands.md`
 - **THEN** they can see that `governance update` remains the all-in-one signing and submission flow
 - **AND** they can see that `governance proposal` is the detached multi-party signing flow
+
+### Requirement: Identity inspection and export are documented under the identity command space
+The canonical command taxonomy SHALL document `identity show` and `identity export` as implemented identity commands for local identity inspection and explicit JSON export.
+
+#### Scenario: Contributor reviews identity command grouping
+- **WHEN** a contributor reads `docs/commands.md`
+- **THEN** they can find `identity show` and `identity export` documented alongside identity list, issue, and rename commands
+- **AND** they can identify both as implemented commands
+
