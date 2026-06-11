@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Token compose command opens a persistent interactive composer
-The CLI SHALL provide `ccd-wallet token compose <PLAN>` to create or continue a token composition plan at the supplied TOML file path. When creating a new plan or opening a plan without a stored network genesis hash, the composer SHALL prompt for explicit network selection before accepting composer commands and SHALL save the selected network genesis hash into the plan. The composer SHALL use a Reedline-backed command loop for command entry, in-session help, history, completions, and Ctrl-C handling. Before executing each non-empty composer command, the composer SHALL reload the plan from disk so manual edits are reflected. Missing non-secret operation fields and confirmations SHALL use `cliclack` prompts.
+The CLI SHALL provide `ccd-wallet token compose <PLAN>` to create or continue a token composition plan at the supplied TOML file path. When creating a new plan or opening a plan without a stored network genesis hash, the composer SHALL prompt for explicit network selection before accepting composer commands and SHALL save the selected network genesis hash into the plan. The composer SHALL use a Reedline-backed command loop for command entry, in-session help, history, completions, and Ctrl-C handling. Before executing each non-empty composer command, the composer SHALL reload the plan from disk so manual edits are reflected. The composer SHALL provide tab completion for top-level commands, nested operation commands, context-appropriate flags, lock references, and `@sender`. Missing non-secret operation fields and confirmations SHALL use `cliclack` prompts.
 
 #### Scenario: User starts a new composition plan
 - **WHEN** a user runs `ccd-wallet token compose plan.toml`
@@ -25,6 +25,14 @@ The CLI SHALL provide `ccd-wallet token compose <PLAN>` to create or continue a 
 #### Scenario: User requests help in the composer
 - **WHEN** a user enters `help` or `?` in the interactive composer
 - **THEN** the composer displays available commands and examples for adding token and lock operations
+
+#### Scenario: User requests command completion
+- **WHEN** a user requests completion in the interactive composer
+- **THEN** the composer suggests matching top-level commands, nested operation commands, and flags for the current command context
+
+#### Scenario: User requests reference completion
+- **WHEN** a user requests completion for a value starting with `@`
+- **THEN** the composer suggests `@sender`, `@`, and explicit same-plan lock references such as `@1` and `@2` based on the current saved plan
 
 ### Requirement: Compose records all token and lock MetaUpdate operation families
 The interactive composer SHALL let users add every user-facing token and lock MetaUpdate operation family to the plan through top-level operation commands: token transfer, mint, burn, pause, unpause, allow-list add/remove, deny-list add/remove, admin-roles assign/revoke, metadata update, lock create, lock fund, lock send, lock return, and lock cancel. Operation commands SHALL accept inline arguments where supplied and SHALL prompt for missing required non-secret fields in interactive mode. Before saving an added operation, the composer SHALL bind the plan to a network genesis hash, resolve any local account labels in the operation to raw account addresses, preserve the special `@sender` account reference where supplied, validate referenced tokens against the bound network, and validate token amounts against each token's configured decimals.

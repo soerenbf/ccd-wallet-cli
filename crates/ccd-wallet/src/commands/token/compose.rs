@@ -26,7 +26,11 @@ use concordium_rust_sdk::{
     },
     protocol_level_tokens::lock_client,
 };
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{
+    Completer, DefaultPrompt, EditCommand, Emacs, IdeMenu, KeyCode, KeyModifiers, Keybindings,
+    MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Span, Suggestion,
+    default_emacs_keybindings,
+};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, fmt, fs, path::Path, str::FromStr};
@@ -491,7 +495,14 @@ async fn run_composer(conn: &Connection, plan_path: &Path) -> Result<()> {
     ))?;
     println!("Type 'help' or '?' for commands. Type 'exit' or press Ctrl-C to quit.");
 
-    let mut line_editor = Reedline::create();
+    let mut line_editor = Reedline::create()
+        .with_completer(Box::new(ComposeCompleter {
+            plan_path: plan_path.to_owned(),
+        }))
+        .with_menu(ReedlineMenu::EngineCompleter(Box::new(
+            IdeMenu::default().with_name("completion_menu"),
+        )))
+        .with_edit_mode(Box::new(Emacs::new(composer_keybindings())));
     let prompt = DefaultPrompt::default();
     while let Signal::Success(line) = line_editor.read_line(&prompt)? {
         match handle_repl_line(conn, plan_path, &mut plan, &line).await {
@@ -1020,6 +1031,184 @@ async fn handle_repl_line(
         }
     }
     Ok(ReplControl::Continue)
+}
+
+fn composer_keybindings() -> Keybindings {
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    keybindings.add_binding(
+        KeyModifiers::ALT,
+        KeyCode::Enter,
+        ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+    );
+    keybindings
+}
+
+#[derive(Debug, Clone)]
+struct ComposeCompleter {
+    plan_path: std::path::PathBuf,
+}
+
+impl Completer for ComposeCompleter {
+    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+        complete_compose_line(line, pos, Some(self.plan_path.as_path()))
+    }
+}
+
+fn complete_compose_line(line: &str, pos: usize, plan_path: Option<&Path>) -> Vec<Suggestion> {
+    let pos = pos.min(line.len());
+    let prefix = &line[..pos];
+    let (word_start, current_word) = completion_word(prefix);
+    let words = shlex::split(prefix).unwrap_or_else(|| {
+        prefix
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let candidates = completion_candidates(&words, current_word, plan_path);
+    candidates
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(current_word))
+        .map(|candidate| Suggestion {
+            value: candidate,
+            description: None,
+            style: None,
+            extra: None,
+            span: Span {
+                start: word_start,
+                end: pos,
+            },
+            append_whitespace: true,
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn completion_word(prefix: &str) -> (usize, &str) {
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(index, ch)| index + ch.len_utf8())
+        .unwrap_or(0);
+    (start, &prefix[start..])
+}
+
+fn completion_candidates(
+    words: &[String],
+    current_word: &str,
+    plan_path: Option<&Path>,
+) -> Vec<String> {
+    if current_word.starts_with('@') {
+        return account_and_lock_reference_candidates(plan_path);
+    }
+    if current_word.starts_with("--") {
+        return flag_candidates(words);
+    }
+    match words {
+        [] => top_level_command_candidates(),
+        [first] if !current_word.is_empty() && first == current_word => {
+            top_level_command_candidates()
+        }
+        [first] => nested_command_candidates(first),
+        [first, second] if second == current_word => nested_command_candidates(first),
+        _ => Vec::new(),
+    }
+}
+
+fn top_level_command_candidates() -> Vec<String> {
+    [
+        "transfer",
+        "mint",
+        "burn",
+        "pause",
+        "unpause",
+        "allow-list",
+        "deny-list",
+        "admin-roles",
+        "metadata",
+        "lock",
+        "preview",
+        "submit",
+        "help",
+        "exit",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn nested_command_candidates(first: &str) -> Vec<String> {
+    match first {
+        "allow-list" | "deny-list" => vec!["add".to_owned(), "remove".to_owned()],
+        "admin-roles" => vec!["assign".to_owned(), "revoke".to_owned()],
+        "metadata" => vec!["update".to_owned()],
+        "lock" => vec![
+            "create".to_owned(),
+            "fund".to_owned(),
+            "send".to_owned(),
+            "return".to_owned(),
+            "cancel".to_owned(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn flag_candidates(words: &[String]) -> Vec<String> {
+    let first = words.first().map(String::as_str);
+    let second = words.get(1).map(String::as_str);
+    let flags: &[&str] = match (first, second) {
+        (Some("transfer"), _) => &["--token", "--recipient", "--amount"],
+        (Some("mint" | "burn"), _) => &["--token", "--amount"],
+        (Some("pause" | "unpause"), _) => &["--token"],
+        (Some("allow-list" | "deny-list"), Some("add" | "remove")) => &["--token", "--target"],
+        (Some("admin-roles"), Some("assign" | "revoke")) => &["--token", "--target", "--role"],
+        (Some("metadata"), Some("update")) => &["--token", "--url", "--checksum-sha256"],
+        (Some("lock"), Some("create")) => &[
+            "--recipient",
+            "--expiry",
+            "--grant",
+            "--token",
+            "--keep-alive",
+        ],
+        (Some("lock"), Some("fund")) => &["--token", "--amount"],
+        (Some("lock"), Some("send")) => &["--source", "--recipient", "--token", "--amount"],
+        (Some("lock"), Some("return")) => &["--source", "--token", "--amount"],
+        (Some("submit"), _) => &[
+            "--sender",
+            "--network",
+            "--node",
+            "--no-wait",
+            "--non-interactive",
+            "--no-defaults",
+        ],
+        _ => &[],
+    };
+    flags.iter().map(|flag| (*flag).to_owned()).collect()
+}
+
+fn account_and_lock_reference_candidates(plan_path: Option<&Path>) -> Vec<String> {
+    let mut candidates = vec!["@sender".to_owned(), "@".to_owned()];
+    if let Some(plan_path) = plan_path
+        && let Ok(plan) = read_plan(plan_path)
+    {
+        let lock_count = plan
+            .operations
+            .iter()
+            .filter(|operation| operation.is_lock_create())
+            .count();
+        candidates.extend((1..=lock_count).map(|index| format!("@{index}")));
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 #[derive(Debug, Clone)]
@@ -2078,6 +2267,52 @@ amount = "100"
     fn local_lock_recipient_lookup_returns_recipients() {
         let recipients = nth_lock_create_recipients(&sample_plan(), 1).expect("recipients resolve");
         assert_eq!(recipients, vec!["bob".to_owned()]);
+    }
+
+    #[test]
+    fn completes_top_level_commands_and_context_flags() {
+        let commands = complete_compose_line("mi", 2, None)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(commands.contains(&"mint".to_owned()));
+
+        let flags = complete_compose_line("lock create --", 14, None)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(flags.contains(&"--recipient".to_owned()));
+        assert!(flags.contains(&"--keep-alive".to_owned()));
+    }
+
+    #[test]
+    fn completes_plan_lock_references() {
+        let mut path = std::env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock ok")
+            .as_nanos();
+        path.push(format!("ccd-wallet-compose-complete-test-{unique}.toml"));
+        let mut plan = sample_plan();
+        plan.operations.push(PlanOperation::LockCreate {
+            recipients: vec!["carol".to_owned()],
+            expiry: "60d".to_owned(),
+            grants: vec![PlanLockGrant {
+                account: "alice".to_owned(),
+                capabilities: vec!["fund".to_owned()],
+            }],
+            tokens: vec!["CCD".to_owned()],
+            keep_alive: false,
+        });
+        save_plan_atomic(&path, &plan).expect("save succeeds");
+        let refs = complete_compose_line("lock fund @", 11, Some(path.as_path()))
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        fs::remove_file(&path).expect("cleanup succeeds");
+        assert!(refs.contains(&"@sender".to_owned()));
+        assert!(refs.contains(&"@1".to_owned()));
+        assert!(refs.contains(&"@2".to_owned()));
     }
 
     #[test]

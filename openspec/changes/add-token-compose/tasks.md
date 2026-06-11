@@ -80,3 +80,11 @@
 - [x] 9.7 Reload the plan from disk before executing each non-empty interactive composer command.
 - [x] 9.8 Prompt for keep-alive in both composer lock create and token lock create when `--keep-alive` is omitted interactively.
 - [x] 9.9 Infer submit network from the plan genesis hash and resolve `@sender` account lists during submit.
+
+## 10. Composer Completion
+
+- [x] 10.1 Add a Reedline completer for composer top-level commands and nested operation commands.
+- [x] 10.2 Make completion context-aware for operation and submit flags.
+- [x] 10.3 Add plan-aware completions for `@`, `@N`, and `@sender` based on the saved plan.
+- [x] 10.4 Add completer unit tests.
+- [x] 10.5 Run `cargo fmt`, `cargo test -p ccd-wallet`, and `openspec validate add-token-compose`.
