@@ -79,3 +79,4 @@
 - [x] 9.6 Run `cargo fmt`, `cargo test -p ccd-wallet`, and `openspec validate add-token-compose`.
 - [x] 9.7 Reload the plan from disk before executing each non-empty interactive composer command.
 - [x] 9.8 Prompt for keep-alive in both composer lock create and token lock create when `--keep-alive` is omitted interactively.
+- [x] 9.9 Infer submit network from the plan genesis hash and resolve `@sender` account lists during submit.

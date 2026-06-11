@@ -78,6 +78,11 @@ pub(super) async fn resolve_mutation_context(
 ) -> Result<MutationContext> {
     let (network_name, network_entry, endpoint, endpoint_label, network_source) =
         resolve_account_network_context(conn, network, node, non_interactive, no_defaults).await?;
+    log_resolved_context(&[ContextLine {
+        label: "network:",
+        value: format!("{network_name} @ {endpoint_label}"),
+        source: network_source,
+    }])?;
     let account = resolve_export_account(
         conn,
         &network_name,
@@ -86,11 +91,6 @@ pub(super) async fn resolve_mutation_context(
         non_interactive,
         always_prompt_account,
     )?;
-    log_resolved_context(&[ContextLine {
-        label: "network:",
-        value: format!("{network_name} @ {endpoint_label}"),
-        source: network_source,
-    }])?;
     let mut account_unlocks = AccountReferenceUnlocks::new();
     let wallet = build_export_wallet_account_with_unlocks(
         conn,

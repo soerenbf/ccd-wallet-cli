@@ -147,7 +147,7 @@ The CLI SHALL provide `ccd-wallet token compose preview <PLAN>` to render the or
 - **THEN** the composer prints the same operation-list preview for the current plan file
 
 ### Requirement: Compose submit submits a plan as one MetaUpdate transaction
-The CLI SHALL provide `ccd-wallet token compose submit <PLAN> --sender <LABEL> ...` to resolve and submit a token composition plan as one protocol-level token MetaUpdate account transaction. Submit SHALL resolve network and node context, signer account, token amounts, existing lock IDs, and same-plan `@N` lock references before presenting a final confirmation and submitting the transaction. In interactive mode, submit SHALL always require explicit sender selection when no sender is supplied, even if only one account is available. Submit SHALL reject plans whose stored network genesis hash does not match the selected network.
+The CLI SHALL provide `ccd-wallet token compose submit <PLAN> --sender <LABEL> ...` to resolve and submit a token composition plan as one protocol-level token MetaUpdate account transaction. Submit SHALL resolve network and node context, signer account, token amounts, existing lock IDs, and same-plan `@N` lock references before presenting a final confirmation and submitting the transaction. When neither `--network` nor `--node` is supplied, submit SHALL infer the network from the plan's stored genesis hash instead of prompting for network selection. In interactive mode, submit SHALL always require explicit sender selection when no sender is supplied, even if only one account is available. Submit SHALL reject plans whose stored network genesis hash does not match the selected network.
 
 #### Scenario: User submits a saved plan
 - **WHEN** a user runs `ccd-wallet token compose submit plan.toml --sender alice --network testnet`
@@ -155,6 +155,12 @@ The CLI SHALL provide `ccd-wallet token compose submit <PLAN> --sender <LABEL> .
 - **THEN** the CLI resolves the plan using Alice as the signing account on testnet
 - **AND** submits all planned operations as a single MetaUpdate transaction after confirmation
 - **AND** reports the submitted transaction hash
+
+#### Scenario: User submits without network flag
+- **WHEN** a user runs `ccd-wallet token compose submit plan.toml`
+- **AND** `plan.toml` contains a valid token composition plan with a stored network genesis hash
+- **THEN** the CLI infers a configured network matching that genesis hash
+- **AND** does not prompt for network selection
 
 #### Scenario: Submit rejects wrong network
 - **WHEN** a user submits a composition plan with a stored network genesis hash

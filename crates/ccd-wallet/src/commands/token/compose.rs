@@ -65,10 +65,16 @@ pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> R
         bail!("token composition plan has no operations to submit");
     }
 
+    let inferred_network = if args.network.is_none() && args.node.is_none() {
+        Some(plan_network_name(&plan)?)
+    } else {
+        None
+    };
+    let network = args.network.as_deref().or(inferred_network.as_deref());
     let mut context = shared::resolve_mutation_context(
         conn,
         args.sender.as_deref(),
-        args.network.as_deref(),
+        network,
         args.node,
         args.non_interactive,
         args.no_defaults,
@@ -115,6 +121,24 @@ fn validate_submit_args(args: &TokenComposeSubmitArgs) -> Result<()> {
         bail!("sender must be provided with --sender in --non-interactive mode");
     }
     Ok(())
+}
+
+fn plan_network_name(plan: &Plan) -> Result<String> {
+    let genesis_hash = plan
+        .network_genesis_hash
+        .as_deref()
+        .context("token composition plan is missing network genesis hash")?;
+    let app_config = app_config::load()?;
+    let mut matches = app_config
+        .networks
+        .iter()
+        .filter(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.into_iter().next().with_context(|| {
+        format!("no configured network matches token composition genesis hash {genesis_hash}")
+    })
 }
 
 fn validate_plan_network_matches_context(
@@ -413,7 +437,10 @@ fn resolve_accounts(
     values: &[String],
     label: &str,
 ) -> Result<Vec<AccountAddress>> {
-    shared::parse_account_addresses(conn, context, values, label)
+    values
+        .iter()
+        .map(|value| resolve_account(conn, context, value, label))
+        .collect()
 }
 
 fn parse_admin_roles(
