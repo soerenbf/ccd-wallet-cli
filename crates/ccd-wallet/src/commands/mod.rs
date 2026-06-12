@@ -8,6 +8,7 @@ pub mod ledger;
 pub(crate) mod ledger_construction;
 pub mod node;
 pub mod seed;
+pub mod stake;
 pub mod token;
 pub mod transaction;
 pub(crate) mod ui;

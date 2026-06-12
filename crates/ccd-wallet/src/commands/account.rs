@@ -5,6 +5,9 @@ use crate::{
     },
     commands::{
         ledger_construction::{self, LedgerCredentialDeploymentInput},
+        stake::shared::{
+            StakeDetailsView, render_stake_details_lines, stake_details_view_from_account_info,
+        },
         ui::{
             ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_always,
             fuzzy_select_or_single, log_resolved_context, select_or_single,
@@ -264,6 +267,7 @@ struct AccountShowProtocolView {
     credential_count: usize,
     threshold: String,
     staking: String,
+    staking_details: Option<StakeDetailsView>,
 }
 
 impl AccountShowView {
@@ -310,16 +314,17 @@ impl AccountShowView {
             .iter()
             .map(account_show_token_view)
             .collect::<Result<Vec<_>>>()?;
+        let staking_details = stake_details_view_from_account_info(info);
         let protocol = Some(AccountShowProtocolView {
             account_index: format!("{}", info.account_index),
             nonce: format!("{}", info.account_nonce),
             credential_count: info.account_credentials.len(),
             threshold: u8::from(info.account_threshold).to_string(),
-            staking: if info.account_stake.is_some() {
-                "configured".to_owned()
-            } else {
-                "none".to_owned()
-            },
+            staking: staking_details
+                .as_ref()
+                .map(|details| details.mode.clone())
+                .unwrap_or_else(|| "none".to_owned()),
+            staking_details,
         });
         Ok(Self {
             network,
@@ -440,7 +445,7 @@ fn local_metadata_for_record(
     })
 }
 
-fn decrypt_local_account_address(
+pub(crate) fn decrypt_local_account_address(
     conn: &Connection,
     network_name: &str,
     record: &accounts::AccountRecord,
@@ -578,6 +583,13 @@ fn render_account_show(view: &AccountShowView, verbose: bool) -> String {
         lines.push(format!("  credentials: {}", protocol.credential_count));
         lines.push(format!("  signature threshold: {}", protocol.threshold));
         lines.push(format!("  staking: {}", protocol.staking));
+        if protocol.staking_details.is_some() {
+            lines.extend(
+                render_stake_details_lines(protocol.staking_details.as_ref())
+                    .into_iter()
+                    .map(|line| format!("  {line}")),
+            );
+        }
     }
 
     lines.join("\n")
@@ -3365,6 +3377,7 @@ mod tests {
                 credential_count: 1,
                 threshold: "1".to_owned(),
                 staking: "none".to_owned(),
+                staking_details: None,
             }),
         };
         let default = render_account_show(&view, false);

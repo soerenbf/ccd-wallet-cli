@@ -42,6 +42,8 @@ pub enum Command {
     Token(Box<TokenCommand>),
     /// Governance key management commands.
     Governance(Box<GovernanceCommand>),
+    /// Staking inspection and mutation commands.
+    Stake(Box<StakeCommand>),
 
     // --- Misc ---
     /// Start a temporary browser pairing session.
@@ -980,6 +982,164 @@ pub struct AccountRenameArgs {
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StakeCommand {
+    #[command(subcommand)]
+    pub command: StakeSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StakeSubcommand {
+    /// Show live staking details for a local account label or account address.
+    Show(Box<StakeShowArgs>),
+    /// Configure staking behavior.
+    Configure(Box<StakeConfigureCommand>),
+    /// Remove the current staking configuration.
+    Remove(Box<StakeRemoveArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct StakeConfigureCommand {
+    #[command(subcommand)]
+    pub command: StakeConfigureSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StakeConfigureSubcommand {
+    /// Configure delegation settings with a patch-style payload.
+    Delegation(Box<StakeConfigureDelegationArgs>),
+    /// Reserved validator-configuration branch for future work.
+    Validator(Box<StakeConfigureValidatorArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct StakeShowArgs {
+    /// Local account label or Concordium account address to inspect.
+    #[arg(value_name = "ACCOUNT")]
+    pub account: String,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Block selector to query. Defaults to the last finalized block.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StakeConfigureDelegationArgs {
+    /// Local account label to configure. If omitted, interactive mode opens an account selector after network resolution.
+    #[arg(value_name = "ACCOUNT")]
+    pub account: Option<String>,
+
+    /// Delegate to a specific validator pool.
+    #[arg(
+        long = "validator",
+        value_name = "VALIDATOR_ID",
+        conflicts_with = "passive"
+    )]
+    pub validator: Option<u64>,
+
+    /// Delegate to passive delegation.
+    #[arg(long = "passive", conflicts_with = "validator")]
+    pub passive: bool,
+
+    /// Set delegated capital as a decimal CCD value.
+    #[arg(long = "capital", value_name = "CCD")]
+    pub capital: Option<String>,
+
+    /// Enable restaking of delegation earnings.
+    #[arg(long = "restake", conflicts_with = "no_restake")]
+    pub restake: bool,
+
+    /// Disable restaking of delegation earnings.
+    #[arg(long = "no-restake", conflicts_with = "restake")]
+    pub no_restake: bool,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Skip pre-submission validator and delegation-capital validation.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StakeConfigureValidatorArgs {
+    /// Local account label to configure. If omitted, interactive mode opens an account selector after network resolution.
+    #[arg(value_name = "ACCOUNT")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct StakeRemoveArgs {
+    /// Local account label to remove staking from. If omitted, interactive mode opens an account selector after network resolution.
+    #[arg(value_name = "ACCOUNT")]
+    pub account: Option<String>,
+
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
+    pub node: Option<v2::Endpoint>,
+
+    /// Return after successful submission without waiting for finalization.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
+
+    /// Disable prompt fallback and require all values on the command line.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Disable silent use of active network defaults and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2369,6 +2529,95 @@ mod tests {
                 other => panic!("expected account show command, got {other:?}"),
             },
             other => panic!("expected account command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stake_show_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "stake",
+            "show",
+            "alice",
+            "--network",
+            "testnet",
+            "--block",
+            "last-final",
+        ]);
+
+        match cli.command {
+            Command::Stake(command) => match command.command {
+                StakeSubcommand::Show(args) => {
+                    assert_eq!(args.account, "alice");
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert_eq!(args.block.as_deref(), Some("last-final"));
+                }
+                other => panic!("expected stake show command, got {other:?}"),
+            },
+            other => panic!("expected stake command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stake_configure_delegation_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "stake",
+            "configure",
+            "delegation",
+            "alice",
+            "--validator",
+            "42",
+            "--capital",
+            "0",
+            "--no-restake",
+            "--network",
+            "testnet",
+            "--no-wait",
+        ]);
+
+        match cli.command {
+            Command::Stake(command) => match command.command {
+                StakeSubcommand::Configure(args) => match args.command {
+                    StakeConfigureSubcommand::Delegation(args) => {
+                        assert_eq!(args.account.as_deref(), Some("alice"));
+                        assert_eq!(args.validator, Some(42));
+                        assert_eq!(args.capital.as_deref(), Some("0"));
+                        assert!(args.no_restake);
+                        assert_eq!(args.network.as_deref(), Some("testnet"));
+                        assert!(args.no_wait);
+                        assert!(!args.no_validate);
+                    }
+                    other => panic!("expected stake configure delegation command, got {other:?}"),
+                },
+                other => panic!("expected stake configure command, got {other:?}"),
+            },
+            other => panic!("expected stake command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_stake_remove_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "stake",
+            "remove",
+            "alice",
+            "--network",
+            "testnet",
+            "--non-interactive",
+        ]);
+
+        match cli.command {
+            Command::Stake(command) => match command.command {
+                StakeSubcommand::Remove(args) => {
+                    assert_eq!(args.account.as_deref(), Some("alice"));
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.non_interactive);
+                }
+                other => panic!("expected stake remove command, got {other:?}"),
+            },
+            other => panic!("expected stake command, got {other:?}"),
         }
     }
 

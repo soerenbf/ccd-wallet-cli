@@ -86,6 +86,12 @@ ccd-wallet
 │  │  ├─ sign
 │  │  └─ submit
 │  └─ update
+├─ stake                        [Implemented]
+│  ├─ show
+│  ├─ configure
+│  │  ├─ delegation
+│  │  └─ validator              [Reserved / not yet implemented]
+│  └─ remove
 ├─ token                        [Implemented]
 │  ├─ show
 │  ├─ transfer
@@ -138,17 +144,25 @@ The `seed` command family remains the user-facing place for seed phrase manageme
 
 The following command spaces are planned taxonomy targets. They are documented here so future implementation work stays consistent with the intended CLI structure.
 
-### `stake` [Planned]
+### `stake` [Implemented]
 
-The staking area should be grouped by **validator** and **delegation** flows rather than as a flat collection of stake actions.
+The staking area is grouped under a top-level `stake` command space with generic inspection and removal actions plus a nested configuration area.
 
 ```text
 stake
-├─ validator
-│  └─ ...modern validator configuration flows...
-└─ delegation
-   └─ ...delegation configuration flows...
+├─ show <ACCOUNT>
+├─ configure
+│  ├─ delegation <ACCOUNT>
+│  └─ validator <ACCOUNT>       [Reserved / not yet implemented]
+└─ remove <ACCOUNT>
 ```
+
+#### Implemented stake commands
+
+- `stake show <ACCOUNT>` queries live account staking state for either a finalized local account label or a raw account address.
+- `stake configure delegation <ACCOUNT>` submits modern `ConfigureDelegation` transactions with patch-style updates for delegation target, capital, and restake behavior.
+- `stake remove <ACCOUNT>` removes the currently configured staking mode, whether the account is delegating or validating.
+- `stake configure validator <ACCOUNT>` is reserved as the validator-oriented configuration branch for future work and is not implemented yet.
 
 #### Validator branch rules
 

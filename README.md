@@ -301,6 +301,25 @@ By default, `account new` waits until the credential deployment finalizes and th
 
 If loopback callbacks are not available in your environment, use `--manual-callback` to keep the browser handoff fully manual. In manual mode, the CLI prints the browser URL and asks you to paste the final redirect URL containing `#code_uri=` (or `#error=`) back into the terminal using the same interactive prompt framework.
 
+### Example: inspect and manage stake
+
+```bash
+cargo run -p ccd-wallet -- stake show alice --network testnet
+cargo run -p ccd-wallet -- stake show 4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd --network testnet
+cargo run -p ccd-wallet -- stake configure delegation alice --network testnet --validator 42 --capital 1000 --restake
+cargo run -p ccd-wallet -- stake configure delegation alice --network testnet --passive --capital 0 --no-restake
+cargo run -p ccd-wallet -- stake remove alice --network testnet
+cargo run -p ccd-wallet -- account show alice --network testnet --verbose
+```
+
+`stake show <ACCOUNT>` queries live staking state for either a finalized local account label or a raw Concordium account address. It renders whether the account is delegating or validating, the staked amount, restake state, current delegation target or validator id, validator pool details when available, and any pending stake reduction or removal returned by the chain. Raw-address inspection is read-only and does not unlock local wallet secrets.
+
+`stake configure delegation <ACCOUNT>` submits a modern `ConfigureDelegation` transaction for the selected local signing account. The command accepts patch-style changes for delegation target, delegated capital, and restake behavior, and interactive runs can fill in omitted fields through prompts. Validator-targeted changes are prevalidated against the live validator set before submission. If the selected account is currently validating, the confirmation step calls out the validator-to-delegator transition explicitly.
+
+`stake remove <ACCOUNT>` removes the current staking mode for the selected local signing account. The wallet inspects live chain state first and then submits either delegation removal or validator removal with mode-specific confirmation wording. Like other mutating commands, both stake mutation flows support `--no-wait` to return after submission instead of waiting for finalization.
+
+`account show <ACCOUNT> --verbose` now includes staking-aware protocol details. When staking is configured, verbose account inspection distinguishes validator staking from delegated staking and shows the same target, restake, and pending-change details surfaced by `stake show`.
+
 ### Example: import, inspect, and remove governance keys
 
 ```bash
