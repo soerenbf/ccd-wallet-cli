@@ -1,8 +1,5 @@
-# stake-command-execution Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change add-stake-delegation-commands. Update Purpose after archive.
-## Requirements
 ### Requirement: Stake inspection command
 The CLI SHALL provide a `ccd-wallet stake show <ACCOUNT>` command that resolves either a stored local account label or a raw account address on the selected network or node and renders the account's current staking mode and staking details from live chain state.
 
@@ -123,31 +120,6 @@ When `<ACCOUNT>` is supplied interactively without an explicit network, the comm
 - **THEN** the CLI exits with an actionable error explaining that a local account label is required for signing
 - **AND** does not submit a transaction
 
-### Requirement: Validator targets are validated before submission
-The CLI SHALL validate validator-targeted delegation changes against live chain state before submitting a `ConfigureDelegation` transaction.
-
-#### Scenario: Known validator id is accepted
-- **WHEN** the user runs `ccd-wallet stake configure delegation alice --validator 42 ...`
-- **AND** validator `42` exists on the selected network
-- **THEN** the CLI accepts the validator id for submission
-
-#### Scenario: Unknown validator id is rejected before submission
-- **WHEN** the user runs `ccd-wallet stake configure delegation alice --validator 999999 ...`
-- **AND** validator `999999` does not exist on the selected network
-- **THEN** the CLI exits with a non-zero status
-- **AND** prints an actionable error indicating that the validator id is not valid on the selected network
-- **AND** does not submit a transaction
-
-### Requirement: Validator-to-delegator switching is supported explicitly
-The CLI SHALL allow a currently validating account to switch into delegation through the delegation configuration flow when the chain supports the requested change.
-
-#### Scenario: Validator account switches to delegation
-- **WHEN** the user runs `ccd-wallet stake configure delegation validator-1 --network testnet --validator 42 --capital 1000 --restake`
-- **AND** `validator-1` currently has validator staking configured
-- **AND** the requested delegation configuration is otherwise valid
-- **THEN** the CLI presents the change as a staking-mode transition during confirmation
-- **AND** submits a `ConfigureDelegation` transaction when the user approves
-
 ### Requirement: Generic stake removal command
 The CLI SHALL provide a user-facing `ccd-wallet stake remove <ACCOUNT>` command that removes the account's currently configured staking mode.
 
@@ -174,4 +146,3 @@ When `<ACCOUNT>` is supplied interactively without an explicit network, the comm
 - **AND** `<ADDRESS>` is a raw Concordium account address
 - **THEN** the CLI exits with an actionable error explaining that a local account label is required for signing
 - **AND** does not submit a transaction
-

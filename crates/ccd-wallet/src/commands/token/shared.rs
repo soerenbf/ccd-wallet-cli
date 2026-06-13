@@ -3,8 +3,8 @@
 use crate::commands::{
     account::{
         AccountReferenceContext, AccountReferenceUnlocks, build_export_wallet_account_with_unlocks,
-        resolve_account_network_context, resolve_account_reference, resolve_account_references,
-        resolve_export_account,
+        local_account_context_lines, resolve_account_network_context, resolve_account_reference,
+        resolve_account_references, resolve_signing_account_context,
     },
     transaction::render::render_finalized_summary,
     ui::{
@@ -76,21 +76,35 @@ pub(super) async fn resolve_mutation_context(
     no_defaults: bool,
     always_prompt_account: bool,
 ) -> Result<MutationContext> {
-    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
-        resolve_account_network_context(conn, network, node, non_interactive, no_defaults).await?;
-    log_resolved_context(&[ContextLine {
-        label: "network:",
-        value: format!("{network_name} @ {endpoint_label}"),
-        source: network_source,
-    }])?;
-    let account = resolve_export_account(
+    let (network_context, selection) = resolve_signing_account_context(
         conn,
-        &network_name,
-        &network_entry.genesis_hash,
         account,
+        network,
+        node,
         non_interactive,
+        no_defaults,
         always_prompt_account,
-    )?;
+    )
+    .await?;
+    let mut lines = vec![ContextLine {
+        label: "network:",
+        value: format!(
+            "{} @ {}",
+            network_context.network_name, network_context.endpoint_label
+        ),
+        source: network_context.source,
+    }];
+    lines.extend(local_account_context_lines(
+        conn,
+        &selection.record,
+        selection.source,
+    )?);
+    log_resolved_context(&lines)?;
+    let account = selection.record;
+    let network_name = network_context.network_name;
+    let network_entry = network_context.network_entry;
+    let endpoint = network_context.endpoint;
+    let endpoint_label = network_context.endpoint_label;
     let mut account_unlocks = AccountReferenceUnlocks::new();
     let wallet = build_export_wallet_account_with_unlocks(
         conn,

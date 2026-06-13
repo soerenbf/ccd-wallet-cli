@@ -783,6 +783,7 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
                     seed_scope: seed_scope.as_ref(),
                     always_prompt: false,
                     show_network: true,
+                    preferred_network_name: None,
                 },
             )?
         }
@@ -1055,6 +1056,588 @@ fn network_names_by_genesis_hash() -> Result<BTreeMap<String, String>> {
         .collect())
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedNetworkContext {
+    pub(crate) network_name: String,
+    pub(crate) network_entry: NetworkEntry,
+    pub(crate) endpoint: v2::Endpoint,
+    pub(crate) endpoint_label: String,
+    pub(crate) source: ResolutionSource,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedAccountSelection {
+    pub(crate) record: accounts::AccountRecord,
+    pub(crate) source: ResolutionSource,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveNetworkPreference {
+    name: String,
+    genesis_hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountNetworkResolutionPlan<'a> {
+    UseExistingNetworkResolution,
+    UseAccountAssistedLabel(&'a str),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DefaultNetworkResolutionPlan<'a> {
+    Selected {
+        network_name: String,
+        source: ResolutionSource,
+    },
+    Prompt {
+        active_network_name: Option<&'a str>,
+    },
+}
+
+fn finalized_local_accounts_by_label(
+    conn: &Connection,
+    label: &str,
+    network_genesis_hash: Option<&str>,
+) -> Result<Vec<accounts::AccountRecord>> {
+    let mut matches = accounts::list(conn)?
+        .into_iter()
+        .filter(|record| record.status == accounts::AccountStatus::Finalized)
+        .filter(|record| record.label == label)
+        .filter(|record| {
+            network_genesis_hash
+                .map(|genesis_hash| record.network_genesis_hash == genesis_hash)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        left.network_genesis_hash
+            .cmp(&right.network_genesis_hash)
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(matches)
+}
+
+fn local_account_source_metadata(
+    record: &accounts::AccountRecord,
+    conn: &Connection,
+) -> Result<(&'static str, String)> {
+    if record.source_kind == accounts::AccountSourceKind::Imported {
+        return Ok(("source:", "imported account vault".to_owned()));
+    }
+    let owner = signer_owners::find_by_id(conn, &record.signer_owner_id)?.with_context(|| {
+        format!(
+            "derived account '{}' references unknown key source",
+            record.label
+        )
+    })?;
+    let value = match owner.kind {
+        SignerOwnerKind::Seed => owner.label,
+        SignerOwnerKind::Ledger => format!("{} (Ledger)", owner.label),
+    };
+    Ok(("key source:", value))
+}
+
+pub(crate) fn local_account_context_lines<'a>(
+    conn: &Connection,
+    record: &'a accounts::AccountRecord,
+    source: ResolutionSource,
+) -> Result<Vec<ContextLine<'a>>> {
+    let (metadata_label, metadata_value) = local_account_source_metadata(record, conn)?;
+    Ok(vec![
+        ContextLine {
+            label: "account:",
+            value: record.label.clone(),
+            source,
+        },
+        ContextLine {
+            label: metadata_label,
+            value: metadata_value,
+            source,
+        },
+    ])
+}
+
+fn resolve_configured_network_name_for_genesis_hash(
+    genesis_hash: &str,
+    preferred_name: Option<&str>,
+) -> Result<String> {
+    let app_config = load()?;
+    let mut matches = app_config
+        .networks
+        .into_iter()
+        .filter(|(_, entry)| entry.genesis_hash == genesis_hash)
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        bail!(
+            "no configured network matches local account genesis hash {}",
+            genesis_hash
+        );
+    }
+    matches.sort();
+    if let Some(preferred_name) = preferred_name {
+        if matches.iter().any(|name| name == preferred_name) {
+            return Ok(preferred_name.to_owned());
+        }
+    }
+    Ok(matches.remove(0))
+}
+
+fn plan_account_network_resolution<'a>(
+    explicit: Option<&'a str>,
+    has_explicit_network: bool,
+    has_node_override: bool,
+    non_interactive: bool,
+) -> AccountNetworkResolutionPlan<'a> {
+    if has_explicit_network || has_node_override || non_interactive {
+        return AccountNetworkResolutionPlan::UseExistingNetworkResolution;
+    }
+    let Some(explicit) = explicit else {
+        return AccountNetworkResolutionPlan::UseExistingNetworkResolution;
+    };
+    if AccountAddress::from_str(explicit).is_ok() {
+        AccountNetworkResolutionPlan::UseExistingNetworkResolution
+    } else {
+        AccountNetworkResolutionPlan::UseAccountAssistedLabel(explicit)
+    }
+}
+
+fn plan_default_network_resolution<'a>(
+    app_config: &AppConfig,
+    active_network_name: Option<&'a str>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<DefaultNetworkResolutionPlan<'a>> {
+    if !no_defaults {
+        if let Some(name) = active_network_name {
+            return Ok(DefaultNetworkResolutionPlan::Selected {
+                network_name: name.to_owned(),
+                source: ResolutionSource::ActiveDefault,
+            });
+        }
+        if app_config.networks.len() == 1 {
+            return Ok(DefaultNetworkResolutionPlan::Selected {
+                network_name: app_config
+                    .networks
+                    .keys()
+                    .next()
+                    .cloned()
+                    .context("configured single network was not found")?,
+                source: ResolutionSource::Inferred,
+            });
+        }
+        if non_interactive {
+            bail!(
+                "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
+            );
+        }
+        return Ok(DefaultNetworkResolutionPlan::Prompt {
+            active_network_name: None,
+        });
+    }
+
+    if app_config.networks.len() == 1 {
+        return Ok(DefaultNetworkResolutionPlan::Selected {
+            network_name: app_config
+                .networks
+                .keys()
+                .next()
+                .cloned()
+                .context("configured single network was not found")?,
+            source: ResolutionSource::Inferred,
+        });
+    }
+    if non_interactive {
+        bail!(
+            "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
+        );
+    }
+    Ok(DefaultNetworkResolutionPlan::Prompt {
+        active_network_name,
+    })
+}
+
+async fn resolve_selected_network_context(
+    network_name: String,
+    source: ResolutionSource,
+) -> Result<ResolvedNetworkContext> {
+    let app_config = load()?;
+    let network_entry = app_config
+        .networks
+        .get(&network_name)
+        .cloned()
+        .with_context(|| format!("network '{}' is not registered", network_name))?;
+    let endpoint: v2::Endpoint =
+        ccd_wallet_core::config::normalize_url_string(&network_entry.node_endpoint)
+            .parse()
+            .with_context(|| {
+                format!(
+                    "network '{}' has an invalid stored endpoint: {}",
+                    network_name, network_entry.node_endpoint
+                )
+            })?;
+    let endpoint_label = ccd_wallet_core::config::endpoint_label(&endpoint);
+    let node_genesis_hash = fetch_node_genesis_hash(endpoint.clone(), &endpoint_label).await?;
+    if node_genesis_hash != network_entry.genesis_hash {
+        bail!(
+            "configured node for network '{}' points to genesis hash {}, which does not match the stored network genesis hash {}",
+            network_name,
+            node_genesis_hash,
+            network_entry.genesis_hash
+        );
+    }
+    Ok(ResolvedNetworkContext {
+        network_name,
+        network_entry,
+        endpoint,
+        endpoint_label,
+        source,
+    })
+}
+
+fn resolve_active_network_preference(
+    conn: &Connection,
+    no_defaults: bool,
+) -> Result<Option<ActiveNetworkPreference>> {
+    if no_defaults {
+        return Ok(None);
+    }
+    let Some(name) = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)? else {
+        return Ok(None);
+    };
+    let app_config = load()?;
+    let entry = app_config
+        .networks
+        .get(&name)
+        .with_context(|| format!("active network '{}' is not registered", name))?;
+    Ok(Some(ActiveNetworkPreference {
+        name,
+        genesis_hash: entry.genesis_hash.clone(),
+    }))
+}
+
+fn resolve_matching_local_account_selection(
+    conn: &Connection,
+    label: &str,
+    active_network: Option<&ActiveNetworkPreference>,
+    non_interactive: bool,
+) -> Result<ResolvedAccountSelection> {
+    let key_source_tags_by_id = key_source_tags_by_id(conn)?;
+    let networks_by_hash = network_names_by_genesis_hash()?;
+    let matches = finalized_local_accounts_by_label(conn, label, None)?;
+    if matches.is_empty() {
+        bail!(
+            "account label '{}' is not a finalized local account on any configured network",
+            label
+        );
+    }
+
+    if let Some(active_network) = active_network {
+        let active_matches = matches
+            .iter()
+            .filter(|record| record.network_genesis_hash == active_network.genesis_hash)
+            .cloned()
+            .collect::<Vec<_>>();
+        if active_matches.len() == 1 {
+            return Ok(ResolvedAccountSelection {
+                record: active_matches
+                    .into_iter()
+                    .next()
+                    .expect("single active match"),
+                source: ResolutionSource::ActiveDefault,
+            });
+        }
+        if active_matches.len() > 1 {
+            if non_interactive {
+                bail!(
+                    "account label '{}' is ambiguous across multiple local accounts; rerun interactively",
+                    label
+                );
+            }
+            let record = select_account_fuzzy(
+                conn,
+                active_matches,
+                &key_source_tags_by_id,
+                &networks_by_hash,
+                AccountSelectConfig {
+                    show_addresses: false,
+                    seed_scope: None,
+                    always_prompt: true,
+                    show_network: true,
+                    preferred_network_name: Some(&active_network.name),
+                },
+            )?;
+            return Ok(ResolvedAccountSelection {
+                record,
+                source: ResolutionSource::Prompted,
+            });
+        }
+    }
+
+    if matches.len() == 1 {
+        return Ok(ResolvedAccountSelection {
+            record: matches.into_iter().next().expect("single match"),
+            source: ResolutionSource::Inferred,
+        });
+    }
+    if non_interactive {
+        bail!(
+            "account label '{}' is ambiguous across multiple networks; rerun interactively",
+            label
+        );
+    }
+    let record = select_account_fuzzy(
+        conn,
+        matches,
+        &key_source_tags_by_id,
+        &networks_by_hash,
+        AccountSelectConfig {
+            show_addresses: false,
+            seed_scope: None,
+            always_prompt: true,
+            show_network: true,
+            preferred_network_name: active_network.map(|network| network.name.as_str()),
+        },
+    )?;
+    Ok(ResolvedAccountSelection {
+        record,
+        source: ResolutionSource::Prompted,
+    })
+}
+
+fn resolve_export_account_with_source(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+    explicit_label: Option<&str>,
+    non_interactive: bool,
+    always_prompt: bool,
+) -> Result<ResolvedAccountSelection> {
+    let key_source_tags_by_id = key_source_tags_by_id(conn)?;
+    let networks_by_hash = network_names_by_genesis_hash()?;
+    let candidates = exportable_accounts_for_network(conn, network_genesis_hash)?;
+    match explicit_label {
+        Some(label) => {
+            let matches = candidates
+                .into_iter()
+                .filter(|record| record.label == label)
+                .collect::<Vec<_>>();
+            if matches.is_empty() {
+                bail!(
+                    "finalized account '{}' is not configured on network '{}'",
+                    label,
+                    network_name
+                );
+            }
+            let record = choose_account_match(
+                matches,
+                &key_source_tags_by_id,
+                &networks_by_hash,
+                false,
+                None,
+                conn,
+                non_interactive,
+            )?;
+            Ok(ResolvedAccountSelection {
+                record,
+                source: if non_interactive || explicit_label.is_some() {
+                    ResolutionSource::Explicit
+                } else {
+                    ResolutionSource::Inferred
+                },
+            })
+        }
+        None if non_interactive => {
+            bail!("account label must be provided in --non-interactive mode")
+        }
+        None => {
+            let source = if candidates.len() == 1 && !always_prompt {
+                ResolutionSource::Inferred
+            } else {
+                ResolutionSource::Prompted
+            };
+            let record = select_account_fuzzy(
+                conn,
+                candidates,
+                &key_source_tags_by_id,
+                &networks_by_hash,
+                AccountSelectConfig {
+                    show_addresses: false,
+                    seed_scope: None,
+                    always_prompt,
+                    show_network: false,
+                    preferred_network_name: None,
+                },
+            )?;
+            Ok(ResolvedAccountSelection { record, source })
+        }
+    }
+}
+
+fn resolve_account_reference_record_for_network(
+    conn: &Connection,
+    network_name: &str,
+    network_genesis_hash: &str,
+    value: &str,
+    label: &str,
+) -> Result<accounts::AccountRecord> {
+    let record = accounts::find_by_network_and_label(conn, network_genesis_hash, value)?
+        .with_context(|| {
+            format!(
+                "{label} account reference '{value}' is not a valid address or finalized local account label"
+            )
+        })?;
+    if record.status != accounts::AccountStatus::Finalized {
+        bail!("{label} account reference '{value}' is not finalized")
+    }
+    if record.network_genesis_hash != network_genesis_hash {
+        bail!(
+            "{label} account reference '{}' is not configured on network '{}'",
+            value,
+            network_name
+        );
+    }
+    Ok(record)
+}
+
+pub(crate) async fn resolve_account_reference_network_context(
+    conn: &Connection,
+    network: Option<&str>,
+    node_override: Option<v2::Endpoint>,
+    explicit: Option<&str>,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(ResolvedNetworkContext, Option<ResolvedAccountSelection>)> {
+    match plan_account_network_resolution(
+        explicit,
+        network.is_some(),
+        node_override.is_some(),
+        non_interactive,
+    ) {
+        AccountNetworkResolutionPlan::UseExistingNetworkResolution => {
+            let (network_name, network_entry, endpoint, endpoint_label, source) =
+                resolve_account_network_context(
+                    conn,
+                    network,
+                    node_override,
+                    non_interactive,
+                    no_defaults,
+                )
+                .await?;
+            return Ok((
+                ResolvedNetworkContext {
+                    network_name,
+                    network_entry,
+                    endpoint,
+                    endpoint_label,
+                    source,
+                },
+                None,
+            ));
+        }
+        AccountNetworkResolutionPlan::UseAccountAssistedLabel(explicit) => {
+            let active_network = resolve_active_network_preference(conn, no_defaults)?;
+            let selection = resolve_matching_local_account_selection(
+                conn,
+                explicit,
+                active_network.as_ref(),
+                false,
+            )?;
+            let network_name = resolve_configured_network_name_for_genesis_hash(
+                &selection.record.network_genesis_hash,
+                active_network.as_ref().map(|network| network.name.as_str()),
+            )?;
+            let network_source = match selection.source {
+                ResolutionSource::ActiveDefault => ResolutionSource::ActiveDefault,
+                ResolutionSource::Prompted => ResolutionSource::Prompted,
+                _ => ResolutionSource::Inferred,
+            };
+            return Ok((
+                resolve_selected_network_context(network_name, network_source).await?,
+                Some(selection),
+            ));
+        }
+    }
+}
+
+pub(crate) async fn resolve_signing_account_context(
+    conn: &Connection,
+    account: Option<&str>,
+    network: Option<&str>,
+    node_override: Option<v2::Endpoint>,
+    non_interactive: bool,
+    no_defaults: bool,
+    always_prompt: bool,
+) -> Result<(ResolvedNetworkContext, ResolvedAccountSelection)> {
+    if let Some(account) = account {
+        if AccountAddress::from_str(account).is_ok() {
+            bail!(
+                "transaction senders must be finalized local account labels; raw account addresses cannot provide local signing keys"
+            );
+        }
+    }
+
+    match plan_account_network_resolution(
+        account,
+        network.is_some(),
+        node_override.is_some(),
+        non_interactive,
+    ) {
+        AccountNetworkResolutionPlan::UseExistingNetworkResolution => {
+            let (network_name, network_entry, endpoint, endpoint_label, source) =
+                resolve_account_network_context(
+                    conn,
+                    network,
+                    node_override,
+                    non_interactive,
+                    no_defaults,
+                )
+                .await?;
+            let selection = resolve_export_account_with_source(
+                conn,
+                &network_name,
+                &network_entry.genesis_hash,
+                account,
+                non_interactive,
+                always_prompt,
+            )?;
+            Ok((
+                ResolvedNetworkContext {
+                    network_name,
+                    network_entry,
+                    endpoint,
+                    endpoint_label,
+                    source,
+                },
+                selection,
+            ))
+        }
+        AccountNetworkResolutionPlan::UseAccountAssistedLabel(account_label) => {
+            let active_network = resolve_active_network_preference(conn, no_defaults)?;
+            let selection = resolve_matching_local_account_selection(
+                conn,
+                account_label,
+                active_network.as_ref(),
+                false,
+            )?;
+            let network_name = resolve_configured_network_name_for_genesis_hash(
+                &selection.record.network_genesis_hash,
+                active_network.as_ref().map(|network| network.name.as_str()),
+            )?;
+            let network_source = match selection.source {
+                ResolutionSource::ActiveDefault => ResolutionSource::ActiveDefault,
+                ResolutionSource::Prompted => ResolutionSource::Prompted,
+                _ => ResolutionSource::Inferred,
+            };
+            Ok((
+                resolve_selected_network_context(network_name, network_source).await?,
+                selection,
+            ))
+        }
+    }
+}
+
 fn resolve_network_scope(
     conn: &Connection,
     explicit: Option<&str>,
@@ -1282,7 +1865,7 @@ fn load_account_addresses(
 
 fn render_account_fuzzy_text(
     record: &accounts::AccountRecord,
-    seed_label: &str,
+    key_source_label: &str,
     network_name: &str,
     address: Option<&str>,
     show_network: bool,
@@ -1291,30 +1874,20 @@ fn render_account_fuzzy_text(
         accounts::AccountStatus::Pending => "[pending] ",
         accounts::AccountStatus::Finalized => "",
     };
-    let owner_tag = if record.source_kind == accounts::AccountSourceKind::Imported {
-        "[imported]".to_owned()
-    } else {
-        format!("[{seed_label}]")
-    };
     let label = match address {
-        Some(address) => format!(
-            "{}{} {} ({address})",
-            status_prefix, owner_tag, record.label
-        ),
-        None => format!("{}{} {}", status_prefix, owner_tag, record.label),
+        Some(address) => format!("{status_prefix}{} ({address})", record.label),
+        None => format!("{status_prefix}{}", record.label),
     };
-    let network_suffix = if show_network {
-        format!(" - {network_name}")
-    } else {
-        String::new()
-    };
-    if record.source_kind == accounts::AccountSourceKind::Imported {
-        return format!("{label}{network_suffix}");
+    let mut metadata = Vec::new();
+    if show_network {
+        metadata.push(format!("network:{network_name}"));
     }
-    format!(
-        "{}{} • provider:{} • identity:{} • cred:{}",
-        label, network_suffix, record.ip_identity, record.identity_index, record.credential_counter
-    )
+    if record.source_kind == accounts::AccountSourceKind::Imported {
+        metadata.push("source:imported account vault".to_owned());
+    } else {
+        metadata.push(format!("key source:{key_source_label}"));
+    }
+    format!("{label} — {}", metadata.join(" • "))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1323,6 +1896,52 @@ struct AccountSelectConfig<'a> {
     seed_scope: Option<&'a ScopeSelection>,
     always_prompt: bool,
     show_network: bool,
+    preferred_network_name: Option<&'a str>,
+}
+
+fn build_account_select_items(
+    candidates: &[accounts::AccountRecord],
+    seeds_by_id: &BTreeMap<String, String>,
+    networks_by_hash: &BTreeMap<String, String>,
+    addresses: &BTreeMap<i64, String>,
+    config: AccountSelectConfig<'_>,
+) -> Vec<FuzzySelectItem<i64>> {
+    let mut items = candidates
+        .iter()
+        .map(|record| {
+            let key_source_label = seeds_by_id
+                .get(&record.signer_owner_id)
+                .cloned()
+                .unwrap_or_else(|| "<unknown-key-source>".to_owned());
+            let network_name = networks_by_hash
+                .get(&record.network_genesis_hash)
+                .cloned()
+                .unwrap_or_else(|| record.network_genesis_hash.clone());
+            let preferred = config.preferred_network_name == Some(network_name.as_str());
+            (
+                preferred,
+                network_name.clone(),
+                FuzzySelectItem {
+                    value: record.id,
+                    text: render_account_fuzzy_text(
+                        record,
+                        &key_source_label,
+                        &network_name,
+                        addresses.get(&record.id).map(String::as_str),
+                        config.show_network,
+                    ),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.text.cmp(&right.2.text))
+    });
+    items.into_iter().map(|(_, _, item)| item).collect()
 }
 
 fn select_account_fuzzy(
@@ -1349,29 +1968,13 @@ fn select_account_fuzzy(
     } else {
         BTreeMap::new()
     };
-    let items = candidates
-        .iter()
-        .map(|record| {
-            let seed_label = seeds_by_id
-                .get(&record.signer_owner_id)
-                .cloned()
-                .unwrap_or_else(|| "<unknown-seed>".to_owned());
-            let network_name = networks_by_hash
-                .get(&record.network_genesis_hash)
-                .cloned()
-                .unwrap_or_else(|| record.network_genesis_hash.clone());
-            FuzzySelectItem {
-                value: record.id,
-                text: render_account_fuzzy_text(
-                    record,
-                    &seed_label,
-                    &network_name,
-                    addresses.get(&record.id).map(String::as_str),
-                    config.show_network,
-                ),
-            }
-        })
-        .collect::<Vec<_>>();
+    let items = build_account_select_items(
+        &candidates,
+        seeds_by_id,
+        networks_by_hash,
+        &addresses,
+        config,
+    );
     let id = if config.always_prompt {
         fuzzy_select_always("Select account", &items)?
     } else {
@@ -1409,6 +2012,7 @@ fn choose_account_match(
                 seed_scope,
                 always_prompt: false,
                 show_network: true,
+                preferred_network_name: None,
             },
         )
     }
@@ -1442,48 +2046,15 @@ pub(crate) fn resolve_export_account(
     non_interactive: bool,
     always_prompt: bool,
 ) -> Result<accounts::AccountRecord> {
-    let seeds_by_id = seed_labels_by_id(conn)?;
-    let networks_by_hash = network_names_by_genesis_hash()?;
-    let candidates = exportable_accounts_for_network(conn, network_genesis_hash)?;
-    match explicit_label {
-        Some(label) => {
-            let matches = candidates
-                .into_iter()
-                .filter(|record| record.label == label)
-                .collect::<Vec<_>>();
-            if matches.is_empty() {
-                bail!(
-                    "finalized account '{}' is not configured on network '{}'",
-                    label,
-                    network_name
-                );
-            }
-            choose_account_match(
-                matches,
-                &seeds_by_id,
-                &networks_by_hash,
-                false,
-                None,
-                conn,
-                non_interactive,
-            )
-        }
-        None if non_interactive => {
-            bail!("account label must be provided in --non-interactive mode")
-        }
-        None => select_account_fuzzy(
-            conn,
-            candidates,
-            &seeds_by_id,
-            &networks_by_hash,
-            AccountSelectConfig {
-                show_addresses: false,
-                seed_scope: None,
-                always_prompt,
-                show_network: false,
-            },
-        ),
-    }
+    Ok(resolve_export_account_with_source(
+        conn,
+        network_name,
+        network_genesis_hash,
+        explicit_label,
+        non_interactive,
+        always_prompt,
+    )?
+    .record)
 }
 
 fn exportable_accounts_for_network(
@@ -1779,15 +2350,13 @@ fn resolve_local_account_reference(
     label: &str,
     unlocks: &mut AccountReferenceUnlocks,
 ) -> Result<AccountAddress> {
-    let record = accounts::find_by_network_and_label(conn, network_genesis_hash, account_label)?
-        .with_context(|| {
-            format!(
-                "{label} account reference '{account_label}' is not a valid address or finalized local account label"
-            )
-        })?;
-    if record.status != accounts::AccountStatus::Finalized {
-        bail!("{label} account reference '{account_label}' is not finalized")
-    }
+    let record = resolve_account_reference_record_for_network(
+        conn,
+        network_name,
+        network_genesis_hash,
+        account_label,
+        label,
+    )?;
     decrypt_local_account_reference_address(conn, network_name, &record, unlocks)
 }
 
@@ -2508,51 +3077,34 @@ pub(crate) async fn resolve_account_network_context(
         Some(name) => (name.to_owned(), ResolutionSource::Explicit),
         None => {
             let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-            if no_defaults {
-                (
-                    prompt_for_network_name(&app_config, active.as_deref())?,
+            match plan_default_network_resolution(
+                &app_config,
+                active.as_deref(),
+                non_interactive,
+                no_defaults,
+            )? {
+                DefaultNetworkResolutionPlan::Selected {
+                    network_name,
+                    source,
+                } => (network_name, source),
+                DefaultNetworkResolutionPlan::Prompt {
+                    active_network_name,
+                } => (
+                    prompt_for_network_name(&app_config, active_network_name)?,
                     ResolutionSource::Prompted,
-                )
-            } else {
-                match active {
-                    Some(name) => (name, ResolutionSource::ActiveDefault),
-                    None if non_interactive => bail!(
-                        "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                    ),
-                    None => (
-                        prompt_for_network_name(&app_config, None)?,
-                        ResolutionSource::Prompted,
-                    ),
-                }
+                ),
             }
         }
     };
 
-    let entry = app_config
-        .networks
-        .get(&selected_network)
-        .cloned()
-        .with_context(|| format!("network '{}' is not registered", selected_network))?;
-    let endpoint: v2::Endpoint =
-        ccd_wallet_core::config::normalize_url_string(&entry.node_endpoint)
-            .parse()
-            .with_context(|| {
-                format!(
-                    "network '{}' has an invalid stored endpoint: {}",
-                    selected_network, entry.node_endpoint
-                )
-            })?;
-    let endpoint_label = ccd_wallet_core::config::endpoint_label(&endpoint);
-    let node_genesis_hash = fetch_node_genesis_hash(endpoint.clone(), &endpoint_label).await?;
-    if node_genesis_hash != entry.genesis_hash {
-        bail!(
-            "configured node for network '{}' points to genesis hash {}, which does not match the stored network genesis hash {}",
-            selected_network,
-            node_genesis_hash,
-            entry.genesis_hash
-        );
-    }
-    Ok((selected_network, entry, endpoint, endpoint_label, source))
+    let resolved = resolve_selected_network_context(selected_network, source).await?;
+    Ok((
+        resolved.network_name,
+        resolved.network_entry,
+        resolved.endpoint,
+        resolved.endpoint_label,
+        resolved.source,
+    ))
 }
 
 fn prompt_for_network_name(app_config: &AppConfig, active: Option<&str>) -> Result<String> {
@@ -3169,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn render_account_fuzzy_text_uses_bracket_first_rows() {
+    fn render_account_fuzzy_text_shows_network_and_source_metadata() {
         let pending = accounts::AccountRecord {
             id: 1,
             signer_owner_id: "seed-id".to_owned(),
@@ -3195,19 +3747,19 @@ mod tests {
 
         assert_eq!(
             render_account_fuzzy_text(&pending, "test", "testnet", None, true),
-            "[pending] [test] pending-account - testnet • provider:0 • identity:0 • cred:0"
+            "[pending] pending-account — network:testnet • key source:test"
         );
         assert_eq!(
             render_account_fuzzy_text(&finalized, "test", "testnet", Some("addr-test"), true),
-            "[test] finalized-account (addr-test) - testnet • provider:0 • identity:0 • cred:0"
+            "finalized-account (addr-test) — network:testnet • key source:test"
         );
         assert_eq!(
             render_account_fuzzy_text(&finalized, "test", "testnet", None, false),
-            "[test] finalized-account • provider:0 • identity:0 • cred:0"
+            "finalized-account — key source:test"
         );
         assert_eq!(
-            render_account_fuzzy_text(&finalized, "ledger:hardware", "testnet", None, true),
-            "[ledger:hardware] finalized-account - testnet • provider:0 • identity:0 • cred:0"
+            render_account_fuzzy_text(&finalized, "hardware (Ledger)", "testnet", None, true),
+            "finalized-account — network:testnet • key source:hardware (Ledger)"
         );
 
         let imported = accounts::AccountRecord {
@@ -3221,11 +3773,283 @@ mod tests {
         };
         assert_eq!(
             render_account_fuzzy_text(&imported, "", "local", None, true),
-            "[imported] baker-0 - local"
+            "baker-0 — network:local • source:imported account vault"
         );
         assert_eq!(
             render_account_fuzzy_text(&imported, "", "local", None, false),
-            "[imported] baker-0"
+            "baker-0 — source:imported account vault"
+        );
+    }
+
+    #[test]
+    fn local_account_context_lines_omit_account_address() {
+        let conn = conn();
+        let owner = signer_owners::create(&conn, SignerOwnerKind::Seed, "main-seed").unwrap();
+        let record = accounts::AccountRecord {
+            id: 1,
+            signer_owner_id: owner.id,
+            network_genesis_hash: "genesis".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
+            label: "alice".to_owned(),
+            status: accounts::AccountStatus::Finalized,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        let lines =
+            local_account_context_lines(&conn, &record, ResolutionSource::Inferred).unwrap();
+        assert_eq!(lines[0].label, "account:");
+        assert_eq!(lines[0].value, "alice");
+        assert_eq!(lines[1].label, "key source:");
+        assert_eq!(lines[1].value, "main-seed");
+    }
+
+    #[test]
+    fn matching_local_account_selection_infers_unique_match() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-other",
+            "alice",
+            1,
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+        );
+
+        let selection =
+            resolve_matching_local_account_selection(&conn, "alice", None, false).unwrap();
+        assert_eq!(selection.record.network_genesis_hash, "genesis-other");
+        assert_eq!(selection.source, ResolutionSource::Inferred);
+    }
+
+    #[test]
+    fn matching_local_account_selection_prefers_active_network_match() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-active",
+            "alice",
+            0,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        );
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-other",
+            "alice",
+            1,
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+        );
+
+        let selection = resolve_matching_local_account_selection(
+            &conn,
+            "alice",
+            Some(&ActiveNetworkPreference {
+                name: "testnet".to_owned(),
+                genesis_hash: "genesis-active".to_owned(),
+            }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.record.network_genesis_hash, "genesis-active");
+        assert_eq!(selection.source, ResolutionSource::ActiveDefault);
+    }
+
+    #[test]
+    fn matching_local_account_selection_infers_unique_match_outside_active_network() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-other",
+            "alice",
+            0,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        );
+
+        let selection = resolve_matching_local_account_selection(
+            &conn,
+            "alice",
+            Some(&ActiveNetworkPreference {
+                name: "testnet".to_owned(),
+                genesis_hash: "genesis-active".to_owned(),
+            }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.record.network_genesis_hash, "genesis-other");
+        assert_eq!(selection.source, ResolutionSource::Inferred);
+    }
+
+    #[test]
+    fn account_selector_items_prefer_active_network_without_hiding_others() {
+        let derived_active = accounts::AccountRecord {
+            id: 1,
+            signer_owner_id: "seed-active".to_owned(),
+            network_genesis_hash: "genesis-active".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Derived,
+            imported_vault_id: None,
+            import_kind: None,
+            source_metadata_json: None,
+            label: "alice".to_owned(),
+            status: accounts::AccountStatus::Finalized,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let imported_other = accounts::AccountRecord {
+            id: 2,
+            signer_owner_id: String::new(),
+            network_genesis_hash: "genesis-other".to_owned(),
+            ip_identity: 0,
+            identity_index: 0,
+            credential_counter: 0,
+            source_kind: accounts::AccountSourceKind::Imported,
+            imported_vault_id: Some("vault".to_owned()),
+            import_kind: Some("genesis".to_owned()),
+            source_metadata_json: None,
+            label: "alice".to_owned(),
+            status: accounts::AccountStatus::Finalized,
+            transaction_hash: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let seeds_by_id = BTreeMap::from([("seed-active".to_owned(), "main-seed".to_owned())]);
+        let networks_by_hash = BTreeMap::from([
+            ("genesis-active".to_owned(), "testnet".to_owned()),
+            ("genesis-other".to_owned(), "other".to_owned()),
+        ]);
+
+        let items = build_account_select_items(
+            &[imported_other, derived_active],
+            &seeds_by_id,
+            &networks_by_hash,
+            &BTreeMap::new(),
+            AccountSelectConfig {
+                show_addresses: false,
+                seed_scope: None,
+                always_prompt: true,
+                show_network: true,
+                preferred_network_name: Some("testnet"),
+            },
+        );
+
+        assert_eq!(items.len(), 2);
+        assert!(items[0].text.contains("network:testnet"));
+        assert!(items[0].text.contains("key source:main-seed"));
+        assert!(items[1].text.contains("network:other"));
+        assert!(items[1].text.contains("source:imported account vault"));
+    }
+
+    #[test]
+    fn account_network_resolution_plan_skips_account_assisted_inference_non_interactively() {
+        assert_eq!(
+            plan_account_network_resolution(Some("alice"), false, false, true),
+            AccountNetworkResolutionPlan::UseExistingNetworkResolution
+        );
+        assert_eq!(
+            plan_account_network_resolution(Some("alice"), true, false, false),
+            AccountNetworkResolutionPlan::UseExistingNetworkResolution
+        );
+        assert_eq!(
+            plan_account_network_resolution(Some("alice"), false, true, false),
+            AccountNetworkResolutionPlan::UseExistingNetworkResolution
+        );
+    }
+
+    #[test]
+    fn account_network_resolution_plan_uses_account_assisted_labels_only_interactively() {
+        assert_eq!(
+            plan_account_network_resolution(Some("alice"), false, false, false),
+            AccountNetworkResolutionPlan::UseAccountAssistedLabel("alice")
+        );
+        assert_eq!(
+            plan_account_network_resolution(
+                Some("4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd"),
+                false,
+                false,
+                false,
+            ),
+            AccountNetworkResolutionPlan::UseExistingNetworkResolution
+        );
+    }
+
+    #[test]
+    fn default_network_resolution_plan_selects_single_network_without_prompt() {
+        let mut app_config = AppConfig::default();
+        app_config.networks.insert(
+            "testnet".to_owned(),
+            NetworkEntry {
+                node_endpoint: "https://grpc.testnet.concordium.com:20000".to_owned(),
+                genesis_hash: "genesis-testnet".to_owned(),
+                wallet_proxy: None,
+            },
+        );
+
+        assert_eq!(
+            plan_default_network_resolution(&app_config, None, false, false).unwrap(),
+            DefaultNetworkResolutionPlan::Selected {
+                network_name: "testnet".to_owned(),
+                source: ResolutionSource::Inferred,
+            }
+        );
+        assert_eq!(
+            plan_default_network_resolution(&app_config, None, false, true).unwrap(),
+            DefaultNetworkResolutionPlan::Selected {
+                network_name: "testnet".to_owned(),
+                source: ResolutionSource::Inferred,
+            }
+        );
+    }
+
+    #[test]
+    fn export_account_lookup_is_constrained_to_selected_network() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-other",
+            "alice",
+            0,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        );
+
+        let err = resolve_export_account(
+            &conn,
+            "testnet",
+            "genesis-testnet",
+            Some("alice"),
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no finalized accounts are available on network 'genesis-testnet'")
         );
     }
 

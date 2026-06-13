@@ -4,9 +4,11 @@ use crate::{
     cli::ContractInitArgs,
     commands::{
         account::{
-            build_export_wallet_account, resolve_account_network_context, resolve_export_account,
+            build_export_wallet_account, local_account_context_lines,
+            resolve_signing_account_context,
         },
         transaction::render::render_finalized_summary,
+        ui::{ContextLine, log_resolved_context},
     },
     smart_contracts::{init as init_core, shared},
 };
@@ -17,23 +19,35 @@ use concordium_rust_sdk::types::Energy;
 use rusqlite::Connection;
 
 pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint, endpoint_label, _network_source) =
-        resolve_account_network_context(
-            conn,
-            args.network.as_deref(),
-            args.node,
-            args.non_interactive,
-            args.no_defaults,
-        )
-        .await?;
-    let account = resolve_export_account(
+    let (network_context, selection) = resolve_signing_account_context(
         conn,
-        &network_name,
-        &network_entry.genesis_hash,
         args.account.as_deref(),
+        args.network.as_deref(),
+        args.node,
         args.non_interactive,
+        args.no_defaults,
         false,
-    )?;
+    )
+    .await?;
+    let mut lines = vec![ContextLine {
+        label: "network:",
+        value: format!(
+            "{} @ {}",
+            network_context.network_name, network_context.endpoint_label
+        ),
+        source: network_context.source,
+    }];
+    lines.extend(local_account_context_lines(
+        conn,
+        &selection.record,
+        selection.source,
+    )?);
+    log_resolved_context(&lines)?;
+    let network_name = network_context.network_name;
+    let network_entry = network_context.network_entry;
+    let endpoint = network_context.endpoint;
+    let endpoint_label = network_context.endpoint_label;
+    let account = selection.record;
     let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
     let mut client = node_config::connect_v2_client(endpoint.clone())
         .await

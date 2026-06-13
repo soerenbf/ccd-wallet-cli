@@ -20,15 +20,31 @@ use rusqlite::Connection;
 /// # Errors
 /// Returns an error if account resolution or chain querying fails.
 pub(super) async fn show(conn: &Connection, args: StakeShowArgs) -> Result<()> {
-    let mut context =
-        resolve_query_context(conn, args.network.as_deref(), args.node, args.no_defaults).await?;
-    let block = parse_block_identifier(args.block.as_deref())?;
-    let (address, local_label) = resolve_stake_query_address(
+    let mut context = resolve_query_context(
         conn,
-        &context.network_name,
-        &context.network_genesis_hash,
-        &args.account,
-    )?;
+        Some(&args.account),
+        args.network.as_deref(),
+        args.node,
+        args.no_defaults,
+    )
+    .await?;
+    let block = parse_block_identifier(args.block.as_deref())?;
+    let (address, local_label) = match context.selected_account.as_ref() {
+        Some((record, _source)) => (
+            crate::commands::account::decrypt_local_account_address(
+                conn,
+                &context.network_name,
+                record,
+            )?,
+            Some(record.label.clone()),
+        ),
+        None => resolve_stake_query_address(
+            conn,
+            &context.network_name,
+            &context.network_genesis_hash,
+            &args.account,
+        )?,
+    };
     let info = query_account_info(&mut context.client, address, block).await?;
     let details = stake_details_view_from_account_info(&info);
 

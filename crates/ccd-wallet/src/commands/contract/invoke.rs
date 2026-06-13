@@ -2,9 +2,13 @@
 
 use crate::{
     cli::ContractInvokeArgs,
-    commands::account::{
-        AccountReferenceContext, AccountReferenceUnlocks, resolve_account_network_context,
-        resolve_account_reference,
+    commands::{
+        account::{
+            AccountReferenceContext, AccountReferenceUnlocks, decrypt_local_account_address,
+            local_account_context_lines, resolve_account_reference,
+            resolve_account_reference_network_context,
+        },
+        ui::{ContextLine, log_resolved_context},
     },
     smart_contracts::{query as query_core, shared},
 };
@@ -14,15 +18,36 @@ use concordium_rust_sdk::types::Energy;
 use rusqlite::Connection;
 
 pub(super) async fn invoke(conn: &Connection, args: ContractInvokeArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint, endpoint_label, _network_source) =
-        resolve_account_network_context(
+    let (network_context, selected_invoker) = resolve_account_reference_network_context(
+        conn,
+        args.network.as_deref(),
+        args.node,
+        args.invoker.as_deref(),
+        false,
+        args.no_defaults,
+    )
+    .await?;
+    let mut lines = vec![ContextLine {
+        label: "network:",
+        value: format!(
+            "{} @ {}",
+            network_context.network_name, network_context.endpoint_label
+        ),
+        source: network_context.source,
+    }];
+    if let Some(selection) = selected_invoker.as_ref() {
+        lines.extend(local_account_context_lines(
             conn,
-            args.network.as_deref(),
-            args.node,
-            false,
-            args.no_defaults,
-        )
-        .await?;
+            &selection.record,
+            selection.source,
+        )?);
+    }
+    log_resolved_context(&lines)?;
+
+    let network_name = network_context.network_name;
+    let network_entry = network_context.network_entry;
+    let endpoint = network_context.endpoint;
+    let endpoint_label = network_context.endpoint_label;
     let mut client = node_config::connect_v2_client(endpoint.clone())
         .await
         .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
@@ -43,8 +68,13 @@ pub(super) async fn invoke(conn: &Connection, args: ContractInvokeArgs) -> Resul
         },
     )
     .await?;
-    let invoker = match args.invoker.as_deref() {
-        Some(invoker) => Some(resolve_account_reference(
+    let invoker = match (args.invoker.as_deref(), selected_invoker.as_ref()) {
+        (_, Some(selection)) => Some(decrypt_local_account_address(
+            conn,
+            &network_name,
+            &selection.record,
+        )?),
+        (Some(invoker), None) => Some(resolve_account_reference(
             conn,
             AccountReferenceContext {
                 network_name: &network_name,
@@ -56,7 +86,7 @@ pub(super) async fn invoke(conn: &Connection, args: ContractInvokeArgs) -> Resul
             true,
             &mut AccountReferenceUnlocks::new(),
         )?),
-        None => None,
+        (None, None) => None,
     };
     let prepared = query_core::prepare_contract_invoke(
         contract,

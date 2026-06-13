@@ -164,6 +164,15 @@ stake
 - `stake remove <ACCOUNT>` removes the currently configured staking mode, whether the account is delegating or validating.
 - `stake configure validator <ACCOUNT>` is reserved as the validator-oriented configuration branch for future work and is not implemented yet.
 
+#### Account and network resolution
+
+- Interactive commands that consume local account labels treat `--network` and compatible node overrides as hard constraints.
+- Without an explicit network, an interactive local account label can infer its network from the wallet when it resolves uniquely, and the active network is used as a soft preference for otherwise ambiguous labels.
+- Ambiguous local account labels are resolved with an account selector that shows network plus key-source or imported-account metadata instead of a network-only selector.
+- Transaction sender inputs such as `stake configure delegation <ACCOUNT>`, `stake remove <ACCOUNT>`, contract submitter `--account`, token mutation `--account`, and `token compose submit --sender` require finalized local account labels; raw account addresses are rejected for signing flows.
+- Read-only account-reference inputs such as `stake show <ACCOUNT>` and `contract invoke --invoker` still accept raw account addresses.
+- Non-interactive commands stay deterministic: they do not infer a network from current account-label uniqueness and they do not let a supplied account label override the active network.
+
 #### Validator branch rules
 
 - The validator branch is scoped to **modern `ConfigureBaker`-compatible behavior**.

@@ -4,7 +4,8 @@ use crate::{
     commands::{
         account::{
             AccountReferenceUnlocks, build_export_wallet_account_with_unlocks,
-            decrypt_local_account_address, resolve_account_network_context, resolve_export_account,
+            decrypt_local_account_address, local_account_context_lines,
+            resolve_account_reference_network_context, resolve_signing_account_context,
         },
         transaction::render::render_finalized_summary,
         ui::{ContextLine, log_resolved_context},
@@ -37,6 +38,10 @@ pub(crate) struct StakeQueryContext {
     pub(crate) network_name: String,
     pub(crate) network_genesis_hash: String,
     pub(crate) client: v2::Client,
+    pub(crate) selected_account: Option<(
+        accounts::AccountRecord,
+        crate::commands::ui::ResolutionSource,
+    )>,
 }
 
 /// Resolved context for a stake mutation command.
@@ -92,24 +97,43 @@ pub(crate) struct CommissionRatesView {
 /// Resolve a client for stake inspection.
 pub(crate) async fn resolve_query_context(
     conn: &Connection,
+    account: Option<&str>,
     network: Option<&str>,
     node: Option<v2::Endpoint>,
     no_defaults: bool,
 ) -> Result<StakeQueryContext> {
-    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
-        resolve_account_network_context(conn, network, node, false, no_defaults).await?;
-    log_resolved_context(&[ContextLine {
+    let (network_context, selected_account) =
+        resolve_account_reference_network_context(conn, network, node, account, false, no_defaults)
+            .await?;
+    let mut lines = vec![ContextLine {
         label: "network:",
-        value: format!("{network_name} @ {endpoint_label}"),
-        source: network_source,
-    }])?;
-    let client = node_config::connect_v2_client(endpoint.clone())
+        value: format!(
+            "{} @ {}",
+            network_context.network_name, network_context.endpoint_label
+        ),
+        source: network_context.source,
+    }];
+    if let Some(selection) = selected_account.as_ref() {
+        lines.extend(local_account_context_lines(
+            conn,
+            &selection.record,
+            selection.source,
+        )?);
+    }
+    log_resolved_context(&lines)?;
+    let client = node_config::connect_v2_client(network_context.endpoint.clone())
         .await
-        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+        .with_context(|| {
+            format!(
+                "failed to connect to Concordium node at {}",
+                network_context.endpoint_label
+            )
+        })?;
     Ok(StakeQueryContext {
-        network_name,
-        network_genesis_hash: network_entry.genesis_hash,
+        network_name: network_context.network_name,
+        network_genesis_hash: network_context.network_entry.genesis_hash,
         client,
+        selected_account: selected_account.map(|selection| (selection.record, selection.source)),
     })
 }
 
@@ -122,21 +146,35 @@ pub(crate) async fn resolve_mutation_context(
     non_interactive: bool,
     no_defaults: bool,
 ) -> Result<StakeMutationContext> {
-    let (network_name, network_entry, endpoint, endpoint_label, network_source) =
-        resolve_account_network_context(conn, network, node, non_interactive, no_defaults).await?;
-    log_resolved_context(&[ContextLine {
-        label: "network:",
-        value: format!("{network_name} @ {endpoint_label}"),
-        source: network_source,
-    }])?;
-    let account = resolve_export_account(
+    let (network_context, selection) = resolve_signing_account_context(
         conn,
-        &network_name,
-        &network_entry.genesis_hash,
         account,
+        network,
+        node,
         non_interactive,
+        no_defaults,
         false,
-    )?;
+    )
+    .await?;
+    let mut lines = vec![ContextLine {
+        label: "network:",
+        value: format!(
+            "{} @ {}",
+            network_context.network_name, network_context.endpoint_label
+        ),
+        source: network_context.source,
+    }];
+    lines.extend(local_account_context_lines(
+        conn,
+        &selection.record,
+        selection.source,
+    )?);
+    log_resolved_context(&lines)?;
+    let account = selection.record;
+    let network_name = network_context.network_name;
+    let network_entry = network_context.network_entry;
+    let endpoint = network_context.endpoint;
+    let endpoint_label = network_context.endpoint_label;
     let mut unlocks = AccountReferenceUnlocks::new();
     let wallet = build_export_wallet_account_with_unlocks(
         conn,
