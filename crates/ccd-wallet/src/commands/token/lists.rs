@@ -1,10 +1,44 @@
 //! Token allow-list and deny-list command implementations.
 
-use crate::{cli::TokenListMutationArgs, commands::token::shared};
+use crate::{
+    cli::TokenListMutationArgs,
+    commands::{
+        input::{AccountReference, Promptable},
+        token::shared,
+    },
+};
 use anyhow::Result;
 use cliclack::spinner;
-use concordium_rust_sdk::protocol_level_tokens::token_client::{TransactionMetadata, Validation};
+use concordium_rust_sdk::protocol_level_tokens::{
+    TokenId,
+    token_client::{TransactionMetadata, Validation},
+};
 use rusqlite::Connection;
+
+#[derive(Clone, Debug)]
+struct PreparedTokenListMutation {
+    context: shared::PreparedTokenMutationContext,
+    token_id: Promptable<TokenId>,
+    targets: Vec<AccountReference>,
+}
+
+impl PreparedTokenListMutation {
+    fn from_args(args: TokenListMutationArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            token_id: Promptable::from_option(args.token_id, "token id"),
+            targets: args.targets,
+        })
+    }
+}
 
 /// Add accounts to a token allow list.
 pub(super) async fn allow_list_add(conn: &Connection, args: TokenListMutationArgs) -> Result<()> {
@@ -35,19 +69,23 @@ async fn submit_list_update(
     list_name: &str,
     add: bool,
 ) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
+    let prepared = PreparedTokenListMutation::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let token_id = prepared
+        .token_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_token_id)?
+        .into_value();
+    let target_inputs = prepared
+        .targets
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let targets = shared::resolve_target_addresses(
         conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let token_id = shared::resolve_token_id(args.token_id, args.non_interactive)?;
-    let targets =
-        shared::resolve_target_addresses(conn, &mut context, &args.targets, args.non_interactive)?;
+        &mut context,
+        &target_inputs,
+        !prepared.context.input_mode().prompts_allowed(),
+    )?;
     let mut token_client = shared::init_token_client(context.client.clone(), token_id).await?;
     let action = if add { "add" } else { "remove" };
     let target_summary = targets
@@ -121,7 +159,7 @@ async fn submit_list_update(
         "Submitted token {list_name} update on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,

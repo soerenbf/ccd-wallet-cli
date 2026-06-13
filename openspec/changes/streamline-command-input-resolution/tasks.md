@@ -22,10 +22,10 @@
 
 ## 4. Token Mutation Commands
 
-- [ ] 4.1 Refactor token shared mutation context resolution to consume prepared signing-account, network/node, input-mode, and finalization inputs.
-- [ ] 4.2 Convert token transfer, mint, burn, pause, unpause, metadata, list, admin-role, and lock mutation argument handling to prepared input types.
-- [ ] 4.3 Parse token identifiers, lock identifiers, account references, and amount inputs into domain or unresolved-domain types as early as practical.
-- [ ] 4.4 Preserve token prompt fallback, account-reference autocomplete, token selectors, amount validation, and non-interactive errors with tests.
+- [x] 4.1 Refactor token shared mutation context resolution to consume prepared signing-account, network/node, input-mode, and finalization inputs.
+- [x] 4.2 Convert token transfer, mint, burn, pause, unpause, metadata, list, admin-role, and lock mutation argument handling to prepared input types.
+- [x] 4.3 Parse token identifiers, lock identifiers, account references, and amount inputs into domain or unresolved-domain types as early as practical.
+- [x] 4.4 Preserve token prompt fallback, account-reference autocomplete, token selectors, amount validation, and non-interactive errors with tests.
 
 ## 5. Token Compose REPL and Submit
 

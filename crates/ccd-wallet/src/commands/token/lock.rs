@@ -5,37 +5,180 @@ use crate::{
         TokenLockCancelArgs, TokenLockCreateArgs, TokenLockFundArgs, TokenLockReturnArgs,
         TokenLockSendArgs, TokenLockShowArgs,
     },
-    commands::token::shared,
+    commands::{
+        input::{AccountReference, Promptable, TokenAmountInput},
+        token::shared,
+    },
 };
 use anyhow::Result;
 use cliclack::spinner;
-use concordium_rust_sdk::protocol_level_tokens::lock_client::{
-    self, FundTokens, ReturnTokens, SendTokens, Validation,
+use concordium_rust_sdk::protocol_level_tokens::{
+    LockId, TokenId,
+    lock_client::{self, FundTokens, ReturnTokens, SendTokens, Validation},
 };
 use rusqlite::Connection;
 
+#[derive(Clone, Debug)]
+struct PreparedTokenLockCreate {
+    context: shared::PreparedTokenMutationContext,
+    recipients: Vec<AccountReference>,
+    expiry: String,
+    grants: Vec<String>,
+    tokens: Vec<TokenId>,
+    keep_alive: bool,
+}
+
+impl PreparedTokenLockCreate {
+    fn from_args(args: TokenLockCreateArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                false,
+            )?,
+            recipients: args.recipients,
+            expiry: args.expiry,
+            grants: args.grants,
+            tokens: args.tokens,
+            keep_alive: args.keep_alive,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTokenLockFund {
+    context: shared::PreparedTokenMutationContext,
+    lock_id: Promptable<LockId>,
+    token_id: Promptable<TokenId>,
+    amount: Promptable<TokenAmountInput>,
+}
+
+impl PreparedTokenLockFund {
+    fn from_args(args: TokenLockFundArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            lock_id: Promptable::from_option(args.lock_id, "lock id"),
+            token_id: Promptable::from_option(args.token_id, "token id"),
+            amount: Promptable::from_option(args.amount, "amount"),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTokenLockSend {
+    context: shared::PreparedTokenMutationContext,
+    lock_id: Promptable<LockId>,
+    token_id: Promptable<TokenId>,
+    source: Promptable<AccountReference>,
+    recipient: Promptable<AccountReference>,
+    amount: Promptable<TokenAmountInput>,
+}
+
+impl PreparedTokenLockSend {
+    fn from_args(args: TokenLockSendArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            lock_id: Promptable::from_option(args.lock_id, "lock id"),
+            token_id: Promptable::from_option(args.token_id, "token id"),
+            source: Promptable::from_option(args.source, "source"),
+            recipient: Promptable::from_option(args.recipient, "recipient"),
+            amount: Promptable::from_option(args.amount, "amount"),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTokenLockReturn {
+    context: shared::PreparedTokenMutationContext,
+    lock_id: Promptable<LockId>,
+    token_id: Promptable<TokenId>,
+    source: Promptable<AccountReference>,
+    amount: Promptable<TokenAmountInput>,
+}
+
+impl PreparedTokenLockReturn {
+    fn from_args(args: TokenLockReturnArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            lock_id: Promptable::from_option(args.lock_id, "lock id"),
+            token_id: Promptable::from_option(args.token_id, "token id"),
+            source: Promptable::from_option(args.source, "source"),
+            amount: Promptable::from_option(args.amount, "amount"),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PreparedTokenLockCancel {
+    context: shared::PreparedTokenMutationContext,
+    lock_id: Promptable<LockId>,
+}
+
+impl PreparedTokenLockCancel {
+    fn from_args(args: TokenLockCancelArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            lock_id: Promptable::from_option(args.lock_id, "lock id"),
+        })
+    }
+}
+
 /// Create a protocol-level lock.
 pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        false,
-    )
-    .await?;
+    let prepared = PreparedTokenLockCreate::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let recipient_inputs = prepared
+        .recipients
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
     let recipients =
-        shared::parse_account_addresses(conn, &mut context, &args.recipients, "recipient")?;
-    let expiry = shared::parse_expiry_time(&args.expiry)?;
-    let unresolved_grants = if args.grants.is_empty() {
-        if args.non_interactive {
+        shared::parse_account_addresses(conn, &mut context, &recipient_inputs, "recipient")?;
+    let expiry = shared::parse_expiry_time(&prepared.expiry)?;
+    let unresolved_grants = if prepared.grants.is_empty() {
+        if !prepared.context.input_mode().prompts_allowed() {
             anyhow::bail!("at least one --grant must be provided in --non-interactive mode");
         }
         shared::prompt_unresolved_lock_grants()?
     } else {
-        args.grants
+        prepared
+            .grants
             .iter()
             .map(String::as_str)
             .map(shared::parse_unresolved_lock_grant)
@@ -45,8 +188,11 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .iter()
         .map(|grant| shared::resolve_lock_grant(conn, &mut context, grant))
         .collect::<Result<Vec<_>>>()?;
-    let keep_alive = shared::resolve_lock_keep_alive(args.keep_alive, args.non_interactive)?;
-    let token_summary = args
+    let keep_alive = shared::resolve_lock_keep_alive(
+        prepared.keep_alive,
+        !prepared.context.input_mode().prompts_allowed(),
+    )?;
+    let token_summary = prepared
         .tokens
         .iter()
         .map(ToString::to_string)
@@ -57,7 +203,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let config = shared::build_lock_config(recipients, expiry, grants, args.tokens, keep_alive);
+    let config = shared::build_lock_config(recipients, expiry, grants, prepared.tokens, keep_alive);
 
     cliclack::log::info(format!(
         "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nkeep alive: {}",
@@ -65,7 +211,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         context.endpoint_label,
         context.wallet.address,
         recipient_summary,
-        args.expiry,
+        prepared.expiry,
         token_summary,
         if keep_alive { "yes" } else { "no" },
     ))?;
@@ -91,7 +237,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         "Submitted token lock creation on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,
@@ -105,36 +251,35 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
 
 /// Fund an existing protocol-level lock.
 pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let lock_id = shared::resolve_lock_id(args.lock_id, args.non_interactive)?;
+    let prepared = PreparedTokenLockFund::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let lock_id = prepared
+        .lock_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_lock_id)?
+        .into_value();
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
     let mut balance_client = context.client.clone();
     let available_balances =
         shared::account_available_balances(&mut balance_client, context.wallet.address).await?;
-    let token_id = shared::resolve_lock_token(
-        args.token_id,
-        lock_client.lock_info(),
-        &available_balances,
-        args.non_interactive,
-    )?;
+    let token_id = prepared
+        .token_id
+        .resolve_with(prepared.context.input_mode(), || {
+            shared::select_lock_token(lock_client.lock_info(), &available_balances)
+        })?
+        .into_value();
+    shared::ensure_lock_token(lock_client.lock_info(), &token_id)?;
     let mut query_client = context.client.clone();
     let token_info = shared::query_token_info(&mut query_client, token_id.clone()).await?;
     let amount = shared::resolve_token_amount(
-        args.amount.as_deref(),
+        match &prepared.amount {
+            Promptable::Provided(amount) => Some(amount.as_str()),
+            Promptable::Missing { .. } => None,
+        },
         token_info.token_state.decimals,
         available_balances.get(&token_id).copied(),
         "available",
-        args.non_interactive,
+        !prepared.context.input_mode().prompts_allowed(),
     )?;
     let payload = FundTokens {
         token_id,
@@ -173,7 +318,7 @@ pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<(
         "Submitted token lock funding on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,
@@ -187,53 +332,62 @@ pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<(
 
 /// Send locked funds to a configured recipient.
 pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let lock_id = shared::resolve_lock_id(args.lock_id, args.non_interactive)?;
+    let prepared = PreparedTokenLockSend::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let lock_id = prepared
+        .lock_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_lock_id)?
+        .into_value();
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
+    let source_input = match &prepared.source {
+        Promptable::Provided(source) => Some(source.to_string()),
+        Promptable::Missing { .. } => None,
+    };
     let source = shared::resolve_account_address(
         conn,
         &mut context,
-        args.source.as_deref(),
+        source_input.as_deref(),
         "Source account address or local label:",
         "source",
-        args.non_interactive,
+        !prepared.context.input_mode().prompts_allowed(),
     )?;
     let locked_balances = shared::locked_balances_for_source(lock_client.lock_info(), source);
-    let token_id = shared::resolve_lock_token(
-        args.token_id,
-        lock_client.lock_info(),
-        &locked_balances,
-        args.non_interactive,
-    )?;
+    let token_id = prepared
+        .token_id
+        .resolve_with(prepared.context.input_mode(), || {
+            shared::select_lock_token(lock_client.lock_info(), &locked_balances)
+        })?
+        .into_value();
+    shared::ensure_lock_token(lock_client.lock_info(), &token_id)?;
     let mut query_client = context.client.clone();
     let token_info = shared::query_token_info(&mut query_client, token_id.clone()).await?;
     let payload = SendTokens {
         token_id: token_id.clone(),
         source,
-        recipient: shared::resolve_account_address(
-            conn,
-            &mut context,
-            args.recipient.as_deref(),
-            "Recipient account address or local label:",
-            "recipient",
-            args.non_interactive,
-        )?,
+        recipient: {
+            let recipient_input = match &prepared.recipient {
+                Promptable::Provided(recipient) => Some(recipient.to_string()),
+                Promptable::Missing { .. } => None,
+            };
+            shared::resolve_account_address(
+                conn,
+                &mut context,
+                recipient_input.as_deref(),
+                "Recipient account address or local label:",
+                "recipient",
+                !prepared.context.input_mode().prompts_allowed(),
+            )?
+        },
         amount: shared::resolve_token_amount(
-            args.amount.as_deref(),
+            match &prepared.amount {
+                Promptable::Provided(amount) => Some(amount.as_str()),
+                Promptable::Missing { .. } => None,
+            },
             token_info.token_state.decimals,
             locked_balances.get(&token_id).copied(),
             "locked",
-            args.non_interactive,
+            !prepared.context.input_mode().prompts_allowed(),
         )?,
         memo: None,
     };
@@ -271,7 +425,7 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
         "Submitted token lock send on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,
@@ -285,45 +439,48 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
 
 /// Return locked funds to the source account.
 pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let lock_id = shared::resolve_lock_id(args.lock_id, args.non_interactive)?;
+    let prepared = PreparedTokenLockReturn::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let lock_id = prepared
+        .lock_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_lock_id)?
+        .into_value();
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
+    let source_input = match &prepared.source {
+        Promptable::Provided(source) => Some(source.to_string()),
+        Promptable::Missing { .. } => None,
+    };
     let source = shared::resolve_account_address(
         conn,
         &mut context,
-        args.source.as_deref(),
+        source_input.as_deref(),
         "Source account address or local label:",
         "source",
-        args.non_interactive,
+        !prepared.context.input_mode().prompts_allowed(),
     )?;
     let locked_balances = shared::locked_balances_for_source(lock_client.lock_info(), source);
-    let token_id = shared::resolve_lock_token(
-        args.token_id,
-        lock_client.lock_info(),
-        &locked_balances,
-        args.non_interactive,
-    )?;
+    let token_id = prepared
+        .token_id
+        .resolve_with(prepared.context.input_mode(), || {
+            shared::select_lock_token(lock_client.lock_info(), &locked_balances)
+        })?
+        .into_value();
+    shared::ensure_lock_token(lock_client.lock_info(), &token_id)?;
     let mut query_client = context.client.clone();
     let token_info = shared::query_token_info(&mut query_client, token_id.clone()).await?;
     let payload = ReturnTokens {
         token_id: token_id.clone(),
         source,
         amount: shared::resolve_token_amount(
-            args.amount.as_deref(),
+            match &prepared.amount {
+                Promptable::Provided(amount) => Some(amount.as_str()),
+                Promptable::Missing { .. } => None,
+            },
             token_info.token_state.decimals,
             locked_balances.get(&token_id).copied(),
             "locked",
-            args.non_interactive,
+            !prepared.context.input_mode().prompts_allowed(),
         )?,
         memo: None,
     };
@@ -360,7 +517,7 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
         "Submitted token lock return on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,
@@ -374,17 +531,12 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
 
 /// Cancel an existing lock.
 pub(super) async fn cancel(conn: &Connection, args: TokenLockCancelArgs) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let lock_id = shared::resolve_lock_id(args.lock_id, args.non_interactive)?;
+    let prepared = PreparedTokenLockCancel::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let lock_id = prepared
+        .lock_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_lock_id)?
+        .into_value();
     let mut lock_client =
         lock_client::LockClient::from_lock_id(context.client.clone(), lock_id).await?;
 
@@ -417,7 +569,7 @@ pub(super) async fn cancel(conn: &Connection, args: TokenLockCancelArgs) -> Resu
         "Submitted token lock cancellation on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,

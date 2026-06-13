@@ -6,6 +6,7 @@ use crate::commands::{
         local_account_context_lines, resolve_account_network_context, resolve_account_reference,
         resolve_account_references, resolve_signing_account_context,
     },
+    input::{AccountLabel, Defaultable, FinalizationPolicy, InputMode, NetworkName, Promptable},
     transaction::render::render_finalized_summary,
     ui::{
         ContextLine, FuzzySelectItem, SelectItem, fuzzy_multiselect_or_single,
@@ -46,6 +47,49 @@ pub(super) struct MutationContext {
     pub(super) account_unlocks: AccountReferenceUnlocks,
 }
 
+/// Prepared shared context inputs for a token mutation command.
+#[derive(Clone, Debug)]
+pub(super) struct PreparedTokenMutationContext {
+    account: Promptable<AccountLabel>,
+    network: Defaultable<NetworkName>,
+    node: Option<v2::Endpoint>,
+    input_mode: InputMode,
+    finalization: FinalizationPolicy,
+    always_prompt_account: bool,
+}
+
+impl PreparedTokenMutationContext {
+    /// Build prepared token mutation context inputs from common raw command fields.
+    pub(super) fn from_raw(
+        account: Option<&str>,
+        network: Option<&str>,
+        node: Option<v2::Endpoint>,
+        non_interactive: bool,
+        no_defaults: bool,
+        no_wait: bool,
+        always_prompt_account: bool,
+    ) -> Result<Self> {
+        Ok(Self {
+            account: Promptable::from_option(account.map(str::parse).transpose()?, "account"),
+            network: Defaultable::from_option(network.map(str::parse).transpose()?, "network"),
+            node,
+            input_mode: InputMode::from_flags(non_interactive, no_defaults),
+            finalization: FinalizationPolicy::from_no_wait(no_wait),
+            always_prompt_account,
+        })
+    }
+
+    /// Return the shared input mode for resolving command-specific prepared values.
+    pub(super) fn input_mode(&self) -> InputMode {
+        self.input_mode
+    }
+
+    /// Return whether the command should wait for finalization after submission.
+    pub(super) fn should_wait_for_finalization(&self) -> bool {
+        self.finalization.should_wait()
+    }
+}
+
 /// Resolve a client for a read-only token or lock query.
 pub(super) async fn resolve_query_client(
     conn: &Connection,
@@ -66,24 +110,27 @@ pub(super) async fn resolve_query_client(
     Ok((network_name, endpoint_label, client))
 }
 
-/// Resolve the signer wallet, network, and node client for a token mutation.
-pub(super) async fn resolve_mutation_context(
+/// Resolve the signer wallet, network, and node client for prepared token mutation inputs.
+pub(super) async fn resolve_prepared_mutation_context(
     conn: &Connection,
-    account: Option<&str>,
-    network: Option<&str>,
-    node: Option<v2::Endpoint>,
-    non_interactive: bool,
-    no_defaults: bool,
-    always_prompt_account: bool,
+    prepared: &PreparedTokenMutationContext,
 ) -> Result<MutationContext> {
+    let account = match &prepared.account {
+        Promptable::Provided(account) => Some(account.as_str()),
+        Promptable::Missing { .. } => None,
+    };
+    let network = match &prepared.network {
+        Defaultable::Provided(network) => Some(network.as_str()),
+        Defaultable::Missing { .. } => None,
+    };
     let (network_context, selection) = resolve_signing_account_context(
         conn,
         account,
         network,
-        node,
-        non_interactive,
-        no_defaults,
-        always_prompt_account,
+        prepared.node.clone(),
+        !prepared.input_mode.prompts_allowed(),
+        !prepared.input_mode.defaults_allowed(),
+        prepared.always_prompt_account,
     )
     .await?;
     let mut lines = vec![ContextLine {
@@ -126,6 +173,28 @@ pub(super) async fn resolve_mutation_context(
     })
 }
 
+/// Resolve the signer wallet, network, and node client for a token mutation.
+pub(super) async fn resolve_mutation_context(
+    conn: &Connection,
+    account: Option<&str>,
+    network: Option<&str>,
+    node: Option<v2::Endpoint>,
+    non_interactive: bool,
+    no_defaults: bool,
+    always_prompt_account: bool,
+) -> Result<MutationContext> {
+    let prepared = PreparedTokenMutationContext::from_raw(
+        account,
+        network,
+        node,
+        non_interactive,
+        no_defaults,
+        false,
+        always_prompt_account,
+    )?;
+    resolve_prepared_mutation_context(conn, &prepared).await
+}
+
 /// Construct a token client for the supplied token.
 pub(super) async fn init_token_client(
     client: v2::Client,
@@ -160,65 +229,34 @@ pub(super) async fn query_lock_info(client: &mut v2::Client, lock_id: LockId) ->
         .context("failed to decode lock information")
 }
 
-/// Resolve a token identifier for a transfer by selecting from tokens
-/// the account has an available balance of.
-pub(super) fn resolve_token_from_balances(
-    explicit: Option<TokenId>,
+/// Select a token identifier from available account balances.
+pub(super) fn select_token_from_balances(
     available_balances: &HashMap<TokenId, TokenAmount>,
-    non_interactive: bool,
 ) -> Result<TokenId> {
-    match explicit {
-        Some(token_id) => Ok(token_id),
-        None if non_interactive => {
-            bail!("token identifier must be provided in --non-interactive mode")
-        }
-        None => {
-            if available_balances.is_empty() {
-                bail!("account has no available token balances to transfer");
-            }
-            let mut items: Vec<SelectItem<TokenId>> = available_balances
-                .iter()
-                .map(|(token_id, amount)| SelectItem {
-                    value: token_id.clone(),
-                    label: token_id.to_string(),
-                    hint: format!("available: {amount}"),
-                })
-                .collect();
-            items.sort_by_key(|item| item.label.clone());
-            select_always("Select token", &items, None)
-        }
+    if available_balances.is_empty() {
+        bail!("account has no available token balances to transfer");
     }
+    let mut items: Vec<SelectItem<TokenId>> = available_balances
+        .iter()
+        .map(|(token_id, amount)| SelectItem {
+            value: token_id.clone(),
+            label: token_id.to_string(),
+            hint: format!("available: {amount}"),
+        })
+        .collect();
+    items.sort_by_key(|item| item.label.clone());
+    select_always("Select token", &items, None)
 }
 
-/// Resolve a token identifier from explicit input or an interactive text prompt.
-pub(super) fn resolve_token_id(
-    explicit: Option<TokenId>,
-    non_interactive: bool,
-) -> Result<TokenId> {
-    match explicit {
-        Some(token_id) => Ok(token_id),
-        None if non_interactive => {
-            bail!("token identifier must be provided in --non-interactive mode")
-        }
-        None => {
-            let value: String = input("Token ID:").interact()?;
-            value.parse().context("invalid token identifier")
-        }
-    }
+/// Prompt for a token identifier.
+pub(super) fn prompt_token_id() -> Result<TokenId> {
+    let value: String = input("Token ID:").interact()?;
+    value.parse().context("invalid token identifier")
 }
 
-/// Resolve a required string from explicit input or an interactive prompt.
-pub(super) fn resolve_required_string(
-    explicit: Option<&str>,
-    prompt: &str,
-    label: &str,
-    non_interactive: bool,
-) -> Result<String> {
-    match explicit {
-        Some(value) => Ok(value.to_owned()),
-        None if non_interactive => bail!("{label} must be provided in --non-interactive mode"),
-        None => Ok(input(prompt).interact()?),
-    }
+/// Prompt for a required string value.
+pub(super) fn prompt_required_string(prompt: &str) -> Result<String> {
+    Ok(input(prompt).interact()?)
 }
 
 /// Resolve token admin roles from explicit CLI input or an interactive multi-select.
@@ -291,66 +329,54 @@ pub(super) fn resolve_target_addresses(
     )?])
 }
 
-/// Resolve a lock identifier from explicit input or an interactive prompt.
-pub(super) fn resolve_lock_id(explicit: Option<LockId>, non_interactive: bool) -> Result<LockId> {
-    match explicit {
-        Some(lock_id) => Ok(lock_id),
-        None if non_interactive => {
-            bail!("lock identifier must be provided in --non-interactive mode")
-        }
-        None => {
-            let value: String = input("Lock ID:").interact()?;
-            value.parse().context("invalid lock identifier")
-        }
-    }
+/// Prompt for a lock identifier.
+pub(super) fn prompt_lock_id() -> Result<LockId> {
+    let value: String = input("Lock ID:").interact()?;
+    value.parse().context("invalid lock identifier")
 }
 
-/// Resolve a token configured for a lock from explicit input or an interactive selector.
-pub(super) fn resolve_lock_token(
-    explicit: Option<TokenId>,
+/// Select a token configured for a lock.
+pub(super) fn select_lock_token(
     lock_info: &LockInfo,
     balance_hints: &HashMap<TokenId, TokenAmount>,
-    non_interactive: bool,
 ) -> Result<TokenId> {
     let configured = configured_lock_tokens(lock_info);
     if configured.is_empty() {
         bail!("lock '{}' has no configured tokens", lock_info.lock);
     }
-    match explicit {
-        Some(token_id) => {
-            if configured.iter().any(|candidate| candidate == &token_id) {
-                Ok(token_id)
-            } else {
-                bail!(
-                    "token '{}' is not configured for lock '{}'",
-                    token_id,
-                    lock_info.lock
-                )
-            }
-        }
-        None if non_interactive => {
-            bail!("token identifier must be provided in --non-interactive mode")
-        }
-        None => {
-            let items = configured
-                .iter()
-                .map(|token_id| SelectItem {
-                    value: token_id.clone(),
-                    label: token_id.to_string(),
-                    hint: balance_hints
-                        .get(token_id)
-                        .map(|amount| format!("balance: {amount}"))
-                        .unwrap_or_else(|| "balance: unavailable".to_owned()),
-                })
-                .collect::<Vec<_>>();
-            select_always("Select token", &items, None)
-        }
-    }
+    let items = configured
+        .iter()
+        .map(|token_id| SelectItem {
+            value: token_id.clone(),
+            label: token_id.to_string(),
+            hint: balance_hints
+                .get(token_id)
+                .map(|amount| format!("balance: {amount}"))
+                .unwrap_or_else(|| "balance: unavailable".to_owned()),
+        })
+        .collect::<Vec<_>>();
+    select_always("Select token", &items, None)
 }
 
 pub(super) fn configured_lock_tokens(lock_info: &LockInfo) -> Vec<TokenId> {
     match &lock_info.controller {
         LockController::SimpleV0(controller) => controller.tokens.clone(),
+    }
+}
+
+/// Ensure that a token identifier is configured for the lock.
+pub(super) fn ensure_lock_token(lock_info: &LockInfo, token_id: &TokenId) -> Result<()> {
+    if configured_lock_tokens(lock_info)
+        .iter()
+        .any(|candidate| candidate == token_id)
+    {
+        Ok(())
+    } else {
+        bail!(
+            "token '{}' is not configured for lock '{}'",
+            token_id,
+            lock_info.lock
+        )
     }
 }
 

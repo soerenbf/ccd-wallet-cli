@@ -1,10 +1,36 @@
 //! Token pause and unpause command implementations.
 
-use crate::{cli::TokenPauseArgs, commands::token::shared};
+use crate::{
+    cli::TokenPauseArgs,
+    commands::{input::Promptable, token::shared},
+};
 use anyhow::Result;
 use cliclack::spinner;
-use concordium_rust_sdk::protocol_level_tokens::token_client::TransactionMetadata;
+use concordium_rust_sdk::protocol_level_tokens::{TokenId, token_client::TransactionMetadata};
 use rusqlite::Connection;
+
+#[derive(Clone, Debug)]
+struct PreparedTokenPause {
+    context: shared::PreparedTokenMutationContext,
+    token_id: Promptable<TokenId>,
+}
+
+impl PreparedTokenPause {
+    fn from_args(args: TokenPauseArgs) -> Result<Self> {
+        Ok(Self {
+            context: shared::PreparedTokenMutationContext::from_raw(
+                args.account.as_deref(),
+                args.network.as_deref(),
+                args.node,
+                args.non_interactive,
+                args.no_defaults,
+                args.no_wait,
+                true,
+            )?,
+            token_id: Promptable::from_option(args.token_id, "token id"),
+        })
+    }
+}
 
 /// Pause a token.
 pub(super) async fn pause(conn: &Connection, args: TokenPauseArgs) -> Result<()> {
@@ -17,17 +43,12 @@ pub(super) async fn unpause(conn: &Connection, args: TokenPauseArgs) -> Result<(
 }
 
 async fn submit_pause_change(conn: &Connection, args: TokenPauseArgs, pause: bool) -> Result<()> {
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
-        true,
-    )
-    .await?;
-    let token_id = shared::resolve_token_id(args.token_id, args.non_interactive)?;
+    let prepared = PreparedTokenPause::from_args(args)?;
+    let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
+    let token_id = prepared
+        .token_id
+        .resolve_with(prepared.context.input_mode(), shared::prompt_token_id)?
+        .into_value();
     let mut token_client = shared::init_token_client(context.client.clone(), token_id).await?;
     let action = if pause { "pause" } else { "unpause" };
 
@@ -61,7 +82,7 @@ async fn submit_pause_change(conn: &Connection, args: TokenPauseArgs, pause: boo
         "Submitted token {action} on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.context.should_wait_for_finalization() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,

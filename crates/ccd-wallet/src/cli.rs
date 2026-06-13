@@ -1,6 +1,9 @@
 use crate::commands::{
     config::network::NetworkCommand,
-    input::{AccountLabel, InputModeArgs, NetworkNodeArgs, SubmissionWaitArgs},
+    input::{
+        AccountLabel, AccountReference, InputModeArgs, NetworkNodeArgs, SubmissionWaitArgs,
+        TokenAmountInput,
+    },
 };
 use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
@@ -1256,11 +1259,11 @@ pub struct TokenTransferArgs {
 
     /// Recipient account address or finalized local account label. If omitted interactively, the CLI prompts.
     #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
-    pub recipient: Option<String>,
+    pub recipient: Option<AccountReference>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the available balance.
     #[arg(long = "amount", value_name = "AMOUNT")]
-    pub amount: Option<String>,
+    pub amount: Option<TokenAmountInput>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -1295,7 +1298,7 @@ pub struct TokenAmountArgs {
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts.
     #[arg(long = "amount", value_name = "AMOUNT")]
-    pub amount: Option<String>,
+    pub amount: Option<TokenAmountInput>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -1344,7 +1347,7 @@ pub struct TokenListMutationArgs {
 
     /// Target account addresses or finalized local account labels to add or remove. If omitted interactively, the CLI prompts.
     #[arg(long = "target", value_name = "ADDRESS_OR_LABEL")]
-    pub targets: Vec<String>,
+    pub targets: Vec<AccountReference>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -1424,7 +1427,7 @@ pub struct TokenAdminRolesArgs {
 
     /// Target account address or finalized local account label. If omitted interactively, the CLI prompts.
     #[arg(long = "target", value_name = "ADDRESS_OR_LABEL")]
-    pub target: Option<String>,
+    pub target: Option<AccountReference>,
 
     /// Token admin roles to assign or revoke. If omitted interactively, the CLI presents a multi-select.
     #[arg(long = "role", value_name = "ROLE")]
@@ -1532,7 +1535,7 @@ pub enum TokenLockSubcommand {
 pub struct TokenLockCreateArgs {
     /// Accounts that can receive funds from the lock. Accepts raw addresses or finalized local account labels. Repeat to add multiple recipients.
     #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL", required = true)]
-    pub recipients: Vec<String>,
+    pub recipients: Vec<AccountReference>,
 
     /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds.
     #[arg(long = "expiry", value_name = "TIME")]
@@ -1587,7 +1590,7 @@ pub struct TokenLockFundArgs {
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the available balance.
     #[arg(long = "amount", value_name = "AMOUNT")]
-    pub amount: Option<String>,
+    pub amount: Option<TokenAmountInput>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -1626,15 +1629,15 @@ pub struct TokenLockSendArgs {
 
     /// Source account address or finalized local account label whose funds are currently locked.
     #[arg(long = "source", value_name = "ADDRESS_OR_LABEL")]
-    pub source: Option<String>,
+    pub source: Option<AccountReference>,
 
     /// Recipient account address or finalized local account label that must be configured on the lock.
     #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
-    pub recipient: Option<String>,
+    pub recipient: Option<AccountReference>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
     #[arg(long = "amount", value_name = "AMOUNT")]
-    pub amount: Option<String>,
+    pub amount: Option<TokenAmountInput>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -1673,11 +1676,11 @@ pub struct TokenLockReturnArgs {
 
     /// Source account address or finalized local account label whose funds are currently locked.
     #[arg(long = "source", value_name = "ADDRESS_OR_LABEL")]
-    pub source: Option<String>,
+    pub source: Option<AccountReference>,
 
     /// Token amount as a decimal value using the token's configured decimals. If omitted interactively, the CLI prompts with the locked balance.
     #[arg(long = "amount", value_name = "AMOUNT")]
-    pub amount: Option<String>,
+    pub amount: Option<TokenAmountInput>,
 
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
@@ -3147,7 +3150,10 @@ mod tests {
         match cli.command {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Transfer(args) => {
-                    assert_eq!(args.recipient.as_deref(), Some("treasury"));
+                    assert_eq!(
+                        args.recipient.as_ref().map(ToString::to_string).as_deref(),
+                        Some("treasury")
+                    );
                     assert_eq!(args.account.as_deref(), Some("alice"));
                 }
                 other => panic!("expected token transfer command, got {other:?}"),
@@ -3177,7 +3183,10 @@ mod tests {
                 TokenSubcommand::AllowList(command) => match command.command {
                     TokenListSubcommand::Add(args) => {
                         assert_eq!(
-                            args.targets,
+                            args.targets
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
                             vec![
                                 "treasury".to_owned(),
                                 "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd".to_owned(),
@@ -3215,7 +3224,13 @@ mod tests {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Lock(command) => match command.command {
                     TokenLockSubcommand::Create(args) => {
-                        assert_eq!(args.recipients, vec!["treasury"]);
+                        assert_eq!(
+                            args.recipients
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
+                            vec!["treasury".to_owned()]
+                        );
                         assert_eq!(args.grants, vec!["operator:fund,send,cancel"]);
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
@@ -3242,8 +3257,14 @@ mod tests {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Lock(command) => match command.command {
                     TokenLockSubcommand::Send(args) => {
-                        assert_eq!(args.source.as_deref(), Some("alice"));
-                        assert_eq!(args.recipient.as_deref(), Some("treasury"));
+                        assert_eq!(
+                            args.source.as_ref().map(ToString::to_string).as_deref(),
+                            Some("alice")
+                        );
+                        assert_eq!(
+                            args.recipient.as_ref().map(ToString::to_string).as_deref(),
+                            Some("treasury")
+                        );
                     }
                     other => panic!("expected token lock send command, got {other:?}"),
                 },
@@ -3258,7 +3279,10 @@ mod tests {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Lock(command) => match command.command {
                     TokenLockSubcommand::Return(args) => {
-                        assert_eq!(args.source.as_deref(), Some("alice"));
+                        assert_eq!(
+                            args.source.as_ref().map(ToString::to_string).as_deref(),
+                            Some("alice")
+                        );
                     }
                     other => panic!("expected token lock return command, got {other:?}"),
                 },

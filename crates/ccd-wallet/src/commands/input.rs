@@ -301,6 +301,15 @@ pub(crate) enum AccountReference {
     Label(AccountLabel),
 }
 
+impl fmt::Display for AccountReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Address(address) => address.fmt(formatter),
+            Self::Label(label) => label.fmt(formatter),
+        }
+    }
+}
+
 impl FromStr for AccountReference {
     type Err = anyhow::Error;
 
@@ -309,6 +318,38 @@ impl FromStr for AccountReference {
             return Ok(Self::Address(address));
         }
         Ok(Self::Label(value.parse()?))
+    }
+}
+
+/// Token amount input whose final raw amount depends on token decimals.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct TokenAmountInput(String);
+
+impl TokenAmountInput {
+    /// Return the unresolved decimal amount text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TokenAmountInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for TokenAmountInput {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            bail!("token amount must not be empty");
+        }
+        if trimmed.starts_with('-') {
+            bail!("token amount must not be negative");
+        }
+        Ok(Self(trimmed.to_owned()))
     }
 }
 
@@ -788,6 +829,16 @@ mod tests {
         assert!("testnet".parse::<NetworkName>().is_ok());
         assert!("ledger-main_1".parse::<KeySourceLabel>().is_ok());
         assert!("bad label".parse::<NetworkName>().is_err());
+    }
+
+    #[test]
+    fn token_amount_input_preserves_decimal_text_until_decimals_are_known() -> Result<()> {
+        let amount = "1.2300".parse::<TokenAmountInput>()?;
+
+        assert_eq!(amount.as_str(), "1.2300");
+        assert!("".parse::<TokenAmountInput>().is_err());
+        assert!("-1".parse::<TokenAmountInput>().is_err());
+        Ok(())
     }
 
     #[test]
