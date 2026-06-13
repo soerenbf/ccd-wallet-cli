@@ -2,10 +2,17 @@
 
 use crate::{
     cli::StakeConfigureDelegationArgs,
-    commands::stake::shared::{
-        build_configure_delegation_transaction, parse_capital, query_account_info,
-        query_validator_ids, query_validator_pool_delegation_capacity, resolve_mutation_context,
-        staking_mode_label, validate_validator_id, wait_for_finalization,
+    commands::{
+        input::{
+            AccountLabel, Defaultable, FinalizationPolicy, InputMode, NetworkName, Promptable,
+            ValidationPolicy,
+        },
+        stake::shared::{
+            build_configure_delegation_transaction, parse_capital, query_account_info,
+            query_validator_ids, query_validator_pool_delegation_capacity,
+            resolve_mutation_context, staking_mode_label, validate_validator_id,
+            wait_for_finalization,
+        },
     },
 };
 use anyhow::{Context, Result, bail};
@@ -26,6 +33,75 @@ struct DelegationState {
     delegation_target: Option<DelegationTarget>,
 }
 
+/// Prepared command input for `stake configure delegation`.
+#[derive(Clone, Debug)]
+struct PreparedStakeConfigureDelegation {
+    account: Promptable<AccountLabel>,
+    network: Defaultable<NetworkName>,
+    node: Option<concordium_rust_sdk::v2::Endpoint>,
+    input_mode: InputMode,
+    finalization: FinalizationPolicy,
+    validation: ValidationPolicy,
+    target: Promptable<DelegationTarget>,
+    capital: Promptable<Amount>,
+    restake_earnings: Promptable<bool>,
+}
+
+impl PreparedStakeConfigureDelegation {
+    fn from_args(args: &StakeConfigureDelegationArgs) -> Self {
+        Self {
+            account: Promptable::from_option(args.account.clone(), "account"),
+            network: Defaultable::from_option(args.network_node.network.clone(), "network"),
+            node: args.network_node.node.clone(),
+            input_mode: InputMode::from(&args.input_mode),
+            finalization: FinalizationPolicy::from(&args.submission),
+            validation: ValidationPolicy::from_no_validate(args.no_validate),
+            target: Promptable::from_option(
+                DelegationTargetInput::from_args(args).map(DelegationTargetInput::into_target),
+                "delegation target",
+            ),
+            capital: Promptable::from_option(args.capital, "delegated capital"),
+            restake_earnings: Promptable::from_option(
+                restake_from_args(args),
+                "restake preference",
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DelegationTargetInput {
+    Passive,
+    Validator(u64),
+}
+
+impl DelegationTargetInput {
+    fn from_args(args: &StakeConfigureDelegationArgs) -> Option<Self> {
+        if args.passive {
+            Some(Self::Passive)
+        } else {
+            args.validator.map(Self::Validator)
+        }
+    }
+
+    fn into_target(self) -> DelegationTarget {
+        match self {
+            Self::Passive => DelegationTarget::Passive,
+            Self::Validator(validator) => validator_target(validator),
+        }
+    }
+}
+
+fn restake_from_args(args: &StakeConfigureDelegationArgs) -> Option<bool> {
+    if args.restake {
+        Some(true)
+    } else if args.no_restake {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Run `stake configure delegation`.
 ///
 /// # Arguments
@@ -38,13 +114,22 @@ pub(super) async fn configure_delegation(
     conn: &Connection,
     args: StakeConfigureDelegationArgs,
 ) -> Result<()> {
+    let prepared = PreparedStakeConfigureDelegation::from_args(&args);
+    let account = match &prepared.account {
+        Promptable::Provided(account) => Some(account.as_str()),
+        Promptable::Missing { .. } => None,
+    };
+    let network = match &prepared.network {
+        Defaultable::Provided(network) => Some(network.as_str()),
+        Defaultable::Missing { .. } => None,
+    };
     let mut context = resolve_mutation_context(
         conn,
-        args.account.as_deref(),
-        args.network.as_deref(),
-        args.node.clone(),
-        args.non_interactive,
-        args.no_defaults,
+        account,
+        network,
+        prepared.node.clone(),
+        !prepared.input_mode.prompts_allowed(),
+        !prepared.input_mode.defaults_allowed(),
     )
     .await?;
     let current_info = query_account_info(
@@ -60,7 +145,7 @@ pub(super) async fn configure_delegation(
     let current_state = current_delegation_state(current_staking);
     let requested_state = resolve_requested_state(
         &mut context.client,
-        &args,
+        &prepared,
         &current_info,
         current_staking,
         &current_state,
@@ -120,7 +205,7 @@ pub(super) async fn configure_delegation(
         "Submitted delegation transaction on {} ({}): {}",
         context.network_name, context.endpoint_label, transaction_hash
     ))?;
-    if args.no_wait {
+    if !prepared.finalization.should_wait() {
         return Ok(());
     }
     wait_for_finalization(
@@ -150,98 +235,69 @@ fn current_delegation_state(current_staking: Option<&AccountStakingInfo>) -> Del
 
 async fn resolve_requested_state(
     client: &mut concordium_rust_sdk::v2::Client,
-    args: &StakeConfigureDelegationArgs,
+    prepared: &PreparedStakeConfigureDelegation,
     current_info: &AccountInfo,
     current_staking: Option<&AccountStakingInfo>,
     current_state: &DelegationState,
 ) -> Result<DelegationState> {
-    let target = resolve_requested_target(client, args, current_staking, current_state).await?;
-    let capital = resolve_requested_capital(
-        client,
-        args,
-        current_info,
-        current_staking,
-        &target,
-        current_state,
-    )
-    .await?;
-    let restake_earnings = resolve_requested_restake(args, current_state)?;
+    let should_validate = prepared.validation.should_validate();
+    let defaults_allowed = prepared.input_mode.defaults_allowed();
+
+    let target = prepared
+        .target
+        .clone()
+        .resolve_with_async(prepared.input_mode, || async {
+            prompt_target(
+                client,
+                current_staking,
+                current_state,
+                should_validate,
+                defaults_allowed,
+            )
+            .await
+        })
+        .await?
+        .into_value();
+    if should_validate {
+        validate_requested_target(client, &target).await?;
+    }
+
+    let capital = prepared
+        .capital
+        .clone()
+        .resolve_with_async(prepared.input_mode, || async {
+            prompt_capital(
+                client,
+                current_info,
+                current_staking,
+                &target,
+                current_state,
+                should_validate,
+                defaults_allowed,
+            )
+            .await?
+            .context("delegated capital prompt did not return a value")
+        })
+        .await?
+        .into_value();
+    if should_validate {
+        validate_requested_capital(client, current_info, current_staking, &target, capital).await?;
+    }
+
+    let restake_earnings = prepared
+        .restake_earnings
+        .clone()
+        .resolve_with(prepared.input_mode, || {
+            prompt_restake(current_state, defaults_allowed)?
+                .context("restake prompt did not return a value")
+        })?
+        .into_value();
+
     Ok(DelegationState {
-        capital,
-        restake_earnings,
+        capital: Some(capital),
+        restake_earnings: Some(restake_earnings),
         delegation_target: Some(target),
     })
-}
-
-async fn resolve_requested_target(
-    client: &mut concordium_rust_sdk::v2::Client,
-    args: &StakeConfigureDelegationArgs,
-    current_staking: Option<&AccountStakingInfo>,
-    current_state: &DelegationState,
-) -> Result<DelegationTarget> {
-    if args.passive {
-        return Ok(DelegationTarget::Passive);
-    }
-    if let Some(validator) = args.validator {
-        let target = validator_target(validator);
-        if !args.no_validate {
-            validate_requested_target(client, &target).await?;
-        }
-        return Ok(target);
-    }
-    if args.non_interactive {
-        bail!(
-            "delegation target must be provided in --non-interactive mode with either --passive or --validator"
-        );
-    }
-    prompt_target(client, current_staking, current_state, args.no_validate).await
-}
-
-async fn resolve_requested_capital(
-    client: &mut concordium_rust_sdk::v2::Client,
-    args: &StakeConfigureDelegationArgs,
-    current_info: &AccountInfo,
-    current_staking: Option<&AccountStakingInfo>,
-    target: &DelegationTarget,
-    current_state: &DelegationState,
-) -> Result<Option<Amount>> {
-    if let Some(capital) = parse_capital(args.capital.as_deref())? {
-        if !args.no_validate {
-            validate_requested_capital(client, current_info, current_staking, target, capital)
-                .await?;
-        }
-        return Ok(Some(capital));
-    }
-    if args.non_interactive {
-        bail!("delegated capital must be provided in --non-interactive mode with --capital");
-    }
-    prompt_capital(
-        client,
-        current_info,
-        current_staking,
-        target,
-        current_state,
-        args.no_validate,
-    )
-    .await
-}
-
-fn resolve_requested_restake(
-    args: &StakeConfigureDelegationArgs,
-    current_state: &DelegationState,
-) -> Result<Option<bool>> {
-    if args.restake {
-        return Ok(Some(true));
-    }
-    if args.no_restake {
-        return Ok(Some(false));
-    }
-    if args.non_interactive {
-        bail!(
-            "restake preference must be provided in --non-interactive mode with --restake or --no-restake"
-        );
-    }
-    prompt_restake(current_state)
 }
 
 fn diff_requested_state(
@@ -265,7 +321,8 @@ async fn prompt_target(
     client: &mut concordium_rust_sdk::v2::Client,
     current_staking: Option<&AccountStakingInfo>,
     current_state: &DelegationState,
-    no_validate: bool,
+    validate: bool,
+    defaults_allowed: bool,
 ) -> Result<DelegationTarget> {
     let mode_prompt = if current_state.delegation_target.is_some() {
         "Delegation target:"
@@ -294,18 +351,22 @@ async fn prompt_target(
     match mode {
         "passive" => Ok(DelegationTarget::Passive),
         "validator" => {
-            let default_validator = match current_staking {
-                Some(AccountStakingInfo::Delegated {
-                    delegation_target: DelegationTarget::Baker { baker_id },
-                    ..
-                }) => Some(baker_id.to_string()),
-                _ => None,
+            let default_validator = if defaults_allowed {
+                match current_staking {
+                    Some(AccountStakingInfo::Delegated {
+                        delegation_target: DelegationTarget::Baker { baker_id },
+                        ..
+                    }) => Some(baker_id.to_string()),
+                    _ => None,
+                }
+            } else {
+                None
             };
             let mut prompt = input("Validator id:");
             if let Some(default_validator) = default_validator.as_deref() {
                 prompt = prompt.default_input(default_validator);
             }
-            if !no_validate {
+            if validate {
                 let validators = query_validator_ids(client).await?;
                 prompt = prompt.validate(move |value: &String| {
                     validate_validator_input(value, &validators).map_err(|err| err.to_string())
@@ -328,14 +389,19 @@ async fn prompt_capital(
     current_staking: Option<&AccountStakingInfo>,
     target: &DelegationTarget,
     current_state: &DelegationState,
-    no_validate: bool,
+    validate: bool,
+    defaults_allowed: bool,
 ) -> Result<Option<Amount>> {
-    let mut prompt = input("Delegated capital in CCD:");
-    if let Some(current_capital) = current_state.capital {
+    let prompt_label = match current_state.capital {
+        Some(current_capital) => format!("Delegated capital in CCD (current: {current_capital}):"),
+        None => "Delegated capital in CCD:".to_owned(),
+    };
+    let mut prompt = input(prompt_label);
+    if defaults_allowed && let Some(current_capital) = current_state.capital {
         let default = current_capital.to_string();
         prompt = prompt.default_input(&default);
     }
-    if !no_validate {
+    if validate {
         let total_balance = current_info.account_amount;
         let pool_limit = match target {
             DelegationTarget::Baker { baker_id } => {
@@ -360,21 +426,18 @@ async fn prompt_capital(
     parse_capital(Some(value.trim()))
 }
 
-fn prompt_restake(current_state: &DelegationState) -> Result<Option<bool>> {
+fn prompt_restake(current_state: &DelegationState, defaults_allowed: bool) -> Result<Option<bool>> {
     let current_restake = current_state.restake_earnings;
-    if current_restake.is_some() {
-        Ok(Some(
-            confirm("Restake delegation earnings?")
-                .initial_value(current_restake.unwrap_or(false))
-                .interact()?,
-        ))
+    let prompt = match current_restake {
+        Some(value) => format!("Restake delegation earnings? (current: {value})"),
+        None => "Restake delegation earnings?".to_owned(),
+    };
+    let initial = if defaults_allowed {
+        current_restake.unwrap_or(false)
     } else {
-        Ok(Some(
-            confirm("Restake delegation earnings?")
-                .initial_value(false)
-                .interact()?,
-        ))
-    }
+        false
+    };
+    Ok(Some(confirm(prompt).initial_value(initial).interact()?))
 }
 
 async fn validate_requested_target(
@@ -550,6 +613,62 @@ fn render_target(target: &DelegationTarget) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::input::{InputModeArgs, NetworkNodeArgs, SubmissionWaitArgs};
+
+    fn delegation_args() -> StakeConfigureDelegationArgs {
+        StakeConfigureDelegationArgs {
+            account: Some("alice".parse().unwrap()),
+            validator: Some(42),
+            passive: false,
+            capital: Some("1.5".parse().unwrap()),
+            restake: true,
+            no_restake: false,
+            network_node: NetworkNodeArgs {
+                network: Some("testnet".parse().unwrap()),
+                node: None,
+            },
+            submission: SubmissionWaitArgs { no_wait: true },
+            no_validate: true,
+            input_mode: InputModeArgs {
+                non_interactive: true,
+                no_defaults: false,
+            },
+        }
+    }
+
+    #[test]
+    fn prepared_delegation_maps_explicit_args_to_policies_and_promptables() {
+        let args = delegation_args();
+        let prepared = PreparedStakeConfigureDelegation::from_args(&args);
+
+        assert!(!prepared.input_mode.prompts_allowed());
+        assert!(!prepared.input_mode.defaults_allowed());
+        assert!(!prepared.finalization.should_wait());
+        assert!(!prepared.validation.should_validate());
+        assert!(matches!(prepared.account, Promptable::Provided(_)));
+        assert!(matches!(prepared.network, Defaultable::Provided(_)));
+        assert!(matches!(prepared.target, Promptable::Provided(_)));
+        assert!(matches!(prepared.capital, Promptable::Provided(_)));
+        assert!(matches!(
+            prepared.restake_earnings,
+            Promptable::Provided(true)
+        ));
+    }
+
+    #[test]
+    fn missing_restake_errors_in_non_interactive_mode() {
+        let mut args = delegation_args();
+        args.restake = false;
+        args.no_restake = false;
+        let prepared = PreparedStakeConfigureDelegation::from_args(&args);
+
+        let error = prepared
+            .restake_earnings
+            .resolve_with(prepared.input_mode, || Ok(true))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("restake preference"));
+    }
 
     #[test]
     fn diff_omits_unchanged_values() {

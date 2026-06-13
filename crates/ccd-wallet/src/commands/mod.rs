@@ -4,6 +4,7 @@ pub mod connect;
 pub mod contract;
 pub mod governance;
 pub mod identity;
+pub(crate) mod input;
 pub mod ledger;
 pub(crate) mod ledger_construction;
 pub mod node;

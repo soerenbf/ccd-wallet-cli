@@ -1,7 +1,10 @@
-use crate::commands::config::network::NetworkCommand;
+use crate::commands::{
+    config::network::NetworkCommand,
+    input::{AccountLabel, InputModeArgs, NetworkNodeArgs, SubmissionWaitArgs},
+};
 use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
-use concordium_rust_sdk::v2;
+use concordium_rust_sdk::{common::types::Amount, v2};
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -1041,7 +1044,7 @@ pub struct StakeShowArgs {
 pub struct StakeConfigureDelegationArgs {
     /// Local account label to configure. If omitted, interactive mode opens an account selector after network resolution.
     #[arg(value_name = "ACCOUNT")]
-    pub account: Option<String>,
+    pub account: Option<AccountLabel>,
 
     /// Delegate to a specific validator pool.
     #[arg(
@@ -1057,7 +1060,7 @@ pub struct StakeConfigureDelegationArgs {
 
     /// Set delegated capital as a decimal CCD value.
     #[arg(long = "capital", value_name = "CCD")]
-    pub capital: Option<String>,
+    pub capital: Option<Amount>,
 
     /// Enable restaking of delegation earnings.
     #[arg(long = "restake", conflicts_with = "no_restake")]
@@ -1067,29 +1070,18 @@ pub struct StakeConfigureDelegationArgs {
     #[arg(long = "no-restake", conflicts_with = "restake")]
     pub no_restake: bool,
 
-    /// Registered network name to resolve from the config store.
-    #[arg(long = "network", value_name = "NAME")]
-    pub network: Option<String>,
+    #[command(flatten)]
+    pub network_node: NetworkNodeArgs,
 
-    /// Concordium node gRPC endpoint.
-    #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
-    pub node: Option<v2::Endpoint>,
-
-    /// Return after successful submission without waiting for finalization.
-    #[arg(long = "no-wait")]
-    pub no_wait: bool,
+    #[command(flatten)]
+    pub submission: SubmissionWaitArgs,
 
     /// Skip pre-submission validator and delegation-capital validation.
     #[arg(long = "no-validate")]
     pub no_validate: bool,
 
-    /// Disable prompt fallback and require all values on the command line.
-    #[arg(long = "non-interactive")]
-    pub non_interactive: bool,
-
-    /// Disable silent use of active network defaults and force explicit selection.
-    #[arg(long = "no-defaults")]
-    pub no_defaults: bool,
+    #[command(flatten)]
+    pub input_mode: InputModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -2580,12 +2572,21 @@ mod tests {
             Command::Stake(command) => match command.command {
                 StakeSubcommand::Configure(args) => match args.command {
                     StakeConfigureSubcommand::Delegation(args) => {
-                        assert_eq!(args.account.as_deref(), Some("alice"));
+                        assert_eq!(
+                            args.account.as_ref().map(|account| account.as_str()),
+                            Some("alice")
+                        );
                         assert_eq!(args.validator, Some(42));
-                        assert_eq!(args.capital.as_deref(), Some("0"));
+                        assert_eq!(args.capital.map(|capital| capital.micro_ccd()), Some(0));
                         assert!(args.no_restake);
-                        assert_eq!(args.network.as_deref(), Some("testnet"));
-                        assert!(args.no_wait);
+                        assert_eq!(
+                            args.network_node
+                                .network
+                                .as_ref()
+                                .map(|network| network.as_str()),
+                            Some("testnet")
+                        );
+                        assert!(args.submission.no_wait);
                         assert!(!args.no_validate);
                     }
                     other => panic!("expected stake configure delegation command, got {other:?}"),
