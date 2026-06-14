@@ -3,58 +3,32 @@
 use crate::{
     cli::ContractInitArgs,
     commands::{
-        account::{
-            build_export_wallet_account, local_account_context_lines,
-            resolve_signing_account_context,
-        },
+        contract::shared::{PreparedContractSubmission, resolve_prepared_submission_context},
         transaction::render::render_finalized_summary,
-        ui::{ContextLine, log_resolved_context},
     },
     smart_contracts::{init as init_core, shared},
 };
 use anyhow::{Context, Result, bail};
-use ccd_wallet_core::config as node_config;
 use cliclack::{input, spinner};
 use concordium_rust_sdk::types::Energy;
 use rusqlite::Connection;
 
 pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()> {
-    let (network_context, selection) = resolve_signing_account_context(
-        conn,
+    let submission = PreparedContractSubmission::from_raw(
         args.account.as_deref(),
         args.network.as_deref(),
         args.node,
         args.non_interactive,
         args.no_defaults,
-        false,
-    )
-    .await?;
-    let mut lines = vec![ContextLine {
-        label: "network:",
-        value: format!(
-            "{} @ {}",
-            network_context.network_name, network_context.endpoint_label
-        ),
-        source: network_context.source,
-    }];
-    lines.extend(local_account_context_lines(
-        conn,
-        &selection.record,
-        selection.source,
-    )?);
-    log_resolved_context(&lines)?;
-    let network_name = network_context.network_name;
-    let network_entry = network_context.network_entry;
-    let endpoint = network_context.endpoint;
-    let endpoint_label = network_context.endpoint_label;
-    let account = selection.record;
-    let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
-    let mut client = node_config::connect_v2_client(endpoint.clone())
-        .await
-        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+        args.no_wait,
+    )?;
+    let mut context = resolve_prepared_submission_context(conn, &submission).await?;
+    let client = &mut context.client;
 
-    let module_ref = shared::parse_module_reference(&args.module_ref)?;
-    let amount = shared::parse_decimal_ccd_amount(args.amount.as_deref())?;
+    let module_ref = args.module_ref;
+    let amount = args
+        .amount
+        .unwrap_or_else(concordium_rust_sdk::common::types::Amount::zero);
     let block = concordium_rust_sdk::v2::BlockIdentifier::LastFinal;
     let contract_name = args
         .init_name
@@ -62,7 +36,7 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
         .unwrap_or(&args.init_name)
         .to_owned();
     let parameter = shared::resolve_parameter(
-        &mut client,
+        client,
         block,
         args.parameter_hex.as_deref(),
         args.parameter_json.as_deref(),
@@ -76,7 +50,7 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
 
     let simulation = if args.validate || args.energy.is_none() {
         let provisional = init_core::prepare_contract_init(
-            wallet.address,
+            context.wallet.address,
             module_ref,
             &args.init_name,
             amount,
@@ -91,9 +65,13 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
     } else {
         None
     };
-    let energy = resolve_energy(args.energy, simulation.as_ref(), args.non_interactive)?;
+    let energy = resolve_energy(
+        args.energy,
+        simulation.as_ref(),
+        !submission.input_mode().prompts_allowed(),
+    )?;
     let prepared = init_core::prepare_contract_init(
-        wallet.address,
+        context.wallet.address,
         module_ref,
         &args.init_name,
         amount,
@@ -102,8 +80,8 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
     )?;
 
     print_review_prompt(
-        &network_name,
-        &endpoint_label,
+        &context.network_name,
+        &context.endpoint_label,
         &prepared,
         simulation.as_ref(),
     )?;
@@ -117,19 +95,20 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
 
     let spin = spinner();
     spin.start("Submitting contract init transaction...");
-    let submitted = init_core::submit_contract_init(&mut client, &wallet, prepared).await?;
+    let submitted = init_core::submit_contract_init(client, &context.wallet, prepared).await?;
     spin.clear();
     let transaction_hash_label = submitted.transaction_hash.to_string();
     cliclack::log::success(format!(
-        "Submitted contract init transaction on {network_name} ({endpoint_label}): {transaction_hash_label}"
+        "Submitted contract init transaction on {} ({}): {transaction_hash_label}",
+        context.network_name, context.endpoint_label
     ))?;
-    if args.no_wait {
+    if !submission.should_wait_for_finalization() {
         return Ok(());
     }
 
     let spin = spinner();
     spin.start("Waiting for contract init finalization...");
-    let finalized = init_core::wait_for_contract_init_finalization(&mut client, submitted).await?;
+    let finalized = init_core::wait_for_contract_init_finalization(client, submitted).await?;
     spin.clear();
     let block_time = client
         .get_block_info(finalized.block_hash)
@@ -144,7 +123,7 @@ pub(super) async fn init(conn: &Connection, args: ContractInitArgs) -> Result<()
         "{}",
         render_finalized_summary(
             &finalized.transaction_hash,
-            &format!("{network_name} @ {endpoint_label}"),
+            &format!("{} @ {}", context.network_name, context.endpoint_label),
             &finalized.block_hash,
             &finalized.summary,
             block_time.as_ref(),

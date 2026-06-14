@@ -69,14 +69,33 @@ impl PreparedTokenMutationContext {
         no_wait: bool,
         always_prompt_account: bool,
     ) -> Result<Self> {
-        Ok(Self {
-            account: Promptable::from_option(account.map(str::parse).transpose()?, "account"),
-            network: Defaultable::from_option(network.map(str::parse).transpose()?, "network"),
+        Ok(Self::from_parts(
+            account.map(str::parse).transpose()?,
+            network.map(str::parse).transpose()?,
             node,
-            input_mode: InputMode::from_flags(non_interactive, no_defaults),
-            finalization: FinalizationPolicy::from_no_wait(no_wait),
+            InputMode::from_flags(non_interactive, no_defaults),
+            FinalizationPolicy::from_no_wait(no_wait),
             always_prompt_account,
-        })
+        ))
+    }
+
+    /// Build prepared token mutation context inputs from already-parsed values.
+    pub(super) fn from_parts(
+        account: Option<AccountLabel>,
+        network: Option<NetworkName>,
+        node: Option<v2::Endpoint>,
+        input_mode: InputMode,
+        finalization: FinalizationPolicy,
+        always_prompt_account: bool,
+    ) -> Self {
+        Self {
+            account: Promptable::from_option(account, "account"),
+            network: Defaultable::from_option(network, "network"),
+            node,
+            input_mode,
+            finalization,
+            always_prompt_account,
+        }
     }
 
     /// Return the shared input mode for resolving command-specific prepared values.
@@ -171,28 +190,6 @@ pub(super) async fn resolve_prepared_mutation_context(
         wallet,
         account_unlocks,
     })
-}
-
-/// Resolve the signer wallet, network, and node client for a token mutation.
-pub(super) async fn resolve_mutation_context(
-    conn: &Connection,
-    account: Option<&str>,
-    network: Option<&str>,
-    node: Option<v2::Endpoint>,
-    non_interactive: bool,
-    no_defaults: bool,
-    always_prompt_account: bool,
-) -> Result<MutationContext> {
-    let prepared = PreparedTokenMutationContext::from_raw(
-        account,
-        network,
-        node,
-        non_interactive,
-        no_defaults,
-        false,
-        always_prompt_account,
-    )?;
-    resolve_prepared_mutation_context(conn, &prepared).await
 }
 
 /// Construct a token client for the supplied token.

@@ -29,26 +29,26 @@
 
 ## 5. Token Compose REPL and Submit
 
-- [ ] 5.1 Convert `TokenComposeSubmitArgs` and REPL `SubmitCommandArgs` into one shared prepared submit input and resolver.
-- [ ] 5.2 Refactor REPL `OperationArgs` helpers to use promptable and optional semantics instead of ad hoc `take_or_prompt` behavior where practical.
-- [ ] 5.3 Introduce plan-specific unresolved-domain input types for symbols such as `@sender`, local lock references, token identifiers, account references, and token amounts.
-- [ ] 5.4 Preserve plan network inference, plan validation, saved plan format, and existing REPL prompts/completions with tests.
+- [x] 5.1 Convert `TokenComposeSubmitArgs` and REPL `SubmitCommandArgs` into one shared prepared submit input and resolver.
+- [x] 5.2 Refactor REPL `OperationArgs` helpers to use promptable and optional semantics instead of ad hoc `take_or_prompt` behavior where practical.
+- [x] 5.3 Introduce plan-specific unresolved-domain input types for symbols such as `@sender`, local lock references, token identifiers, account references, and token amounts.
+- [x] 5.4 Preserve plan network inference, plan validation, saved plan format, and existing REPL prompts/completions with tests.
 
 ## 6. Contract Submission Commands
 
-- [ ] 6.1 Refactor contract deploy-module, init, and update command args to use shared flag groups and prepared signing/submission inputs.
-- [ ] 6.2 Parse contract addresses, module references, CCD amounts, and parameter sources into domain-oriented input types.
-- [ ] 6.3 Preserve contract simulation, validation, confirmation, submission, finalization, and non-interactive behavior with tests.
+- [x] 6.1 Refactor contract deploy-module, init, and update command args to use shared flag groups and prepared signing/submission inputs.
+- [x] 6.2 Parse contract addresses, module references, CCD amounts, and parameter sources into domain-oriented input types.
+- [x] 6.3 Preserve contract simulation, validation, confirmation, submission, finalization, and non-interactive behavior with tests.
 
 ## 7. Local Entity and Governance Cleanup
 
-- [ ] 7.1 Refactor seed, ledger, identity, account, and network flows to distinguish promptable destructive targets from defaultable non-destructive context values.
-- [ ] 7.2 Refactor governance key, proposal, and update flows to use shared input mode, network selection, finalization policy, and domain parsing where appropriate.
-- [ ] 7.3 Remove obsolete ad hoc prompt/default helper code once each command family has moved to the prepared-input model.
+- [x] 7.1 Refactor seed, ledger, identity, account, and network flows to distinguish promptable destructive targets from defaultable non-destructive context values.
+- [x] 7.2 Refactor governance key, proposal, and update flows to use shared input mode, network selection, finalization policy, and domain parsing where appropriate.
+- [x] 7.3 Remove obsolete ad hoc prompt/default helper code once each command family has moved to the prepared-input model.
 
 ## 8. Verification and Documentation
 
-- [ ] 8.1 Run `cargo fmt` and fix formatting issues.
-- [ ] 8.2 Run focused Rust tests for refactored command families.
-- [ ] 8.3 Run broader `cargo test` or project-appropriate filtered test commands before marking implementation complete.
-- [ ] 8.4 Verify `docs/commands.md` remains accurate because the public command surface is preserved; update it only if implementation changes command structure or taxonomy.
+- [x] 8.1 Run `cargo fmt` and fix formatting issues.
+- [x] 8.2 Run focused Rust tests for refactored command families.
+- [x] 8.3 Run broader `cargo test` or project-appropriate filtered test commands before marking implementation complete.
+- [x] 8.4 Verify `docs/commands.md` remains accurate because the public command surface is preserved; update it only if implementation changes command structure or taxonomy.

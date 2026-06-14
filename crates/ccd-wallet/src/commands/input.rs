@@ -10,7 +10,11 @@ use std::{fmt, future::Future, str::FromStr};
 use anyhow::{Result, bail};
 use ccd_wallet_core::config;
 use clap::Args;
-use concordium_rust_sdk::{common::types::AccountAddress, v2};
+use concordium_rust_sdk::{
+    common::types::AccountAddress, smart_contracts::common::ContractAddress, v2,
+};
+
+use crate::smart_contracts::shared::parse_contract_address;
 
 /// Whether a command may prompt and whether it may fill active defaults.
 ///
@@ -205,11 +209,6 @@ impl AccountLabel {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Consume the wrapper and return the underlying string.
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
 }
 
 impl fmt::Display for AccountLabel {
@@ -239,11 +238,6 @@ impl NetworkName {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-
-    /// Consume the wrapper and return the underlying string.
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
 }
 
 impl fmt::Display for NetworkName {
@@ -264,18 +258,6 @@ impl FromStr for NetworkName {
 /// Local key-source label supplied on the command line.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct KeySourceLabel(String);
-
-impl KeySourceLabel {
-    /// Return the underlying key-source label as a string slice.
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Consume the wrapper and return the underlying string.
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
-}
 
 impl fmt::Display for KeySourceLabel {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -318,6 +300,25 @@ impl FromStr for AccountReference {
             return Ok(Self::Address(address));
         }
         Ok(Self::Label(value.parse()?))
+    }
+}
+
+/// Contract address input parsed with the CLI's accepted address forms.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct ContractAddressInput(ContractAddress);
+
+impl ContractAddressInput {
+    /// Return the parsed contract address.
+    pub(crate) const fn address(self) -> ContractAddress {
+        self.0
+    }
+}
+
+impl FromStr for ContractAddressInput {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        parse_contract_address(value).map(Self)
     }
 }
 
@@ -587,6 +588,7 @@ impl<T> Defaultable<T> {
     ///
     /// Returns an error if no explicit value is present and defaults are
     /// disabled, the provider fails, or the provider returns no active default.
+    #[allow(dead_code)]
     pub(crate) async fn resolve_with_default_async<F, Fut>(
         self,
         mode: InputMode,
@@ -612,6 +614,7 @@ impl<T> Defaultable<T> {
     ///
     /// Returns an error if neither explicit, default, nor prompt resolution can
     /// produce a value, or if a provider fails.
+    #[allow(dead_code)]
     pub(crate) async fn resolve_with_default_or_prompt_async<DF, Dfut, PF, Pfut>(
         self,
         mode: InputMode,
@@ -685,11 +688,6 @@ impl ValidationPolicy {
         } else {
             Self::Validate
         }
-    }
-
-    /// Build a validation policy from a positive `--validate` style flag.
-    pub(crate) const fn from_validate_flag(validate: bool) -> Self {
-        if validate { Self::Validate } else { Self::Skip }
     }
 
     /// Return whether validation should run.
@@ -829,6 +827,15 @@ mod tests {
         assert!("testnet".parse::<NetworkName>().is_ok());
         assert!("ledger-main_1".parse::<KeySourceLabel>().is_ok());
         assert!("bad label".parse::<NetworkName>().is_err());
+    }
+
+    #[test]
+    fn contract_address_input_accepts_cli_address_forms() -> Result<()> {
+        let address = "42,0".parse::<ContractAddressInput>()?.address();
+
+        assert_eq!(address.index, 42);
+        assert_eq!(address.subindex, 0);
+        Ok(())
     }
 
     #[test]

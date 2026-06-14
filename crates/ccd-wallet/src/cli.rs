@@ -1,13 +1,13 @@
 use crate::commands::{
     config::network::NetworkCommand,
     input::{
-        AccountLabel, AccountReference, InputModeArgs, NetworkNodeArgs, SubmissionWaitArgs,
-        TokenAmountInput,
+        AccountLabel, AccountReference, ContractAddressInput, InputModeArgs, NetworkNodeArgs,
+        SubmissionWaitArgs, TokenAmountInput,
     },
 };
 use ccd_wallet_core::config;
 use clap::{Args, Parser, Subcommand};
-use concordium_rust_sdk::{common::types::Amount, v2};
+use concordium_rust_sdk::{common::types::Amount, smart_contracts::common::ModuleReference, v2};
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -124,7 +124,7 @@ pub enum ContractSubcommand {
 pub struct ContractInitArgs {
     /// Module reference to initialize from.
     #[arg(long = "module-ref", value_name = "REF")]
-    pub module_ref: String,
+    pub module_ref: ModuleReference,
 
     /// Init function name, for example `init_counter`.
     #[arg(long = "init-name", value_name = "NAME")]
@@ -132,7 +132,7 @@ pub struct ContractInitArgs {
 
     /// CCD amount to transfer to the new instance, as a decimal value.
     #[arg(long = "amount", value_name = "CCD")]
-    pub amount: Option<String>,
+    pub amount: Option<Amount>,
 
     /// Maximum contract execution energy. If omitted interactively, the CLI prompts with a simulation-derived default when available.
     #[arg(long = "energy", value_name = "ENERGY")]
@@ -183,7 +183,7 @@ pub struct ContractInitArgs {
 pub struct ContractUpdateArgs {
     /// Contract instance address as `<index,subindex>`, `index,subindex`, or `index`.
     #[arg(long = "contract", value_name = "ADDRESS")]
-    pub contract: String,
+    pub contract: ContractAddressInput,
 
     /// Fully-qualified receive function name, for example `counter.increment`.
     #[arg(long = "receive", value_name = "NAME")]
@@ -191,7 +191,7 @@ pub struct ContractUpdateArgs {
 
     /// CCD amount to transfer to the instance, as a decimal value.
     #[arg(long = "amount", value_name = "CCD")]
-    pub amount: Option<String>,
+    pub amount: Option<Amount>,
 
     /// Maximum contract execution energy. If omitted interactively, the CLI prompts with a simulation-derived default when available.
     #[arg(long = "energy", value_name = "ENERGY")]
@@ -2311,7 +2311,10 @@ mod tests {
             Command::Contract(command) => match command.command {
                 ContractSubcommand::Init(args) => {
                     assert_eq!(args.init_name, "init_counter");
-                    assert_eq!(args.amount.as_deref(), Some("1.25"));
+                    assert_eq!(
+                        args.amount.map(|amount| amount.micro_ccd()),
+                        Some(1_250_000)
+                    );
                     assert!(args.energy.is_none());
                     assert_eq!(
                         args.parameter_json_file.as_deref(),
@@ -2344,7 +2347,8 @@ mod tests {
         match cli.command {
             Command::Contract(command) => match command.command {
                 ContractSubcommand::Update(args) => {
-                    assert_eq!(args.contract, "42,0");
+                    assert_eq!(args.contract.address().index, 42);
+                    assert_eq!(args.contract.address().subindex, 0);
                     assert_eq!(args.receive, "counter.increment");
                     assert_eq!(args.energy, Some(30000));
                     assert_eq!(args.parameter_json.as_deref(), Some("{\"delta\":1}"));

@@ -7,6 +7,7 @@
 use crate::{
     cli::{LedgerRemoveArgs, LedgerSetupArgs, LedgerSubcommand, LedgerSyncArgs},
     commands::{
+        input::{InputMode, Promptable},
         ledger_construction::{self, LedgerIdentityIssuanceInput},
         seed::{self, AccountRecoveryMaterial, IdentityRecoveryMaterial, TerminalSeedPrompts},
         ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
@@ -448,15 +449,34 @@ fn resolve_ledger_owner(
     explicit: Option<&str>,
     non_interactive: bool,
 ) -> Result<(signer_owners::SignerOwnerRecord, Option<ResolutionSource>)> {
-    match explicit {
-        Some(label) => signer_owners::find_by_label(conn, label)?
-            .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
-            .map(|owner| (owner, Some(ResolutionSource::Explicit)))
-            .with_context(|| format!("Ledger key source '{}' is not configured", label)),
-        None if non_interactive => {
-            bail!("Ledger key-source label must be provided in --non-interactive mode")
+    if explicit.is_none() && non_interactive {
+        bail!("Ledger key-source label must be provided in --non-interactive mode");
+    }
+    let resolved =
+        Promptable::from_option(explicit.map(ToOwned::to_owned), "Ledger key-source label")
+            .resolve_with(InputMode::interactive(), || {
+                select_ledger_label(conn).map(|owner| owner.label)
+            })?;
+    match resolved.source {
+        crate::commands::input::ResolvedSource::Explicit => {
+            signer_owners::find_by_label(conn, &resolved.value)?
+                .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
+                .map(|owner| (owner, Some(ResolutionSource::Explicit)))
+                .with_context(|| {
+                    format!("Ledger key source '{}' is not configured", resolved.value)
+                })
         }
-        None => Ok((select_ledger_label(conn)?, None)),
+        crate::commands::input::ResolvedSource::Prompt => {
+            signer_owners::find_by_label(conn, &resolved.value)?
+                .filter(|owner| owner.kind == SignerOwnerKind::Ledger)
+                .map(|owner| (owner, None))
+                .with_context(|| {
+                    format!("Ledger key source '{}' is not configured", resolved.value)
+                })
+        }
+        crate::commands::input::ResolvedSource::Default => {
+            unreachable!("ledger owner resolver does not use defaults")
+        }
     }
 }
 
@@ -492,19 +512,20 @@ fn select_ledger_label(conn: &Connection) -> Result<signer_owners::SignerOwnerRe
 }
 
 fn resolve_label(label: Option<String>, non_interactive: bool) -> Result<String> {
-    match label {
-        Some(label) => Ok(label),
-        None if non_interactive => {
-            bail!("Ledger key-source label must be provided in --non-interactive mode")
-        }
-        None => input("Ledger key-source label:")
-            .validate(|value: &String| match validate_key_source_label(value) {
-                Ok(()) => Ok(()),
-                Err(err) => Err(err.to_string()),
-            })
-            .interact()
-            .context("failed to read Ledger key-source label"),
+    if label.is_none() && non_interactive {
+        bail!("Ledger key-source label must be provided in --non-interactive mode");
     }
+    Promptable::from_option(label, "Ledger key-source label")
+        .resolve_with(InputMode::interactive(), || {
+            input("Ledger key-source label:")
+                .validate(|value: &String| match validate_key_source_label(value) {
+                    Ok(()) => Ok(()),
+                    Err(err) => Err(err.to_string()),
+                })
+                .interact()
+                .context("failed to read Ledger key-source label")
+        })
+        .map(|resolved| resolved.into_value())
 }
 
 fn validate_key_source_label(label: &str) -> Result<()> {

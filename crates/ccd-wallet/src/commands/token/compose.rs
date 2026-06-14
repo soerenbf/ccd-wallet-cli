@@ -7,6 +7,7 @@ use crate::{
             AccountReferenceContext, AccountReferenceUnlocks, resolve_account_network_context,
             resolve_account_reference,
         },
+        input::{AccountLabel, FinalizationPolicy, InputMode, NetworkName, Promptable},
         token::shared,
         ui::{SelectItem, select_always},
     },
@@ -60,35 +61,100 @@ pub(super) async fn preview(args: TokenComposePreviewArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+struct PreparedTokenComposeSubmit {
+    plan: std::path::PathBuf,
+    sender: Option<AccountLabel>,
+    network: Option<NetworkName>,
+    node: Option<concordium_rust_sdk::v2::Endpoint>,
+    input_mode: InputMode,
+    finalization: FinalizationPolicy,
+}
+
+impl PreparedTokenComposeSubmit {
+    fn from_cli(args: TokenComposeSubmitArgs) -> Result<Self> {
+        Self::from_parts(
+            args.plan,
+            args.sender,
+            args.network,
+            args.node,
+            args.non_interactive,
+            args.no_defaults,
+            args.no_wait,
+        )
+    }
+
+    fn from_repl(plan: std::path::PathBuf, args: SubmitCommandArgs) -> Result<Self> {
+        Self::from_parts(
+            plan,
+            args.sender,
+            args.network,
+            args.node,
+            args.non_interactive,
+            args.no_defaults,
+            args.no_wait,
+        )
+    }
+
+    fn from_parts(
+        plan: std::path::PathBuf,
+        sender: Option<String>,
+        network: Option<String>,
+        node: Option<concordium_rust_sdk::v2::Endpoint>,
+        non_interactive: bool,
+        no_defaults: bool,
+        no_wait: bool,
+    ) -> Result<Self> {
+        let input_mode = InputMode::from_flags(non_interactive, no_defaults);
+        if !input_mode.prompts_allowed() && sender.is_none() {
+            bail!("sender must be provided with --sender in --non-interactive mode");
+        }
+        Ok(Self {
+            plan,
+            sender: sender.map(|sender| sender.parse()).transpose()?,
+            network: network.map(|network| network.parse()).transpose()?,
+            node,
+            input_mode,
+            finalization: FinalizationPolicy::from_no_wait(no_wait),
+        })
+    }
+
+    fn plan_path(&self) -> &Path {
+        &self.plan
+    }
+}
+
 /// Submit a token composition plan.
 pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> Result<()> {
-    validate_submit_args(&args)?;
-    let plan = read_plan(&args.plan)?;
+    let prepared = PreparedTokenComposeSubmit::from_cli(args)?;
+    submit_prepared(conn, prepared).await
+}
+
+async fn submit_prepared(conn: &Connection, prepared: PreparedTokenComposeSubmit) -> Result<()> {
+    let plan = read_plan(prepared.plan_path())?;
     validate_lock_references(&plan)?;
     if plan.operations.is_empty() {
         bail!("token composition plan has no operations to submit");
     }
 
-    let inferred_network = if args.network.is_none() && args.node.is_none() {
-        Some(plan_network_name(&plan)?)
+    let inferred_network = if prepared.network.is_none() && prepared.node.is_none() {
+        Some(plan_network_name(&plan)?.parse()?)
     } else {
         None
     };
-    let network = args.network.as_deref().or(inferred_network.as_deref());
-    let mut context = shared::resolve_mutation_context(
-        conn,
-        args.sender.as_deref(),
-        network,
-        args.node,
-        args.non_interactive,
-        args.no_defaults,
+    let mutation_context = shared::PreparedTokenMutationContext::from_parts(
+        prepared.sender.clone(),
+        prepared.network.clone().or(inferred_network),
+        prepared.node.clone(),
+        prepared.input_mode,
+        prepared.finalization,
         true,
-    )
-    .await?;
+    );
+    let mut context = shared::resolve_prepared_mutation_context(conn, &mutation_context).await?;
 
     validate_plan_network_matches_context(&plan, &context)?;
     let operations = resolve_meta_update_operations(conn, &mut context, &plan).await?;
-    let summary = render_plan_preview(&plan, Some(args.plan.as_path()))?;
+    let summary = render_plan_preview(&plan, Some(prepared.plan_path()))?;
     cliclack::log::info(format!(
         "Token composition transaction\nnetwork: {} ({})\naccount: {}\n\n{}",
         context.network_name, context.endpoint_label, context.wallet.address, summary
@@ -108,7 +174,7 @@ pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> R
         "Submitted token composition on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
-    if !args.no_wait {
+    if prepared.finalization.should_wait() {
         shared::wait_for_finalization(
             &mut context.client,
             &transaction_hash,
@@ -116,13 +182,6 @@ pub(super) async fn submit(conn: &Connection, args: TokenComposeSubmitArgs) -> R
             &context.endpoint_label,
         )
         .await?;
-    }
-    Ok(())
-}
-
-fn validate_submit_args(args: &TokenComposeSubmitArgs) -> Result<()> {
-    if args.non_interactive && args.sender.is_none() {
-        bail!("sender must be provided with --sender in --non-interactive mode");
     }
     Ok(())
 }
@@ -381,19 +440,85 @@ fn resolve_plan_lock_grant(
     shared::resolve_lock_grant(conn, context, &unresolved)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanTokenIdInput(String);
+
+impl PlanTokenIdInput {
+    fn parse(input: &str) -> Result<Self> {
+        TokenId::from_str(input).with_context(|| format!("invalid token identifier '{input}'"))?;
+        Ok(Self(input.to_owned()))
+    }
+
+    fn resolve(&self) -> Result<TokenId> {
+        TokenId::from_str(&self.0).with_context(|| format!("invalid token identifier '{}'", self.0))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanTokenAmountInput(String);
+
+impl PlanTokenAmountInput {
+    fn parse(input: &str) -> Result<Self> {
+        if input.trim().is_empty() {
+            bail!("token amount must not be empty");
+        }
+        if input.trim().starts_with('-') {
+            bail!("token amount must not be negative");
+        }
+        Ok(Self(input.to_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanAccountReferenceInput {
+    Sender,
+    AddressOrLabel(String),
+}
+
+impl PlanAccountReferenceInput {
+    fn parse(input: &str) -> Self {
+        if input == "@sender" {
+            Self::Sender
+        } else {
+            Self::AddressOrLabel(input.to_owned())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanLockReferenceInput {
+    Latest,
+    Created(usize),
+    Existing(String),
+}
+
+impl PlanLockReferenceInput {
+    fn parse(input: &str) -> Result<Self> {
+        match ParsedLockReference::parse(input)? {
+            ParsedLockReference::Latest => Ok(Self::Latest),
+            ParsedLockReference::Created(index) => Ok(Self::Created(index)),
+            ParsedLockReference::Existing(lock) => Ok(Self::Existing(lock.to_owned())),
+        }
+    }
+}
+
 fn resolve_lock_reference(input: &str, predicted_locks: &[LockId]) -> Result<LockId> {
-    match ParsedLockReference::parse(input)? {
-        ParsedLockReference::Latest => bail!("saved plans must use explicit lock references"),
-        ParsedLockReference::Created(index) => predicted_locks
+    match PlanLockReferenceInput::parse(input)? {
+        PlanLockReferenceInput::Latest => bail!("saved plans must use explicit lock references"),
+        PlanLockReferenceInput::Created(index) => predicted_locks
             .get(index - 1)
             .cloned()
             .with_context(|| format!("same-plan lock reference '@{index}' could not be resolved")),
-        ParsedLockReference::Existing(lock) => lock.parse().context("invalid lock identifier"),
+        PlanLockReferenceInput::Existing(lock) => lock.parse().context("invalid lock identifier"),
     }
 }
 
 fn parse_token_id(input: &str) -> Result<TokenId> {
-    TokenId::from_str(input).with_context(|| format!("invalid token identifier '{input}'"))
+    PlanTokenIdInput::parse(input)?.resolve()
 }
 
 async fn query_plan_token_info(
@@ -410,10 +535,18 @@ async fn resolve_amount(
     token_id: TokenId,
     amount: &str,
 ) -> Result<TokenAmount> {
+    let amount = PlanTokenAmountInput::parse(amount)?;
     let mut client = context.client.clone();
     let token_info = query_plan_token_info(&mut client, token_id.clone()).await?;
-    shared::parse_token_amount(amount, token_info.token_state.decimals)
-        .with_context(|| format!("invalid amount '{amount}' for token '{}'", token_id))
+    shared::parse_token_amount(amount.as_str(), token_info.token_state.decimals).with_context(
+        || {
+            format!(
+                "invalid amount '{}' for token '{}'",
+                amount.as_str(),
+                token_id
+            )
+        },
+    )
 }
 
 fn resolve_account(
@@ -422,17 +555,17 @@ fn resolve_account(
     value: &str,
     label: &str,
 ) -> Result<AccountAddress> {
-    if value == "@sender" {
-        return Ok(context.wallet.address);
+    match PlanAccountReferenceInput::parse(value) {
+        PlanAccountReferenceInput::Sender => Ok(context.wallet.address),
+        PlanAccountReferenceInput::AddressOrLabel(value) => shared::resolve_account_address(
+            conn,
+            context,
+            Some(&value),
+            "Account address or local label:",
+            label,
+            true,
+        ),
     }
-    shared::resolve_account_address(
-        conn,
-        context,
-        Some(value),
-        "Account address or local label:",
-        label,
-        true,
-    )
 }
 
 fn resolve_accounts(
@@ -1011,19 +1144,8 @@ async fn handle_repl_line(
             ))?;
         }
         ReplCommand::Submit(args) => {
-            submit(
-                conn,
-                TokenComposeSubmitArgs {
-                    plan: plan_path.to_owned(),
-                    sender: args.sender,
-                    network: args.network,
-                    node: args.node,
-                    no_wait: args.no_wait,
-                    non_interactive: args.non_interactive,
-                    no_defaults: args.no_defaults,
-                },
-            )
-            .await?;
+            let prepared = PreparedTokenComposeSubmit::from_repl(plan_path.to_owned(), *args)?;
+            submit_prepared(conn, prepared).await?;
             return Ok(ReplControl::Exit);
         }
     }
@@ -1553,27 +1675,31 @@ impl OperationArgs {
         values
     }
 
-    fn take_or_prompt(&mut self, name: &str, prompt: &str) -> Result<String> {
-        if let Some(value) = self.take_optional(name) {
-            return Ok(value);
-        }
-        let value: String = input(prompt).interact()?;
-        Ok(value)
+    fn take_promptable(&mut self, name: &'static str) -> Promptable<String> {
+        Promptable::from_option(self.take_optional(name), name)
     }
 
-    fn take_positional_or_prompt(&mut self, name: &str, prompt: &str) -> Result<String> {
-        if let Some(value) = self.positionals.pop_front() {
-            return Ok(value);
-        }
-        self.take_or_prompt(name, prompt)
+    fn take_or_prompt(&mut self, name: &'static str, prompt: &str) -> Result<String> {
+        self.take_promptable(name)
+            .resolve_with(InputMode::interactive(), || prompt_string(prompt))
+            .map(|resolved| resolved.into_value())
     }
 
-    fn take_many_or_prompt(&mut self, name: &str, prompt: &str) -> Result<Vec<String>> {
+    fn take_positional_or_prompt(&mut self, name: &'static str, prompt: &str) -> Result<String> {
+        let input = Promptable::from_option(self.positionals.pop_front(), name);
+        input
+            .resolve_with(InputMode::interactive(), || {
+                self.take_or_prompt(name, prompt)
+            })
+            .map(|resolved| resolved.into_value())
+    }
+
+    fn take_many_or_prompt(&mut self, name: &'static str, prompt: &str) -> Result<Vec<String>> {
         let values = self.take_all(name);
-        if !values.is_empty() {
-            return Ok(values);
-        }
-        let value: String = input(prompt).interact()?;
+        let raw = Promptable::from_option((!values.is_empty()).then(|| values.join(",")), name)
+            .resolve_with(InputMode::interactive(), || prompt_string(prompt))?
+            .into_value();
+        let value = raw;
         let values = value
             .split(',')
             .map(str::trim)
@@ -1605,10 +1731,10 @@ impl OperationArgs {
     }
 
     async fn take_token_or_select_for_lock(&mut self, plan: &Plan, lock: &str) -> Result<String> {
-        if let Some(token) = self.take_optional("token") {
-            return Ok(token);
+        match self.take_promptable("token") {
+            Promptable::Provided(token) => Ok(token),
+            Promptable::Missing { .. } => select_token_for_lock_reference(plan, lock).await,
         }
-        select_token_for_lock_reference(plan, lock).await
     }
 
     async fn take_recipient_or_select_for_lock(
@@ -1616,11 +1742,15 @@ impl OperationArgs {
         plan: &Plan,
         lock: &str,
     ) -> Result<String> {
-        if let Some(recipient) = self.take_optional("recipient") {
-            return Ok(recipient);
+        match self.take_promptable("recipient") {
+            Promptable::Provided(recipient) => Ok(recipient),
+            Promptable::Missing { .. } => select_recipient_for_lock_reference(plan, lock).await,
         }
-        select_recipient_for_lock_reference(plan, lock).await
     }
+}
+
+fn prompt_string(prompt: &str) -> Result<String> {
+    Ok(input(prompt).interact()?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2420,6 +2550,29 @@ amount = "100"
     }
 
     #[test]
+    fn parses_plan_specific_unresolved_domain_inputs() {
+        assert!(PlanTokenIdInput::parse("CCD").is_ok());
+        assert!(PlanTokenIdInput::parse("").is_err());
+        assert_eq!(
+            PlanAccountReferenceInput::parse("@sender"),
+            PlanAccountReferenceInput::Sender
+        );
+        assert_eq!(
+            PlanAccountReferenceInput::parse("alice"),
+            PlanAccountReferenceInput::AddressOrLabel("alice".to_owned())
+        );
+        assert!(matches!(
+            PlanLockReferenceInput::parse("@2").unwrap(),
+            PlanLockReferenceInput::Created(2)
+        ));
+        assert_eq!(
+            PlanTokenAmountInput::parse("1.25").unwrap().as_str(),
+            "1.25"
+        );
+        assert!(PlanTokenAmountInput::parse("-1").is_err());
+    }
+
+    #[test]
     fn parses_help_alias_and_preview_commands() {
         assert!(matches!(
             parse_repl_command("?").unwrap(),
@@ -2442,7 +2595,7 @@ amount = "100"
             non_interactive: true,
             no_defaults: false,
         };
-        let err = validate_submit_args(&args).expect_err("missing sender must fail");
+        let err = PreparedTokenComposeSubmit::from_cli(args).expect_err("missing sender must fail");
         assert!(err.to_string().contains("--sender"));
     }
 

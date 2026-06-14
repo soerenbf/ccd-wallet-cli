@@ -5,9 +5,13 @@ use crate::{
         GovernanceProposalSignArgs, GovernanceProposalSubcommand, GovernanceProposalSubmitArgs,
         GovernanceSubcommand, GovernanceUpdateArgs,
     },
-    commands::ui::{
-        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_multiselect_or_single,
-        fuzzy_multiselect_or_single_with_initial, log_resolved_context, select_or_single,
+    commands::{
+        input::{FinalizationPolicy, InputMode},
+        ui::{
+            ContextLine, FuzzySelectItem, ResolutionSource, SelectItem,
+            fuzzy_multiselect_or_single, fuzzy_multiselect_or_single_with_initial,
+            log_resolved_context, select_or_single,
+        },
     },
 };
 use anyhow::{Context, Result, bail};
@@ -174,14 +178,50 @@ pub async fn run(conn: &mut Connection, command: crate::cli::GovernanceSubcomman
     }
 }
 
+#[derive(Clone, Debug)]
+struct PreparedGovernanceContext {
+    network: Option<String>,
+    input_mode: InputMode,
+    finalization: FinalizationPolicy,
+}
+
+impl PreparedGovernanceContext {
+    fn from_flags(
+        network: Option<String>,
+        non_interactive: bool,
+        no_defaults: bool,
+        no_wait: bool,
+    ) -> Self {
+        Self {
+            network,
+            input_mode: InputMode::from_flags(non_interactive, no_defaults),
+            finalization: FinalizationPolicy::from_no_wait(no_wait),
+        }
+    }
+
+    async fn resolve_network(
+        &self,
+        conn: &mut Connection,
+    ) -> Result<(String, NetworkEntry, String, ResolutionSource)> {
+        resolve_governance_network(
+            conn,
+            self.network.as_deref(),
+            self.input_mode.defaults_allowed(),
+            !self.input_mode.prompts_allowed(),
+        )
+        .await
+    }
+}
+
 async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
-        conn,
-        args.network.as_deref(),
-        !args.no_defaults,
+    let prepared_context = PreparedGovernanceContext::from_flags(
+        args.network.clone(),
         args.non_interactive,
-    )
-    .await?;
+        args.no_defaults,
+        args.no_wait,
+    );
+    let (network_name, network_entry, endpoint_label, source) =
+        prepared_context.resolve_network(conn).await?;
     log_resolved_context(&[ContextLine {
         label: "network:",
         value: format!("{network_name} @ {endpoint_label}"),
@@ -237,7 +277,7 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
         submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
             .await?;
     let message = format!("Submitted governance update: {transaction_hash}");
-    if args.no_wait {
+    if !prepared_context.finalization.should_wait() {
         println!("{message}");
         return Ok(());
     } else {
@@ -2232,13 +2272,14 @@ fn now_unix_seconds() -> Result<u64> {
 }
 
 async fn create_proposal(conn: &mut Connection, args: GovernanceProposalCreateArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
-        conn,
-        args.network.as_deref(),
-        !args.no_defaults,
+    let prepared_context = PreparedGovernanceContext::from_flags(
+        args.network.clone(),
         args.non_interactive,
-    )
-    .await?;
+        args.no_defaults,
+        false,
+    );
+    let (network_name, network_entry, endpoint_label, source) =
+        prepared_context.resolve_network(conn).await?;
     log_resolved_context(&[ContextLine {
         label: "network:",
         value: format!("{network_name} @ {endpoint_label}"),
@@ -2333,13 +2374,14 @@ async fn load_and_prepare_proposal(
 }
 
 async fn sign_proposal(conn: &mut Connection, args: GovernanceProposalSignArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
-        conn,
-        args.network.as_deref(),
-        !args.no_defaults,
+    let prepared_context = PreparedGovernanceContext::from_flags(
+        args.network.clone(),
         args.non_interactive,
-    )
-    .await?;
+        args.no_defaults,
+        false,
+    );
+    let (network_name, network_entry, endpoint_label, source) =
+        prepared_context.resolve_network(conn).await?;
     log_resolved_context(&[ContextLine {
         label: "network:",
         value: format!("{network_name} @ {endpoint_label}"),
@@ -2438,13 +2480,14 @@ fn resolve_proposal_local_signer(
 }
 
 async fn submit_proposal(conn: &mut Connection, args: GovernanceProposalSubmitArgs) -> Result<()> {
-    let (network_name, network_entry, endpoint_label, source) = resolve_governance_network(
-        conn,
-        args.network.as_deref(),
-        !args.no_defaults,
+    let prepared_context = PreparedGovernanceContext::from_flags(
+        args.network.clone(),
         args.non_interactive,
-    )
-    .await?;
+        args.no_defaults,
+        args.no_wait,
+    );
+    let (network_name, network_entry, endpoint_label, source) =
+        prepared_context.resolve_network(conn).await?;
     log_resolved_context(&[ContextLine {
         label: "network:",
         value: format!("{network_name} @ {endpoint_label}"),
@@ -2491,7 +2534,7 @@ async fn submit_proposal(conn: &mut Connection, args: GovernanceProposalSubmitAr
         submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
             .await?;
     let message = format!("Submitted governance update: {transaction_hash}");
-    if args.no_wait {
+    if !prepared_context.finalization.should_wait() {
         println!("{message}");
         return Ok(());
     }

@@ -5,6 +5,7 @@ mod download_module;
 mod init;
 mod invoke;
 mod parameter_template;
+mod shared;
 mod show;
 mod update;
 

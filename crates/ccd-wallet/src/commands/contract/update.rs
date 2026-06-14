@@ -3,62 +3,36 @@
 use crate::{
     cli::ContractUpdateArgs,
     commands::{
-        account::{
-            build_export_wallet_account, local_account_context_lines,
-            resolve_signing_account_context,
-        },
+        contract::shared::{PreparedContractSubmission, resolve_prepared_submission_context},
         transaction::render::render_finalized_summary,
-        ui::{ContextLine, log_resolved_context},
     },
     smart_contracts::{shared, update as update_core},
 };
 use anyhow::{Context, Result, bail};
-use ccd_wallet_core::config as node_config;
 use cliclack::{input, spinner};
 use concordium_rust_sdk::types::Energy;
 use rusqlite::Connection;
 
 pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Result<()> {
-    let (network_context, selection) = resolve_signing_account_context(
-        conn,
+    let submission = PreparedContractSubmission::from_raw(
         args.account.as_deref(),
         args.network.as_deref(),
         args.node,
         args.non_interactive,
         args.no_defaults,
-        false,
-    )
-    .await?;
-    let mut lines = vec![ContextLine {
-        label: "network:",
-        value: format!(
-            "{} @ {}",
-            network_context.network_name, network_context.endpoint_label
-        ),
-        source: network_context.source,
-    }];
-    lines.extend(local_account_context_lines(
-        conn,
-        &selection.record,
-        selection.source,
-    )?);
-    log_resolved_context(&lines)?;
-    let network_name = network_context.network_name;
-    let network_entry = network_context.network_entry;
-    let endpoint = network_context.endpoint;
-    let endpoint_label = network_context.endpoint_label;
-    let account = selection.record;
-    let wallet = build_export_wallet_account(conn, &network_name, &network_entry, &account)?;
-    let mut client = node_config::connect_v2_client(endpoint.clone())
-        .await
-        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+        args.no_wait,
+    )?;
+    let mut context = resolve_prepared_submission_context(conn, &submission).await?;
+    let client = &mut context.client;
 
-    let contract = shared::parse_contract_address(&args.contract)?;
+    let contract = args.contract.address();
     let (receive_name, contract_name, function_name) = shared::parse_receive_name(&args.receive)?;
-    let amount = shared::parse_decimal_ccd_amount(args.amount.as_deref())?;
+    let amount = args
+        .amount
+        .unwrap_or_else(concordium_rust_sdk::common::types::Amount::zero);
     let block = concordium_rust_sdk::v2::BlockIdentifier::LastFinal;
     let parameter = shared::resolve_parameter(
-        &mut client,
+        client,
         block,
         args.parameter_hex.as_deref(),
         args.parameter_json.as_deref(),
@@ -73,7 +47,7 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
 
     let provisional_energy = Energy::from(args.energy.unwrap_or(10_000_000));
     let provisional = update_core::prepare_contract_update(
-        wallet.address,
+        context.wallet.address,
         contract,
         receive_name.clone(),
         amount,
@@ -83,15 +57,19 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
     let simulation = if args.validate || args.energy.is_none() {
         let spin = spinner();
         spin.start("Simulating contract update...");
-        let simulation = update_core::simulate_contract_update(&mut client, &provisional).await;
+        let simulation = update_core::simulate_contract_update(client, &provisional).await;
         spin.clear();
         Some(simulation)
     } else {
         None
     };
-    let energy = resolve_energy(args.energy, simulation.as_ref(), args.non_interactive)?;
+    let energy = resolve_energy(
+        args.energy,
+        simulation.as_ref(),
+        !submission.input_mode().prompts_allowed(),
+    )?;
     let prepared = update_core::prepare_contract_update(
-        wallet.address,
+        context.wallet.address,
         contract,
         receive_name,
         amount,
@@ -100,8 +78,8 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
     );
 
     print_review_prompt(
-        &network_name,
-        &endpoint_label,
+        &context.network_name,
+        &context.endpoint_label,
         &prepared,
         simulation.as_ref(),
     )?;
@@ -115,20 +93,20 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
 
     let spin = spinner();
     spin.start("Submitting contract update transaction...");
-    let submitted = update_core::submit_contract_update(&mut client, &wallet, prepared).await?;
+    let submitted = update_core::submit_contract_update(client, &context.wallet, prepared).await?;
     spin.clear();
     let transaction_hash_label = submitted.transaction_hash.to_string();
     cliclack::log::success(format!(
-        "Submitted contract update transaction on {network_name} ({endpoint_label}): {transaction_hash_label}"
+        "Submitted contract update transaction on {} ({}): {transaction_hash_label}",
+        context.network_name, context.endpoint_label
     ))?;
-    if args.no_wait {
+    if !submission.should_wait_for_finalization() {
         return Ok(());
     }
 
     let spin = spinner();
     spin.start("Waiting for contract update finalization...");
-    let finalized =
-        update_core::wait_for_contract_update_finalization(&mut client, submitted).await?;
+    let finalized = update_core::wait_for_contract_update_finalization(client, submitted).await?;
     spin.clear();
     let block_time = client
         .get_block_info(finalized.block_hash)
@@ -143,7 +121,7 @@ pub(super) async fn update(conn: &Connection, args: ContractUpdateArgs) -> Resul
         "{}",
         render_finalized_summary(
             &finalized.transaction_hash,
-            &format!("{network_name} @ {endpoint_label}"),
+            &format!("{} @ {}", context.network_name, context.endpoint_label),
             &finalized.block_hash,
             &finalized.summary,
             block_time.as_ref(),

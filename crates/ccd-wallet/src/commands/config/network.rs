@@ -1,4 +1,7 @@
-use crate::commands::ui::{SelectItem, select_or_single};
+use crate::commands::{
+    input::{Defaultable, InputMode},
+    ui::{SelectItem, select_or_single},
+};
 use anyhow::{Context, Result, bail};
 use ccd_wallet_core::{
     config,
@@ -426,29 +429,22 @@ fn resolve_show_target_with_config(
             endpoint: node,
             mode: NetworkShowMode::NodeOnly,
         }),
-        (None, None) if args.no_defaults && args.non_interactive => {
-            bail!("network name or --node must be provided in --non-interactive mode")
-        }
-        (None, None) if args.no_defaults => {
-            let name = select_network_name(conn, app_config)?;
-            let config_view = network_config_view(app_config, &name)?;
-            let endpoint = endpoint_from_string(&config_view.entry.node_endpoint)?;
-            Ok(NetworkShowTarget {
-                endpoint,
-                endpoint_label: config_view.entry.node_endpoint.clone(),
-                mode: NetworkShowMode::Config(config_view),
-            })
-        }
         (None, None) => {
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?.with_context(
-                || {
+            let mode = InputMode::from_flags(args.non_interactive, args.no_defaults);
+            let name = Defaultable::from_option(None::<String>, "network name")
+                .resolve_with_default_or_prompt(
+                    mode,
+                    || wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY),
+                    || select_network_name(conn, app_config),
+                )
+                .map(|resolved| resolved.into_value())
+                .with_context(|| {
                     "no active network is set; provide a network label, use `--node`, or run `ccd-wallet network use <NAME>`"
-                },
-            )?;
-            let config_view = network_config_view(app_config, &active).with_context(|| {
+                })?;
+            let config_view = network_config_view(app_config, &name).with_context(|| {
                 format!(
                     "active network '{}' is no longer registered; update it with `ccd-wallet network use <NAME>` or provide a network label / `--node` explicitly",
-                    active
+                    name
                 )
             })?;
             let endpoint = endpoint_from_string(&config_view.entry.node_endpoint)?;

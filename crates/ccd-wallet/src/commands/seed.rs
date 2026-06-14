@@ -1,7 +1,8 @@
 use crate::{
     cli::{SeedSubcommand, SeedSyncArgs},
-    commands::ui::{
-        ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single,
+    commands::{
+        input::{Defaultable, InputMode, Promptable},
+        ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
     },
 };
 use anyhow::{Context, Result, bail};
@@ -518,11 +519,12 @@ fn resolve_required_seed_label(
     prompt: &str,
     error: &str,
 ) -> Result<String> {
-    match label {
-        Some(label) => Ok(label),
-        None if non_interactive => bail!("{error}"),
-        None => prompts.prompt_seed_label(prompt),
-    }
+    Promptable::from_option(label, "seed label")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            prompts.prompt_seed_label(prompt)
+        })
+        .map(|resolved| resolved.into_value())
+        .with_context(|| error.to_owned())
 }
 
 fn resolve_seed_label(
@@ -531,13 +533,16 @@ fn resolve_seed_label(
     no_defaults: bool,
     prompts: &mut impl SeedPrompts,
 ) -> Result<String> {
-    match label {
-        Some(label) => Ok(label),
-        None if no_defaults => select_seed_label(conn, prompts),
-        None => wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.with_context(
+    Defaultable::from_option(label, "seed label")
+        .resolve_with_default_or_prompt(
+            InputMode::from_flags(false, no_defaults),
+            || wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY),
+            || select_seed_label(conn, prompts),
+        )
+        .map(|resolved| resolved.into_value())
+        .with_context(
             || "no active seed is set; provide a seed label or run `ccd-wallet seed use <LABEL>`",
-        ),
-    }
+        )
 }
 
 fn select_seed_label(conn: &Connection, prompts: &mut impl SeedPrompts) -> Result<String> {
