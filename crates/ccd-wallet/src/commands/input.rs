@@ -256,6 +256,7 @@ impl FromStr for NetworkName {
 }
 
 /// Local key-source label supplied on the command line.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct KeySourceLabel(String);
 
@@ -536,6 +537,7 @@ impl<T> Defaultable<T> {
     ///
     /// Returns an error if no explicit value is present and defaults are
     /// disabled, the provider fails, or the provider returns no active default.
+    #[allow(dead_code)]
     pub(crate) fn resolve_with_default(
         self,
         mode: InputMode,
@@ -569,10 +571,10 @@ impl<T> Defaultable<T> {
         match self {
             Self::Provided(value) => Ok(Resolved::new(value, ResolvedSource::Explicit)),
             Self::Missing { value_name } => {
-                if mode.defaults_allowed() {
-                    if let Some(value) = default()? {
-                        return Ok(Resolved::new(value, ResolvedSource::Default));
-                    }
+                if mode.defaults_allowed()
+                    && let Some(value) = default()?
+                {
+                    return Ok(Resolved::new(value, ResolvedSource::Default));
                 }
                 if mode.prompts_allowed() {
                     return prompt().map(|value| Resolved::new(value, ResolvedSource::Prompt));
@@ -630,10 +632,10 @@ impl<T> Defaultable<T> {
         match self {
             Self::Provided(value) => Ok(Resolved::new(value, ResolvedSource::Explicit)),
             Self::Missing { value_name } => {
-                if mode.defaults_allowed() {
-                    if let Some(value) = default().await? {
-                        return Ok(Resolved::new(value, ResolvedSource::Default));
-                    }
+                if mode.defaults_allowed()
+                    && let Some(value) = default().await?
+                {
+                    return Ok(Resolved::new(value, ResolvedSource::Default));
                 }
                 if mode.prompts_allowed() {
                     return prompt()

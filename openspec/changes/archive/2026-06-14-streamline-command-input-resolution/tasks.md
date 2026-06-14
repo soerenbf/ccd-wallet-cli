@@ -50,5 +50,5 @@
 
 - [x] 8.1 Run `cargo fmt` and fix formatting issues.
 - [x] 8.2 Run focused Rust tests for refactored command families.
-- [x] 8.3 Run broader `cargo test` or project-appropriate filtered test commands before marking implementation complete.
+- [x] 8.3 Run broader `cargo test`, `cargo clippy`, or project-appropriate filtered validation commands before marking implementation complete.
 - [x] 8.4 Verify `docs/commands.md` remains accurate because the public command surface is preserved; update it only if implementation changes command structure or taxonomy.

@@ -257,7 +257,7 @@ fn unlock_identity_payload_record(
     let unlocked = signer_owners::unlock_by_id(conn, &record.signer_owner_id, &password)
         .with_context(|| format!("failed to unlock key source '{}'", owner.label))?;
     let payload = identities::decrypt_private_payload(conn, record.id, &unlocked.dek)?;
-    let network = NetworkContext::from_record(&record, &networks_by_hash);
+    let network = NetworkContext::from_record(&record, networks_by_hash);
     let view = IdentityExportView::new(record, network, key_source, payload)?;
     Ok(UnlockedIdentityView { view })
 }

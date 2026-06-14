@@ -1205,7 +1205,6 @@ fn complete_compose_line(line: &str, pos: usize, plan_path: Option<&Path>) -> Ve
                 end: pos,
             },
             append_whitespace: true,
-            ..Default::default()
         })
         .collect()
 }

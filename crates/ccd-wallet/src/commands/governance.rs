@@ -942,10 +942,11 @@ fn write_json_file(path: &Path, content: &str) -> Result<()> {
     if path.exists() {
         bail!("refusing to overwrite existing file {}", path.display());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            bail!("output directory does not exist: {}", parent.display());
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        bail!("output directory does not exist: {}", parent.display());
     }
     fs::write(path, format!("{content}\n"))
         .with_context(|| format!("failed to write JSON file {}", path.display()))
@@ -1219,13 +1220,13 @@ fn sign_prepared_update_with_ledger_path<T: governance_ledger::GovernanceLedgerT
             )))
             .map_err(ledger_error),
         UpdatePayload::EuroPerEnergy(update) => app
-            .sign_exchange_rate(&fixed_ledger_request(prefix, update.clone()))
+            .sign_exchange_rate(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::MicroGTUPerEuro(update) => app
-            .sign_exchange_rate(&fixed_ledger_request(prefix, update.clone()))
+            .sign_exchange_rate(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::FoundationAccount(update) => app
-            .sign_foundation_account(&fixed_ledger_request(prefix, update.clone()))
+            .sign_foundation_account(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::MintDistribution(update) => app
             .sign_mint_distribution(&fixed_ledger_request(prefix, update.clone()))
@@ -1246,28 +1247,28 @@ fn sign_prepared_update_with_ledger_path<T: governance_ledger::GovernanceLedgerT
             .sign_baker_stake_threshold(&fixed_ledger_request(prefix, update.clone()))
             .map_err(ledger_error),
         UpdatePayload::CooldownParametersCPV1(update) => app
-            .sign_cooldown_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .sign_cooldown_parameters(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::PoolParametersCPV1(update) => app
             .sign_pool_parameters(&fixed_ledger_request(prefix, update.clone()))
             .map_err(ledger_error),
         UpdatePayload::TimeParametersCPV1(update) => app
-            .sign_time_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .sign_time_parameters(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::TimeoutParametersCPV2(update) => app
-            .sign_timeout_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .sign_timeout_parameters(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::MinBlockTimeCPV2(update) => app
-            .sign_min_block_time(&fixed_ledger_request(prefix, update.clone()))
+            .sign_min_block_time(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::BlockEnergyLimitCPV2(update) => app
-            .sign_block_energy_limit(&fixed_ledger_request(prefix, update.clone()))
+            .sign_block_energy_limit(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::FinalizationCommitteeParametersCPV2(update) => app
-            .sign_finalization_committee_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .sign_finalization_committee_parameters(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::ValidatorScoreParametersCPV3(update) => app
-            .sign_validator_score_parameters(&fixed_ledger_request(prefix, update.clone()))
+            .sign_validator_score_parameters(&fixed_ledger_request(prefix, *update))
             .map_err(ledger_error),
         UpdatePayload::AddAnonymityRevoker(update) => app
             .sign_add_anonymity_revoker(&governance_ledger::AddAnonymityRevokerRequest::from((

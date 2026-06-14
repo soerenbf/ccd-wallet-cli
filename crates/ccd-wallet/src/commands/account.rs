@@ -1176,10 +1176,10 @@ fn resolve_configured_network_name_for_genesis_hash(
         );
     }
     matches.sort();
-    if let Some(preferred_name) = preferred_name {
-        if matches.iter().any(|name| name == preferred_name) {
-            return Ok(preferred_name.to_owned());
-        }
+    if let Some(preferred_name) = preferred_name
+        && matches.iter().any(|name| name == preferred_name)
+    {
+        return Ok(preferred_name.to_owned());
     }
     Ok(matches.remove(0))
 }
@@ -1525,7 +1525,7 @@ pub(crate) async fn resolve_account_reference_network_context(
                     no_defaults,
                 )
                 .await?;
-            return Ok((
+            Ok((
                 ResolvedNetworkContext {
                     network_name,
                     network_entry,
@@ -1534,7 +1534,7 @@ pub(crate) async fn resolve_account_reference_network_context(
                     source,
                 },
                 None,
-            ));
+            ))
         }
         AccountNetworkResolutionPlan::UseAccountAssistedLabel(explicit) => {
             let active_network = resolve_active_network_preference(conn, no_defaults)?;
@@ -1553,10 +1553,10 @@ pub(crate) async fn resolve_account_reference_network_context(
                 ResolutionSource::Prompted => ResolutionSource::Prompted,
                 _ => ResolutionSource::Inferred,
             };
-            return Ok((
+            Ok((
                 resolve_selected_network_context(network_name, network_source).await?,
                 Some(selection),
-            ));
+            ))
         }
     }
 }
@@ -1570,12 +1570,12 @@ pub(crate) async fn resolve_signing_account_context(
     no_defaults: bool,
     always_prompt: bool,
 ) -> Result<(ResolvedNetworkContext, ResolvedAccountSelection)> {
-    if let Some(account) = account {
-        if AccountAddress::from_str(account).is_ok() {
-            bail!(
-                "transaction senders must be finalized local account labels; raw account addresses cannot provide local signing keys"
-            );
-        }
+    if let Some(account) = account
+        && AccountAddress::from_str(account).is_ok()
+    {
+        bail!(
+            "transaction senders must be finalized local account labels; raw account addresses cannot provide local signing keys"
+        );
     }
 
     match plan_account_network_resolution(

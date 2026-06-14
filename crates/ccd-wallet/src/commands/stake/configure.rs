@@ -338,7 +338,7 @@ async fn prompt_target(
             .item(
                 "validator",
                 "Validator pool",
-                &format!("currently active: {baker_id}"),
+                format!("currently active: {baker_id}"),
             )
             .item("passive", "Passive delegation", "")
             .interact()?,
