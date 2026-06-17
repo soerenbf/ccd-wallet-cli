@@ -6,7 +6,7 @@ use crate::{
         GovernanceSubcommand, GovernanceUpdateArgs,
     },
     commands::{
-        input::{FinalizationPolicy, InputMode},
+        input::{Defaultable, FinalizationPolicy, InputMode, Promptable},
         ui::{
             ContextLine, FuzzySelectItem, ResolutionSource, SelectItem,
             fuzzy_multiselect_or_single, fuzzy_multiselect_or_single_with_initial,
@@ -24,7 +24,7 @@ use ccd_wallet_core::{
 };
 use ccd_wallet_ledger_governance as governance_ledger;
 use chrono::{DateTime, Utc};
-use cliclack::{input, password, spinner};
+use cliclack::{confirm, input, password, spinner};
 use concordium_rust_sdk::{
     base::{
         base::{UpdateKeyPair, UpdateKeysIndex, UpdatePublicKey, UpdateSequenceNumber},
@@ -807,7 +807,8 @@ fn build_ledger_signed_update_instruction(
     let result = (|| {
         let transport = governance_ledger::HidTransport::open_first().map_err(ledger_error)?;
         let mut app = governance_ledger::GovernanceLedgerApp::new(transport);
-        let outputs = sign_prepared_update_with_ledger(&mut app, &prepared, key_index)?;
+        let outputs =
+            sign_prepared_update_with_ledger(&mut app, &prepared, key_index, args.non_interactive)?;
         assemble_signed_update_instruction(&prepared, outputs)
     })();
     spin.clear();
@@ -1063,6 +1064,13 @@ fn resolve_ledger_key_index(args: &GovernanceUpdateArgs) -> Result<u32> {
     }
 }
 
+fn ledger_fallback_signature_index(key_index: u32) -> Result<UpdateKeysIndex> {
+    let index = key_index.try_into().with_context(|| {
+        format!("Ledger key index {key_index} cannot be used as a governance signature index")
+    })?;
+    Ok(UpdateKeysIndex { index })
+}
+
 fn ledger_auth_family(prepared: &PreparedGovernanceUpdate) -> Result<GovernanceAuthFamily> {
     prepared
         .payload
@@ -1075,7 +1083,7 @@ fn ledger_derivation_path_for_prepared_update(
     key_index: u32,
 ) -> Result<governance_ledger::DerivationPath> {
     let purpose = ledger_auth_family(prepared)?.ledger_governance_purpose();
-    governance_ledger::DerivationPath::new([1, purpose, key_index])
+    governance_ledger::DerivationPath::new([1105, 0, 1, purpose, key_index])
         .map_err(|err| anyhow::anyhow!(err.to_string()))
 }
 
@@ -1157,17 +1165,65 @@ fn ledger_signer_index_for_public_key(
     }
 }
 
+fn resolve_ledger_signer_index_or_prompt(
+    prepared: &PreparedGovernanceUpdate,
+    public_key: &UpdatePublicKey,
+    key_index: u32,
+    non_interactive: bool,
+) -> Result<UpdateKeysIndex> {
+    match ledger_signer_index_for_public_key(prepared, public_key) {
+        Ok(index) => Ok(index),
+        Err(err) if non_interactive => Err(err),
+        Err(err) => prompt_unvalidated_ledger_signature_index(err, key_index),
+    }
+}
+
+fn resolve_detached_ledger_signer_index_or_prompt(
+    prepared: &PreparedGovernanceUpdate,
+    verify_key: &str,
+    key_index: u32,
+    non_interactive: bool,
+) -> Result<UpdateKeysIndex> {
+    match signer_index_for_verify_key(prepared, verify_key) {
+        Ok(index) => Ok(index),
+        Err(err) if non_interactive => Err(err),
+        Err(err) => prompt_unvalidated_ledger_signature_index(err, key_index),
+    }
+}
+
+fn prompt_unvalidated_ledger_signature_index(
+    validation_error: anyhow::Error,
+    key_index: u32,
+) -> Result<UpdateKeysIndex> {
+    let fallback_index = ledger_fallback_signature_index(key_index)?;
+    cliclack::log::warning(format!(
+        "Governance Ledger signer validation failed: {validation_error}"
+    ))?;
+    let approved = confirm(format!(
+        "Continue signing anyway and use governance signature index {}? The node may reject the update.",
+        fallback_index.index
+    ))
+    .initial_value(false)
+    .interact()?;
+    if !approved {
+        bail!("governance Ledger signing aborted after validation failure");
+    }
+    Ok(fallback_index)
+}
+
 fn sign_prepared_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>(
     app: &mut governance_ledger::GovernanceLedgerApp<T>,
     prepared: &PreparedGovernanceUpdate,
     key_index: u32,
+    non_interactive: bool,
 ) -> Result<Vec<GovernanceSignerOutput>> {
     let path = ledger_derivation_path_for_prepared_update(prepared, key_index)?;
     let public_key_response = app
         .get_public_key(path.clone(), governance_ledger::PublicKeyOptions::default())
         .map_err(ledger_error)?;
     let public_key = ledger_public_key_from_bytes(public_key_response.public_key)?;
-    let signer_index = ledger_signer_index_for_public_key(prepared, &public_key)?;
+    let signer_index =
+        resolve_ledger_signer_index_or_prompt(prepared, &public_key, key_index, non_interactive)?;
     let signature = sign_prepared_update_with_ledger_path(app, prepared, path)?;
     Ok(vec![GovernanceSignerOutput {
         index: signer_index,
@@ -1181,6 +1237,7 @@ fn sign_detached_prepared_update_with_ledger<T: governance_ledger::GovernanceLed
     app: &mut governance_ledger::GovernanceLedgerApp<T>,
     prepared: &PreparedGovernanceUpdate,
     key_index: u32,
+    non_interactive: bool,
 ) -> Result<(String, GovernanceSignerOutput)> {
     let path = ledger_derivation_path_for_prepared_update(prepared, key_index)?;
     let public_key_response = app
@@ -1188,7 +1245,12 @@ fn sign_detached_prepared_update_with_ledger<T: governance_ledger::GovernanceLed
         .map_err(ledger_error)?;
     let public_key = ledger_public_key_from_bytes(public_key_response.public_key)?;
     let verify_key = governance::public_key_hex(&public_key);
-    let signer_index = signer_index_for_verify_key(prepared, &verify_key)?;
+    let signer_index = resolve_detached_ledger_signer_index_or_prompt(
+        prepared,
+        &verify_key,
+        key_index,
+        non_interactive,
+    )?;
     let signature = sign_prepared_update_with_ledger_path(app, prepared, path)?;
     Ok((
         verify_key,
@@ -2037,12 +2099,16 @@ fn resolve_update_payload_input(
                         path.display()
                     )
                 })?,
-                None if args.non_interactive => {
-                    bail!(
-                        "JSON file must be provided with `--json <FILE>` in --non-interactive mode"
-                    )
+                None => Promptable::Missing {
+                    value_name: "JSON file",
                 }
-                None => input("Paste governance update JSON:").interact()?,
+                .resolve_with(InputMode::from_flags(args.non_interactive, false), || {
+                    Ok(input("Paste governance update JSON:").interact()?)
+                })
+                .with_context(
+                    || "JSON file must be provided with `--json <FILE>` in --non-interactive mode",
+                )?
+                .into_value(),
             };
             if raw_json.trim().is_empty() {
                 bail!("governance update JSON payload cannot be empty");
@@ -2052,12 +2118,16 @@ fn resolve_update_payload_input(
         (None, Some(serialized)) => {
             let raw_hex = match serialized {
                 Some(hex) => hex.clone(),
-                None if args.non_interactive => {
-                    bail!(
-                        "serialized payload must be provided with `--serialized <HEX>` in --non-interactive mode"
-                    )
+                None => Promptable::Missing {
+                    value_name: "serialized payload",
                 }
-                None => input("Paste serialized governance update hex:").interact()?,
+                    .resolve_with(InputMode::from_flags(args.non_interactive, false), || {
+                        Ok(input("Paste serialized governance update hex:").interact()?)
+                    })
+                    .with_context(
+                        || "serialized payload must be provided with `--serialized <HEX>` in --non-interactive mode",
+                    )?
+                    .into_value(),
             };
             let bytes = decode_hex_payload(&raw_hex)?;
             if bytes.is_empty() {
@@ -2065,10 +2135,17 @@ fn resolve_update_payload_input(
             }
             Ok(GovernanceUpdatePayloadInput::Serialized(bytes))
         }
-        (None, None) if args.non_interactive => {
-            bail!("provide either `--json` or `--serialized` in --non-interactive mode")
-        }
         (None, None) => {
+            Promptable::<()>::Missing {
+                value_name: "governance update payload",
+            }
+            .resolve_with(
+                InputMode::from_flags(args.non_interactive, false),
+                || Ok(()),
+            )
+            .with_context(
+                || "provide either `--json` or `--serialized` in --non-interactive mode",
+            )?;
             let mode: String = input("Governance update payload mode (`json` or `serialized`):")
                 .default_input("json")
                 .interact()?;
@@ -2124,21 +2201,33 @@ fn resolve_proposal_timing(
     let now = now_unix_seconds()?;
     let effective_time_seconds = match effective_time {
         Some(value) => parse_effective_time_input(value, now)?,
-        None if non_interactive => {
-            bail!("`--effective-time <TIME>` is required in --non-interactive proposal creation")
-        }
         None => {
-            let value: String = input("Effective time:").interact()?;
+            let value = Promptable::<String>::Missing {
+                value_name: "effective time",
+            }
+            .resolve_with(InputMode::from_flags(non_interactive, false), || {
+                Ok(input("Effective time:").interact()?)
+            })
+            .with_context(
+                || "`--effective-time <TIME>` is required in --non-interactive proposal creation",
+            )?
+            .into_value();
             parse_effective_time_input(&value, now)?
         }
     };
     let timeout_seconds = match timeout {
         Some(value) => parse_time_input(value, now)?,
-        None if non_interactive => {
-            bail!("`--timeout <TIME>` is required in --non-interactive proposal creation")
-        }
         None => {
-            let value: String = input("Timeout:").interact()?;
+            let value = Promptable::<String>::Missing {
+                value_name: "timeout",
+            }
+            .resolve_with(InputMode::from_flags(non_interactive, false), || {
+                Ok(input("Timeout:").interact()?)
+            })
+            .with_context(
+                || "`--timeout <TIME>` is required in --non-interactive proposal creation",
+            )?
+            .into_value();
             parse_time_input(&value, now)?
         }
     };
@@ -2414,8 +2503,12 @@ async fn sign_proposal(conn: &mut Connection, args: GovernanceProposalSignArgs) 
         let result: Result<GovernanceSignatureFile> = (|| {
             let transport = governance_ledger::HidTransport::open_first().map_err(ledger_error)?;
             let mut app = governance_ledger::GovernanceLedgerApp::new(transport);
-            let (verify_key, output) =
-                sign_detached_prepared_update_with_ledger(&mut app, &prepared, key_index)?;
+            let (verify_key, output) = sign_detached_prepared_update_with_ledger(
+                &mut app,
+                &prepared,
+                key_index,
+                args.non_interactive,
+            )?;
             Ok(signature_file_from_signer_output(verify_key, output))
         })();
         spin.clear();
@@ -2705,9 +2798,14 @@ async fn list_keys(conn: &mut Connection, args: GovernanceKeysListArgs) -> Resul
 }
 
 async fn remove_keys(conn: &mut Connection, args: GovernanceKeysRemoveArgs) -> Result<()> {
+    let prepared_context = PreparedGovernanceContext::from_flags(
+        args.network.clone(),
+        args.non_interactive,
+        true,
+        false,
+    );
     let (network_name, network_entry, endpoint_label, source) =
-        resolve_governance_network(conn, args.network.as_deref(), false, args.non_interactive)
-            .await?;
+        prepared_context.resolve_network(conn).await?;
     log_resolved_context(&[ContextLine {
         label: "network:",
         value: format!("{network_name} @ {endpoint_label}"),
@@ -2727,34 +2825,36 @@ async fn remove_keys(conn: &mut Connection, args: GovernanceKeysRemoveArgs) -> R
         return Ok(());
     }
 
-    let verify_keys = match args.verify_key {
-        Some(verify_key) => vec![verify_key],
-        None if args.non_interactive => {
-            bail!("verify key must be provided in --non-interactive mode unless `--all` is used")
+    let verify_keys = Promptable::from_option(
+        args.verify_key.map(|verify_key| vec![verify_key]),
+        "verify key",
+    )
+    .resolve_with_async(prepared_context.input_mode, || async {
+        let decrypted = governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
+        if decrypted.is_empty() {
+            bail!("no governance keys are stored for '{}'", network_name);
         }
-        None => {
-            let decrypted =
-                governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
-            if decrypted.is_empty() {
-                bail!("no governance keys are stored for '{}'", network_name);
-            }
-            let chain_parameters =
-                fetch_chain_parameters(&network_entry.node_endpoint, &endpoint_label).await?;
-            let entries = match_governance_keys(&decrypted, &chain_parameters);
-            let items = entries
-                .into_iter()
-                .map(|entry| FuzzySelectItem {
-                    value: entry.verify_key.clone(),
-                    text: render_governance_list_row(&entry, true),
-                })
-                .collect::<Vec<_>>();
-            let selected = fuzzy_multiselect_or_single("Select governance keys to remove", &items)?;
-            if selected.is_empty() {
-                bail!("at least one governance key must be selected");
-            }
-            selected
+        let chain_parameters =
+            fetch_chain_parameters(&network_entry.node_endpoint, &endpoint_label).await?;
+        let entries = match_governance_keys(&decrypted, &chain_parameters);
+        let items = entries
+            .into_iter()
+            .map(|entry| FuzzySelectItem {
+                value: entry.verify_key.clone(),
+                text: render_governance_list_row(&entry, true),
+            })
+            .collect::<Vec<_>>();
+        let selected = fuzzy_multiselect_or_single("Select governance keys to remove", &items)?;
+        if selected.is_empty() {
+            bail!("at least one governance key must be selected");
         }
-    };
+        Ok(selected)
+    })
+    .await
+    .with_context(
+        || "verify key must be provided in --non-interactive mode unless `--all` is used",
+    )?
+    .into_value();
 
     let mut removed = Vec::new();
     for verify_key in verify_keys {
@@ -2838,27 +2938,36 @@ async fn resolve_governance_network(
     let app_config = load()?;
     let (selected_name, source) = match network {
         Some(name) => (name.to_owned(), ResolutionSource::Explicit),
-        None if allow_active_default => {
-            match wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)? {
-                Some(name) => (name, ResolutionSource::ActiveDefault),
-                None if non_interactive => bail!(
-                    "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                ),
-                None => (
-                    prompt_for_network_name(&app_config, None)?,
-                    ResolutionSource::Prompted,
-                ),
+        None if allow_active_default => Defaultable::Missing {
+                value_name: "network",
             }
-        }
-        None if non_interactive => {
-            bail!("network must be provided with `--network <NAME>` in --non-interactive mode")
-        }
+            .resolve_with_default_or_prompt(
+                InputMode::from_flags(non_interactive, false),
+                || wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY),
+                || prompt_for_network_name(&app_config, None),
+            )
+            .map(|resolved| {
+                let source = match resolved.source {
+                    crate::commands::input::ResolvedSource::Default => ResolutionSource::ActiveDefault,
+                    crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                    crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                };
+                (resolved.value, source)
+            })
+            .with_context(
+                || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
+            )?,
         None => {
             let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-            (
-                prompt_for_network_name(&app_config, active.as_deref())?,
-                ResolutionSource::Prompted,
-            )
+            let selected_name = Promptable::Missing {
+                value_name: "network",
+            }
+                .resolve_with(InputMode::from_flags(non_interactive, false), || {
+                    prompt_for_network_name(&app_config, active.as_deref())
+                })
+                .with_context(|| "network must be provided with `--network <NAME>` in --non-interactive mode")?
+                .into_value();
+            (selected_name, ResolutionSource::Prompted)
         }
     };
     let entry = app_config
@@ -3760,7 +3869,7 @@ mod tests {
         )
         .unwrap();
         let path = ledger_derivation_path_for_prepared_update(&prepared, 9).unwrap();
-        assert_eq!(path.indices(), &[1, 2, 9]);
+        assert_eq!(path.indices(), &[1105, 0, 1, 2, 9]);
     }
 
     #[test]

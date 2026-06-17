@@ -408,19 +408,16 @@ async fn rename_seed(
     non_interactive: bool,
     prompts: &mut impl SeedPrompts,
 ) -> Result<()> {
-    let old_label = match old_label {
-        Some(label) => label,
-        None if non_interactive => bail!("seed label must be provided in --non-interactive mode"),
-        None => select_seed_label(conn, prompts)?,
-    };
+    let input_mode = InputMode::from_flags(non_interactive, false);
+    let old_label = Promptable::from_option(old_label, "seed label")
+        .resolve_with(input_mode, || select_seed_label(conn, prompts))?
+        .into_value();
     ensure_seed_exists(conn, &old_label)?;
-    let new_label = match new_label {
-        Some(label) => label,
-        None if non_interactive => {
-            bail!("new seed label must be provided in --non-interactive mode")
-        }
-        None => prompts.prompt_seed_label_with_placeholder("New seed label:", &old_label)?,
-    };
+    let new_label = Promptable::from_option(new_label, "new seed label")
+        .resolve_with(input_mode, || {
+            prompts.prompt_seed_label_with_placeholder("New seed label:", &old_label)
+        })?
+        .into_value();
     validate_seed_label(&new_label)?;
     seeds::rename(conn, &old_label, &new_label)?;
     if wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?.as_deref()
@@ -438,13 +435,11 @@ async fn use_seed(
     non_interactive: bool,
     prompts: &mut impl SeedPrompts,
 ) -> Result<()> {
-    let label = match label {
-        Some(label) => label,
-        None if non_interactive => {
-            bail!("seed label must be provided in --non-interactive mode")
-        }
-        None => select_seed_label(conn, prompts)?,
-    };
+    let label = Promptable::from_option(label, "seed label")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            select_seed_label(conn, prompts)
+        })?
+        .into_value();
     ensure_seed_exists(conn, &label)?;
     wallet_state::set(conn, wallet_state::ACTIVE_SEED_KEY, &label)?;
 
@@ -1920,16 +1915,27 @@ fn resolve_sync_seed_label(
                     ResolutionSource::Prompted,
                 ));
             }
-            match active {
-                Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply a seed label explicitly."
-                ),
-                None => Ok((
-                    select_seed_label(conn, prompts)?,
-                    ResolutionSource::Prompted,
-                )),
+            Defaultable::Missing {
+                value_name: "seed label",
             }
+                .resolve_with_default_or_prompt(
+                    InputMode::from_flags(non_interactive, false),
+                    || Ok(active),
+                    || select_seed_label(conn, prompts),
+                )
+                .map(|resolved| {
+                    let source = match resolved.source {
+                        crate::commands::input::ResolvedSource::Default => {
+                            ResolutionSource::ActiveDefault
+                        }
+                        crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                        crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                    };
+                    (resolved.value, source)
+                })
+                .with_context(
+                    || "No active seed. Run `ccd-wallet seed use <LABEL>` or supply a seed label explicitly.",
+                )
         }
     }
 }
@@ -1951,16 +1957,31 @@ pub(crate) async fn resolve_sync_network_context(
                     ResolutionSource::Prompted,
                 )
             } else {
-                match active {
-                    Some(name) => (name, ResolutionSource::ActiveDefault),
-                    None if non_interactive => bail!(
-                        "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                    ),
-                    None => (
-                        prompt_for_network_name(&app_config, None)?,
-                        ResolutionSource::Prompted,
-                    ),
-                }
+                Defaultable::Missing {
+                value_name: "network",
+            }
+                    .resolve_with_default_or_prompt(
+                        InputMode::from_flags(non_interactive, false),
+                        || Ok(active),
+                        || prompt_for_network_name(&app_config, None),
+                    )
+                    .map(|resolved| {
+                        let source = match resolved.source {
+                            crate::commands::input::ResolvedSource::Default => {
+                                ResolutionSource::ActiveDefault
+                            }
+                            crate::commands::input::ResolvedSource::Prompt => {
+                                ResolutionSource::Prompted
+                            }
+                            crate::commands::input::ResolvedSource::Explicit => {
+                                ResolutionSource::Explicit
+                            }
+                        };
+                        (resolved.value, source)
+                    })
+                    .with_context(
+                        || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
+                    )?
             }
         }
     };

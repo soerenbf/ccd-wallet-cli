@@ -385,18 +385,17 @@ pub(super) fn resolve_token_amount(
     label: &str,
     non_interactive: bool,
 ) -> Result<TokenAmount> {
-    match explicit {
-        Some(value) => parse_token_amount(value, decimals),
-        None if non_interactive => bail!("--amount is required in --non-interactive mode"),
-        None => {
+    let value = Promptable::from_option(explicit.map(ToOwned::to_owned), "amount")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
             let prompt = match balance_hint {
                 Some(balance) => format!("Amount ({label}: {balance}):"),
                 None => "Amount:".to_owned(),
             };
-            let value: String = input(prompt).interact()?;
-            parse_token_amount(&value, decimals)
-        }
-    }
+            Ok(input(prompt).interact()?)
+        })
+        .with_context(|| "--amount is required in --non-interactive mode")?
+        .into_value();
+    parse_token_amount(&value, decimals)
 }
 
 /// Query available token balances for an account.

@@ -1,6 +1,7 @@
 use crate::{
     cli::IdentityNewArgs,
     commands::{
+        input::{Defaultable, InputMode, Promptable},
         ledger,
         ledger_construction::{self, LedgerIdentityIssuanceInput},
         ui::{ContextLine, ResolutionSource, SelectItem, log_resolved_context, select_or_single},
@@ -434,21 +435,20 @@ fn select_wallet_proxy_entry(
 }
 
 fn resolve_identity_label(explicit: Option<String>, non_interactive: bool) -> Result<String> {
-    match explicit {
-        Some(label) => Ok(label),
-        None if non_interactive => {
-            bail!("identity label must be provided in --non-interactive mode")
-        }
-        None => Ok(input("Identity label:")
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Identity label is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?),
-    }
+    Promptable::from_option(explicit, "identity label")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            let label: String = input("Identity label:")
+                .validate(|value: &String| {
+                    if value.is_empty() {
+                        Err("Identity label is required.")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .interact()?;
+            Ok(label)
+        })
+        .map(|resolved| resolved.into_value())
 }
 
 fn resolve_seed_label(
@@ -469,16 +469,27 @@ fn resolve_seed_label(
                     ResolutionSource::Prompted,
                 ));
             }
-            match active {
-                Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`."
-                ),
-                None => Ok((
-                    prompt_for_seed_label(conn, None)?,
-                    ResolutionSource::Prompted,
-                )),
+            Defaultable::Missing {
+                value_name: "key source",
             }
+                .resolve_with_default_or_prompt(
+                    InputMode::from_flags(non_interactive, false),
+                    || Ok(active),
+                    || prompt_for_seed_label(conn, None),
+                )
+                .map(|resolved| {
+                    let source = match resolved.source {
+                        crate::commands::input::ResolvedSource::Default => {
+                            ResolutionSource::ActiveDefault
+                        }
+                        crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                        crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                    };
+                    (resolved.value, source)
+                })
+                .with_context(
+                    || "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`.",
+                )
         }
     }
 }
@@ -733,16 +744,27 @@ async fn resolve_identity_network_context(
                     ResolutionSource::Prompted,
                 )
             } else {
-                match active {
-                    Some(name) => (name, ResolutionSource::ActiveDefault),
-                    None if non_interactive => bail!(
-                        "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                    ),
-                    None => (
-                        prompt_for_network_name(&app_config, None)?,
-                        ResolutionSource::Prompted,
-                    ),
-                }
+                Defaultable::Missing {
+                value_name: "network",
+            }
+                    .resolve_with_default_or_prompt(
+                        InputMode::from_flags(non_interactive, false),
+                        || Ok(active),
+                        || prompt_for_network_name(&app_config, None),
+                    )
+                    .map(|resolved| {
+                        let source = match resolved.source {
+                            crate::commands::input::ResolvedSource::Default => {
+                                ResolutionSource::ActiveDefault
+                            }
+                            crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                            crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                        };
+                        (resolved.value, source)
+                    })
+                    .with_context(
+                        || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
+                    )?
             }
         }
     };

@@ -5,9 +5,12 @@ use crate::{
         IdentityExportArgs, IdentityListArgs, IdentityRenameArgs, IdentityShowArgs,
         IdentitySubcommand,
     },
-    commands::ui::{
-        ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
-        log_resolved_context, select_or_single,
+    commands::{
+        input::{Defaultable, InputMode, Promptable},
+        ui::{
+            ContextLine, FuzzySelectItem, ResolutionSource, SelectItem, fuzzy_select_or_single,
+            log_resolved_context, select_or_single,
+        },
     },
 };
 use anyhow::{Context, Result, bail};
@@ -145,33 +148,25 @@ async fn rename_identity(conn: &Connection, args: IdentityRenameArgs) -> Result<
             now,
             args.non_interactive,
         )?,
-        None if args.non_interactive => {
-            bail!("identity label must be provided in --non-interactive mode")
+        None => Promptable::Missing {
+            value_name: "identity label",
         }
-        None => select_identity_fuzzy(
-            identities::list(conn)?,
-            &seeds_by_id,
-            &networks_by_hash,
-            now,
-        )?,
+        .resolve_with(InputMode::from_flags(args.non_interactive, false), || {
+            select_identity_fuzzy(
+                identities::list(conn)?,
+                &seeds_by_id,
+                &networks_by_hash,
+                now,
+            )
+        })?
+        .into_value(),
     };
 
-    let new_label = match args.new_label {
-        Some(label) => label,
-        None if args.non_interactive => {
-            bail!("new identity label must be provided in --non-interactive mode")
-        }
-        None => input("New identity label:")
-            .placeholder(&record.label)
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Identity label is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?,
-    };
+    let new_label = Promptable::from_option(args.new_label, "new identity label")
+        .resolve_with(InputMode::from_flags(args.non_interactive, false), || {
+            prompt_identity_label_with_placeholder("New identity label:", &record.label)
+        })?
+        .into_value();
     validate_label("identity", &new_label)?;
     identities::rename(conn, record.id, &new_label)?;
     println!("Identity '{}' renamed to '{}'.", record.label, new_label);
@@ -535,6 +530,16 @@ fn wait_for_key_or_timeout(timeout: Duration) {
     let _ = rx.recv_timeout(timeout);
 }
 
+fn prompt_identity_label_with_placeholder(prompt: &str, placeholder: &str) -> Result<String> {
+    let label: String = input(prompt)
+        .placeholder(placeholder)
+        .validate(|value: &String| {
+            validate_label("identity", value).map_err(|error| error.to_string())
+        })
+        .interact()?;
+    Ok(label)
+}
+
 fn resolve_export_output_path(explicit: Option<PathBuf>, identity_label: &str) -> Result<PathBuf> {
     match explicit {
         Some(path) => expand_tilde_path(&path),
@@ -669,16 +674,27 @@ fn resolve_seed_scope(
                     ResolutionSource::Prompted,
                 ));
             }
-            match active {
-                Some(label) => Ok((ScopeSelection::One(label), ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`."
-                ),
-                None => Ok((
-                    prompt_for_seed_scope(conn, None, allow_all)?,
-                    ResolutionSource::Prompted,
-                )),
+            Defaultable::Missing {
+                value_name: "seed",
             }
+                .resolve_with_default_or_prompt(
+                    InputMode::from_flags(non_interactive, false),
+                    || Ok(active.map(ScopeSelection::One)),
+                    || prompt_for_seed_scope(conn, None, allow_all),
+                )
+                .map(|resolved| {
+                    let source = match resolved.source {
+                        crate::commands::input::ResolvedSource::Default => {
+                            ResolutionSource::ActiveDefault
+                        }
+                        crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                        crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                    };
+                    (resolved.value, source)
+                })
+                .with_context(
+                    || "No active seed. Run `ccd-wallet seed use <LABEL>` or supply `--seed <LABEL>`.",
+                )
         }
     }
 }
@@ -711,16 +727,27 @@ fn resolve_network_scope(
                     ResolutionSource::Prompted,
                 ));
             }
-            match active {
-                Some(name) => Ok((ScopeSelection::One(name), ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                ),
-                None => Ok((
-                    prompt_for_network_scope(&app_config, None, allow_all)?,
-                    ResolutionSource::Prompted,
-                )),
+            Defaultable::Missing {
+                value_name: "network",
             }
+                .resolve_with_default_or_prompt(
+                    InputMode::from_flags(non_interactive, false),
+                    || Ok(active.map(ScopeSelection::One)),
+                    || prompt_for_network_scope(&app_config, None, allow_all),
+                )
+                .map(|resolved| {
+                    let source = match resolved.source {
+                        crate::commands::input::ResolvedSource::Default => {
+                            ResolutionSource::ActiveDefault
+                        }
+                        crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+                        crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+                    };
+                    (resolved.value, source)
+                })
+                .with_context(
+                    || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
+                )
         }
     }
 }

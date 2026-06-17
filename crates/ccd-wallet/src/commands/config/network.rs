@@ -1,5 +1,5 @@
 use crate::commands::{
-    input::{Defaultable, InputMode},
+    input::{Defaultable, InputMode, Promptable},
     ui::{SelectItem, select_or_single},
 };
 use anyhow::{Context, Result, bail};
@@ -15,7 +15,7 @@ use clap::{Args, Subcommand};
 use cliclack::{input, multiselect};
 use concordium_rust_sdk::v2;
 use rusqlite::Connection;
-use std::{collections::BTreeSet, str::FromStr};
+use std::{collections::BTreeSet, fmt, str::FromStr};
 
 // ---------------------------------------------------------------------------
 // CLI types
@@ -50,7 +50,7 @@ pub enum NetworkSubcommand {
 pub struct NetworkAddArgs {
     /// Local name to identify this network.
     #[arg(long, value_name = "NAME")]
-    pub name: Option<String>,
+    pub name: Option<NetworkAliasInput>,
 
     /// Concordium node gRPC endpoint to connect to.
     #[arg(long = "node", value_name = "ENDPOINT")]
@@ -58,7 +58,7 @@ pub struct NetworkAddArgs {
 
     /// Optional wallet proxy base URL used to resolve wallet-facing identity provider metadata.
     #[arg(long = "wallet-proxy", value_name = "URL")]
-    pub wallet_proxy: Option<String>,
+    pub wallet_proxy: Option<WalletProxyUrl>,
 
     /// Disable prompt fallback and require all values on the command line.
     #[arg(long = "non-interactive")]
@@ -129,11 +129,103 @@ pub struct NetworkRenameArgs {
 
     /// New network name.
     #[arg(value_name = "NEW_NAME")]
-    pub new_name: Option<String>,
+    pub new_name: Option<NetworkAliasInput>,
 
     /// Disable prompt fallback and require values on the command line.
     #[arg(long = "non-interactive")]
     pub non_interactive: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NetworkAliasInput(String);
+
+impl fmt::Display for NetworkAliasInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for NetworkAliasInput {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        if value.is_empty() {
+            bail!("network name must not be empty");
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WalletProxyUrl(reqwest::Url);
+
+impl WalletProxyUrl {
+    fn normalized(&self) -> String {
+        config::normalize_url_string(self.0.as_ref())
+    }
+}
+
+impl fmt::Display for WalletProxyUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for WalletProxyUrl {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Ok(Self(reqwest::Url::parse(value)?))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedNetworkAddInput {
+    name: Promptable<NetworkAliasInput>,
+    node: Promptable<v2::Endpoint>,
+    wallet_proxy: Option<WalletProxyUrl>,
+    input_mode: InputMode,
+}
+
+struct PreparedNetworkRenameInput {
+    old_name: Promptable<String>,
+    new_name: Promptable<NetworkAliasInput>,
+    input_mode: InputMode,
+}
+
+struct PreparedNetworkUseInput {
+    name: Promptable<String>,
+    input_mode: InputMode,
+}
+
+impl PreparedNetworkAddInput {
+    fn from_args(args: NetworkAddArgs) -> Self {
+        Self {
+            name: Promptable::from_option(args.name, "network name"),
+            node: Promptable::from_option(args.node, "network node endpoint"),
+            wallet_proxy: args.wallet_proxy,
+            input_mode: InputMode::from_flags(args.non_interactive, false),
+        }
+    }
+}
+
+impl PreparedNetworkRenameInput {
+    fn from_args(args: NetworkRenameArgs) -> Self {
+        Self {
+            old_name: Promptable::from_option(args.old_name, "network name"),
+            new_name: Promptable::from_option(args.new_name, "new network name"),
+            input_mode: InputMode::from_flags(args.non_interactive, false),
+        }
+    }
+}
+
+impl PreparedNetworkUseInput {
+    fn from_args(args: NetworkUseArgs) -> Self {
+        Self {
+            name: Promptable::from_option(args.name, "network name"),
+            input_mode: InputMode::from_flags(args.non_interactive, false),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -141,55 +233,23 @@ pub struct NetworkRenameArgs {
 // ---------------------------------------------------------------------------
 
 pub async fn add(args: NetworkAddArgs) -> Result<()> {
-    let name = resolve_required_input(
-        args.name,
-        args.non_interactive,
-        "Network name:",
-        "network name must be provided in --non-interactive mode",
-    )?;
-    let node = match args.node {
-        Some(node) => node,
-        None if args.non_interactive => {
-            bail!("network node endpoint must be provided in --non-interactive mode")
+    let prepared = PreparedNetworkAddInput::from_args(args);
+    let name = prepared
+        .name
+        .resolve_with(prepared.input_mode, prompt_network_name)?
+        .into_value();
+    let node = prepared
+        .node
+        .resolve_with(prepared.input_mode, prompt_node_endpoint)?
+        .into_value();
+    let wallet_proxy = match prepared.wallet_proxy {
+        Some(wallet_proxy) => Some(wallet_proxy.normalized()),
+        None if prepared.input_mode.prompts_allowed() => {
+            prompt_optional_wallet_proxy()?.map(|wallet_proxy| wallet_proxy.normalized())
         }
-        None => {
-            let node_input: String = input("Node endpoint:")
-                .validate(|value: &String| {
-                    if value.is_empty() {
-                        Err("Node endpoint is required.")
-                    } else {
-                        value
-                            .parse::<v2::Endpoint>()
-                            .map(|_| ())
-                            .map_err(|_| "Enter a valid node endpoint.")
-                    }
-                })
-                .interact()?;
-            node_input.parse().context("invalid node endpoint")?
-        }
+        None => None,
     };
-    let wallet_proxy_input = if args.non_interactive {
-        args.wallet_proxy
-    } else {
-        match args.wallet_proxy {
-            Some(value) => Some(value),
-            None => {
-                let value: String = input("Wallet proxy URL (optional):")
-                    .required(false)
-                    .validate(|value: &String| {
-                        if value.is_empty() {
-                            Ok(())
-                        } else {
-                            reqwest::Url::parse(value)
-                                .map(|_| ())
-                                .map_err(|_| "Enter a valid wallet proxy URL.")
-                        }
-                    })
-                    .interact()?;
-                if value.is_empty() { None } else { Some(value) }
-            }
-        }
-    };
+    let name = name.to_string();
     let endpoint_label = config::endpoint_label(&node);
 
     let mut app_config = load()?;
@@ -213,14 +273,6 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
 
     let genesis_hash = format!("{}", consensus_info.genesis_block);
 
-    let wallet_proxy = wallet_proxy_input
-        .map(|wallet_proxy_input| {
-            reqwest::Url::parse(&wallet_proxy_input)
-                .with_context(|| format!("invalid wallet proxy URL: {wallet_proxy_input}"))
-                .map(|url| config::normalize_url_string(url.as_ref()))
-        })
-        .transpose()?;
-
     app_config.networks.insert(
         name.clone(),
         NetworkEntry {
@@ -242,24 +294,50 @@ pub async fn add(args: NetworkAddArgs) -> Result<()> {
     Ok(())
 }
 
-fn resolve_required_input(
-    value: Option<String>,
-    non_interactive: bool,
-    prompt: &str,
-    error: &str,
-) -> Result<String> {
-    match value {
-        Some(value) => Ok(value),
-        None if non_interactive => bail!("{error}"),
-        None => Ok(input(prompt)
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Value is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?),
+fn prompt_network_name() -> Result<NetworkAliasInput> {
+    let value: String = input("Network name:")
+        .validate(|value: &String| match value.parse::<NetworkAliasInput>() {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        })
+        .interact()?;
+    value.parse()
+}
+
+fn prompt_node_endpoint() -> Result<v2::Endpoint> {
+    let value: String = input("Node endpoint:")
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Err("Node endpoint is required.".to_owned())
+            } else {
+                value
+                    .parse::<v2::Endpoint>()
+                    .map(|_| ())
+                    .map_err(|_| "Enter a valid node endpoint.".to_owned())
+            }
+        })
+        .interact()?;
+    value.parse().context("invalid node endpoint")
+}
+
+fn prompt_optional_wallet_proxy() -> Result<Option<WalletProxyUrl>> {
+    let value: String = input("Wallet proxy URL (optional):")
+        .required(false)
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Ok(())
+            } else {
+                value
+                    .parse::<WalletProxyUrl>()
+                    .map(|_| ())
+                    .map_err(|_| "Enter a valid wallet proxy URL.".to_owned())
+            }
+        })
+        .interact()?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        value.parse().map(Some)
     }
 }
 
@@ -431,7 +509,9 @@ fn resolve_show_target_with_config(
         }),
         (None, None) => {
             let mode = InputMode::from_flags(args.non_interactive, args.no_defaults);
-            let name = Defaultable::from_option(None::<String>, "network name")
+            let name = Defaultable::Missing {
+                    value_name: "network name",
+                }
                 .resolve_with_default_or_prompt(
                     mode,
                     || wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY),
@@ -835,30 +915,19 @@ pub async fn delete(conn: &Connection, args: NetworkDeleteArgs) -> Result<()> {
 }
 
 pub async fn rename(conn: &Connection, args: NetworkRenameArgs) -> Result<()> {
+    let prepared = PreparedNetworkRenameInput::from_args(args);
     let mut app_config = load()?;
-    let old_name = match args.old_name {
-        Some(name) => name,
-        None if args.non_interactive => {
-            bail!("network name must be provided in --non-interactive mode")
-        }
-        None => select_network_name(conn, &app_config)?,
-    };
-    let new_name = match args.new_name {
-        Some(name) => name,
-        None if args.non_interactive => {
-            bail!("new network name must be provided in --non-interactive mode")
-        }
-        None => input("New network name:")
-            .placeholder(&old_name)
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Network name is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?,
-    };
+    let old_name = prepared
+        .old_name
+        .resolve_with(prepared.input_mode, || {
+            select_network_name(conn, &app_config)
+        })?
+        .into_value();
+    let new_name = prepared
+        .new_name
+        .resolve_with(prepared.input_mode, || prompt_new_network_name(&old_name))?
+        .into_value()
+        .to_string();
 
     rename_network(&mut app_config, &old_name, &new_name)?;
     save(&app_config)?;
@@ -872,8 +941,14 @@ pub async fn rename(conn: &Connection, args: NetworkRenameArgs) -> Result<()> {
 }
 
 pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> {
+    let prepared = PreparedNetworkUseInput::from_args(args);
     let app_config = load()?;
-    let name = resolve_network_use_name(conn, &app_config, args.name, args.non_interactive)?;
+    let name = prepared
+        .name
+        .resolve_with(prepared.input_mode, || {
+            select_network_name(conn, &app_config)
+        })?
+        .into_value();
 
     if !app_config.networks.contains_key(&name) {
         bail!(
@@ -890,19 +965,15 @@ pub async fn use_network(conn: &Connection, args: NetworkUseArgs) -> Result<()> 
     Ok(())
 }
 
-fn resolve_network_use_name(
-    conn: &Connection,
-    app_config: &ccd_wallet_core::store::config::AppConfig,
-    name: Option<String>,
-    non_interactive: bool,
-) -> Result<String> {
-    match name {
-        Some(name) => Ok(name),
-        None if non_interactive => {
-            bail!("network name must be provided in --non-interactive mode")
-        }
-        None => select_network_name(conn, app_config),
-    }
+fn prompt_new_network_name(old_name: &str) -> Result<NetworkAliasInput> {
+    let value: String = input("New network name:")
+        .placeholder(old_name)
+        .validate(|value: &String| match value.parse::<NetworkAliasInput>() {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.to_string()),
+        })
+        .interact()?;
+    value.parse()
 }
 
 fn select_network_name(
@@ -976,11 +1047,22 @@ mod tests {
         let conn = conn();
         let app_config = app_config_with_networks(&["testnet"]);
 
-        let err = resolve_network_use_name(&conn, &app_config, None, true).unwrap_err();
+        let prepared = PreparedNetworkUseInput {
+            name: Promptable::Missing {
+                value_name: "network name",
+            },
+            input_mode: InputMode::non_interactive(),
+        };
+        let err = prepared
+            .name
+            .resolve_with(prepared.input_mode, || {
+                select_network_name(&conn, &app_config)
+            })
+            .unwrap_err();
 
         assert!(
             err.to_string()
-                .contains("network name must be provided in --non-interactive mode")
+                .contains("missing required command-line value: network name")
         );
     }
 
@@ -989,7 +1071,19 @@ mod tests {
         let conn = conn();
         let app_config = app_config_with_networks(&["testnet"]);
 
-        let selected = resolve_network_use_name(&conn, &app_config, None, false).unwrap();
+        let prepared = PreparedNetworkUseInput {
+            name: Promptable::Missing {
+                value_name: "network name",
+            },
+            input_mode: InputMode::interactive(),
+        };
+        let selected = prepared
+            .name
+            .resolve_with(prepared.input_mode, || {
+                select_network_name(&conn, &app_config)
+            })
+            .unwrap()
+            .into_value();
 
         assert_eq!(selected, "testnet");
     }

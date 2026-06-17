@@ -4,6 +4,7 @@ use crate::{
         AccountNewArgs, AccountRenameArgs, AccountShowArgs, AccountSubcommand,
     },
     commands::{
+        input::{Defaultable, InputMode, Promptable},
         ledger_construction::{self, LedgerCredentialDeploymentInput},
         stake::shared::{
             StakeDetailsView, render_stake_details_lines, stake_details_view_from_account_info,
@@ -744,29 +745,27 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
         None
     };
 
-    let record = match args.old_label.as_deref() {
-        Some(old_label) => {
-            let matches = accounts::list(conn)?
-                .into_iter()
-                .filter(|record| record.label == old_label)
-                .filter(|record| {
-                    seed_scope_matches_record(record, seed_scope.as_ref(), &seeds_by_id)
-                })
-                .collect::<Vec<_>>();
-            choose_account_match(
-                matches,
-                &seeds_by_id,
-                &networks_by_hash,
-                args.show_addresses,
-                seed_scope.as_ref(),
-                conn,
-                args.non_interactive,
-            )?
+    let input_mode = InputMode::from_flags(args.non_interactive, false);
+    let record = if let Some(old_label) = args.old_label.as_deref() {
+        let matches = accounts::list(conn)?
+            .into_iter()
+            .filter(|record| record.label == old_label)
+            .filter(|record| seed_scope_matches_record(record, seed_scope.as_ref(), &seeds_by_id))
+            .collect::<Vec<_>>();
+        choose_account_match(
+            matches,
+            &seeds_by_id,
+            &networks_by_hash,
+            args.show_addresses,
+            seed_scope.as_ref(),
+            conn,
+            args.non_interactive,
+        )?
+    } else {
+        Promptable::Missing {
+            value_name: "account label",
         }
-        None if args.non_interactive => {
-            bail!("account label must be provided in --non-interactive mode")
-        }
-        None => {
+        .resolve_with(input_mode, || {
             let candidates = accounts::list(conn)?
                 .into_iter()
                 .filter(|record| {
@@ -785,26 +784,16 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
                     show_network: true,
                     preferred_network_name: None,
                 },
-            )?
-        }
+            )
+        })?
+        .into_value()
     };
 
-    let new_label = match args.new_label {
-        Some(label) => label,
-        None if args.non_interactive => {
-            bail!("new account label must be provided in --non-interactive mode")
-        }
-        None => input("New account label:")
-            .placeholder(&record.label)
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Account label is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?,
-    };
+    let new_label = Promptable::from_option(args.new_label, "new account label")
+        .resolve_with(InputMode::from_flags(args.non_interactive, false), || {
+            prompt_account_label_with_placeholder("New account label:", &record.label)
+        })?
+        .into_value();
     validate_label("account", &new_label)?;
     accounts::rename(conn, record.id, &new_label)?;
     println!("Account '{}' renamed to '{}'.", record.label, new_label);
@@ -1417,41 +1406,36 @@ fn resolve_export_account_with_source(
     let key_source_tags_by_id = key_source_tags_by_id(conn)?;
     let networks_by_hash = network_names_by_genesis_hash()?;
     let candidates = exportable_accounts_for_network(conn, network_genesis_hash)?;
-    match explicit_label {
-        Some(label) => {
-            let matches = candidates
-                .into_iter()
-                .filter(|record| record.label == label)
-                .collect::<Vec<_>>();
-            if matches.is_empty() {
-                bail!(
-                    "finalized account '{}' is not configured on network '{}'",
-                    label,
-                    network_name
-                );
-            }
-            let record = choose_account_match(
-                matches,
-                &key_source_tags_by_id,
-                &networks_by_hash,
-                false,
-                None,
-                conn,
-                non_interactive,
-            )?;
-            Ok(ResolvedAccountSelection {
-                record,
-                source: if non_interactive || explicit_label.is_some() {
-                    ResolutionSource::Explicit
-                } else {
-                    ResolutionSource::Inferred
-                },
-            })
+    if let Some(label) = explicit_label {
+        let matches = candidates
+            .into_iter()
+            .filter(|record| record.label == label)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            bail!(
+                "finalized account '{}' is not configured on network '{}'",
+                label,
+                network_name
+            );
         }
-        None if non_interactive => {
-            bail!("account label must be provided in --non-interactive mode")
+        let record = choose_account_match(
+            matches,
+            &key_source_tags_by_id,
+            &networks_by_hash,
+            false,
+            None,
+            conn,
+            non_interactive,
+        )?;
+        Ok(ResolvedAccountSelection {
+            record,
+            source: ResolutionSource::Explicit,
+        })
+    } else {
+        Promptable::Missing {
+            value_name: "account label",
         }
-        None => {
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
             let source = if candidates.len() == 1 && !always_prompt {
                 ResolutionSource::Inferred
             } else {
@@ -1471,7 +1455,8 @@ fn resolve_export_account_with_source(
                 },
             )?;
             Ok(ResolvedAccountSelection { record, source })
-        }
+        })
+        .map(|resolved| resolved.into_value())
     }
 }
 
@@ -1646,9 +1631,11 @@ fn resolve_network_scope(
     allow_all: bool,
 ) -> Result<(ScopeSelection, ResolutionSource)> {
     let app_config = load()?;
-    match explicit {
-        Some("all") if allow_all => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
-        Some(name) => app_config
+    if let Some(name) = explicit {
+        if name == "all" && allow_all {
+            return Ok((ScopeSelection::All, ResolutionSource::Explicit));
+        }
+        return app_config
             .networks
             .get(name)
             .map(|_| {
@@ -1657,40 +1644,50 @@ fn resolve_network_scope(
                     ResolutionSource::Explicit,
                 )
             })
-            .with_context(|| format!("network '{}' is not registered", name)),
-        None => {
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-            if no_defaults {
-                return Ok((
-                    prompt_for_network_scope(&app_config, active.as_deref(), allow_all)?,
-                    ResolutionSource::Prompted,
-                ));
-            }
-            match active {
-                Some(name) => Ok((ScopeSelection::One(name), ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`"
-                ),
-                None => Ok((
-                    prompt_for_network_scope(&app_config, None, allow_all)?,
-                    ResolutionSource::Prompted,
-                )),
-            }
-        }
+            .with_context(|| format!("network '{}' is not registered", name));
     }
+
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+    if no_defaults {
+        return Ok((
+            prompt_for_network_scope(&app_config, active.as_deref(), allow_all)?,
+            ResolutionSource::Prompted,
+        ));
+    }
+    Defaultable::Missing {
+        value_name: "network",
+    }
+    .resolve_with_default_or_prompt(
+        InputMode::from_flags(non_interactive, false),
+        || Ok(active.map(ScopeSelection::One)),
+        || prompt_for_network_scope(&app_config, None, allow_all),
+    )
+    .map(|resolved| {
+        let source = match resolved.source {
+            crate::commands::input::ResolvedSource::Default => ResolutionSource::ActiveDefault,
+            crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+            crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+        };
+        (resolved.value, source)
+    })
+    .with_context(
+        || "no active network is set; provide `--network` or run `ccd-wallet network use <NAME>`",
+    )
 }
 
 fn resolve_account_list_seed_scope(
     conn: &Connection,
     explicit: Option<&str>,
 ) -> Result<(ScopeSelection, ResolutionSource)> {
-    match explicit {
-        Some("all") => Ok((ScopeSelection::All, ResolutionSource::Explicit)),
-        Some(label) => signer_owners::find_by_label(conn, label)?
+    if let Some(label) = explicit {
+        if label == "all" {
+            return Ok((ScopeSelection::All, ResolutionSource::Explicit));
+        }
+        return signer_owners::find_by_label(conn, label)?
             .map(|owner| (ScopeSelection::One(owner.label), ResolutionSource::Explicit))
-            .with_context(|| format!("key source '{}' is not configured", label)),
-        None => Ok((ScopeSelection::All, ResolutionSource::Inferred)),
+            .with_context(|| format!("key source '{}' is not configured", label));
     }
+    Ok((ScopeSelection::All, ResolutionSource::Inferred))
 }
 
 fn resolve_seed_scope_for_addresses(
@@ -1698,12 +1695,12 @@ fn resolve_seed_scope_for_addresses(
     explicit: Option<&str>,
     _non_interactive: bool,
 ) -> Result<ScopeSelection> {
-    match explicit {
-        Some(label) => signer_owners::find_by_label(conn, label)?
+    if let Some(label) = explicit {
+        return signer_owners::find_by_label(conn, label)?
             .map(|owner| ScopeSelection::One(owner.label))
-            .with_context(|| format!("key source '{}' is not configured", label)),
-        None => bail!("`--key-source <LABEL>` is required with `--show-addresses`"),
+            .with_context(|| format!("key source '{}' is not configured", label));
     }
+    bail!("`--key-source <LABEL>` is required with `--show-addresses`")
 }
 
 fn prompt_for_network_scope(
@@ -2081,26 +2078,30 @@ fn resolve_export_output_path(
     account_label: &str,
     non_interactive: bool,
 ) -> Result<PathBuf> {
-    match explicit {
-        Some(path) => expand_tilde_path(&path),
-        None if non_interactive => {
-            bail!("output path must be provided with `--out <FILE>` in --non-interactive mode")
-        }
-        None => {
+    let explicit = explicit.map(|path| expand_tilde_path(&path)).transpose()?;
+    Promptable::from_option(explicit, "output path")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
             let suggested = format!("{account_label}.json");
-            let path: String = input("Output file:")
-                .default_input(&suggested)
-                .validate(|value: &String| {
-                    if value.is_empty() {
-                        Err("Output file is required.")
-                    } else {
-                        Ok(())
-                    }
-                })
-                .interact()?;
-            expand_tilde_path(Path::new(&path))
-        }
-    }
+            prompt_output_path("Output file:", &suggested)
+        })
+        .map(|resolved| resolved.into_value())
+        .with_context(
+            || "output path must be provided with `--out <FILE>` in --non-interactive mode",
+        )
+}
+
+fn prompt_output_path(prompt: &str, suggested: &str) -> Result<PathBuf> {
+    let path: String = input(prompt)
+        .default_input(suggested)
+        .validate(|value: &String| {
+            if value.is_empty() {
+                Err("Output file is required.")
+            } else {
+                Ok(())
+            }
+        })
+        .interact()?;
+    expand_tilde_path(Path::new(&path))
 }
 
 fn expand_tilde_path(path: &Path) -> Result<PathBuf> {
@@ -2227,42 +2228,32 @@ pub(crate) fn resolve_account_reference(
     non_interactive: bool,
     unlocks: &mut AccountReferenceUnlocks,
 ) -> Result<AccountAddress> {
-    match explicit {
-        Some(value) => resolve_account_reference_value(
-            conn,
-            context.network_name,
-            context.network_genesis_hash,
-            value,
-            label,
-            unlocks,
-            &[],
-        ),
-        None if non_interactive => {
-            bail!(
-                "{label} account address or local account label must be provided in --non-interactive mode"
-            )
-        }
-        None => {
-            let suggestions = account_reference_suggestions(conn, context.network_genesis_hash)?;
-            let value: String = input(prompt)
+    let suggestions = if explicit.is_some() {
+        Vec::new()
+    } else {
+        account_reference_suggestions(conn, context.network_genesis_hash)?
+    };
+    let value = Promptable::from_option(explicit.map(ToOwned::to_owned), "account reference")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            Ok(input(prompt)
                 .autocomplete(
                     suggestions
                         .iter()
                         .map(|suggestion| suggestion.text.clone())
                         .collect::<Vec<_>>(),
                 )
-                .interact()?;
-            resolve_account_reference_value(
-                conn,
-                context.network_name,
-                context.network_genesis_hash,
-                &value,
-                label,
-                unlocks,
-                &suggestions,
-            )
-        }
-    }
+                .interact()?)
+        })?
+        .into_value();
+    resolve_account_reference_value(
+        conn,
+        context.network_name,
+        context.network_genesis_hash,
+        &value,
+        label,
+        unlocks,
+        &suggestions,
+    )
 }
 
 /// Resolve repeated explicit account references.
@@ -2688,22 +2679,12 @@ fn resolve_import_label(
         .filter(|value| !value.is_empty())
         .unwrap_or("imported-account")
         .to_owned();
-    let label = match explicit {
-        Some(label) => label,
-        None if non_interactive => {
-            bail!("account label must be provided in --non-interactive mode")
-        }
-        None => input("Imported account label:")
-            .default_input(&suggested)
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Account label is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?,
-    };
+    let label = Promptable::from_option(explicit, "account label")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            prompt_account_label_with_default("Imported account label:", &suggested)
+        })
+        .with_context(|| "account label must be provided in --non-interactive mode")?
+        .into_value();
     validate_label("account", &label)?;
     if accounts::find_by_network_and_label(conn, network_genesis_hash, &label)?.is_some() {
         bail!(
@@ -2716,21 +2697,41 @@ fn resolve_import_label(
 }
 
 fn resolve_account_label(explicit: Option<String>, non_interactive: bool) -> Result<String> {
-    match explicit {
-        Some(label) => Ok(label),
-        None if non_interactive => {
-            bail!("account label must be provided in --non-interactive mode")
-        }
-        None => Ok(input("Account label:")
-            .validate(|value: &String| {
-                if value.is_empty() {
-                    Err("Account label is required.")
-                } else {
-                    Ok(())
-                }
-            })
-            .interact()?),
-    }
+    Promptable::from_option(explicit, "account label")
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            prompt_account_label("Account label:")
+        })
+        .map(|resolved| resolved.into_value())
+        .with_context(|| "account label must be provided in --non-interactive mode")
+}
+
+fn prompt_account_label(prompt: &str) -> Result<String> {
+    let label: String = input(prompt)
+        .validate(|value: &String| {
+            validate_label("account", value).map_err(|error| error.to_string())
+        })
+        .interact()?;
+    Ok(label)
+}
+
+fn prompt_account_label_with_placeholder(prompt: &str, placeholder: &str) -> Result<String> {
+    let label: String = input(prompt)
+        .placeholder(placeholder)
+        .validate(|value: &String| {
+            validate_label("account", value).map_err(|error| error.to_string())
+        })
+        .interact()?;
+    Ok(label)
+}
+
+fn prompt_account_label_with_default(prompt: &str, default: &str) -> Result<String> {
+    let label: String = input(prompt)
+        .default_input(default)
+        .validate(|value: &String| {
+            validate_label("account", value).map_err(|error| error.to_string())
+        })
+        .interact()?;
+    Ok(label)
 }
 
 fn resolve_seed_label(
@@ -2739,30 +2740,38 @@ fn resolve_seed_label(
     non_interactive: bool,
     no_defaults: bool,
 ) -> Result<(String, ResolutionSource)> {
-    match explicit {
-        Some(label) => signer_owners::find_by_label(conn, label)?
+    if let Some(label) = explicit {
+        return signer_owners::find_by_label(conn, label)?
             .map(|owner| (owner.label, ResolutionSource::Explicit))
-            .with_context(|| format!("key source '{}' is not configured", label)),
-        None => {
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
-            if no_defaults {
-                return Ok((
-                    prompt_for_seed_label(conn, active.as_deref())?,
-                    ResolutionSource::Prompted,
-                ));
-            }
-            match active {
-                Some(label) => Ok((label, ResolutionSource::ActiveDefault)),
-                None if non_interactive => bail!(
-                    "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`."
-                ),
-                None => Ok((
-                    prompt_for_seed_label(conn, None)?,
-                    ResolutionSource::Prompted,
-                )),
-            }
-        }
+            .with_context(|| format!("key source '{}' is not configured", label));
     }
+
+    let active = wallet_state::get(conn, wallet_state::ACTIVE_SEED_KEY)?;
+    if no_defaults {
+        return Ok((
+            prompt_for_seed_label(conn, active.as_deref())?,
+            ResolutionSource::Prompted,
+        ));
+    }
+    Defaultable::Missing {
+        value_name: "key source",
+    }
+    .resolve_with_default_or_prompt(
+        InputMode::from_flags(non_interactive, false),
+        || Ok(active),
+        || prompt_for_seed_label(conn, None),
+    )
+    .map(|resolved| {
+        let source = match resolved.source {
+            crate::commands::input::ResolvedSource::Default => ResolutionSource::ActiveDefault,
+            crate::commands::input::ResolvedSource::Prompt => ResolutionSource::Prompted,
+            crate::commands::input::ResolvedSource::Explicit => ResolutionSource::Explicit,
+        };
+        (resolved.value, source)
+    })
+    .with_context(
+        || "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`.",
+    )
 }
 
 fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<String> {
@@ -2791,31 +2800,31 @@ fn resolve_identity(
     non_interactive: bool,
 ) -> Result<(IdentityRecord, ResolutionSource)> {
     let now = now_unix_seconds()?;
-    match explicit {
-        Some(label) => {
-            let identity = identities::find_by_network_signer_owner_and_label(
-                conn,
-                network_genesis_hash,
-                signer_owner_id,
-                label,
-            )?
-            .with_context(|| {
-                format!(
-                    "identity '{}' is not configured for the selected key source and network",
-                    label
-                )
-            })?;
-            ensure_identity_selectable(&identity, now)?;
-            Ok((identity, ResolutionSource::Explicit))
-        }
-        None if non_interactive => bail!(
-            "identity label must be provided in --non-interactive mode with `--identity <LABEL>`"
-        ),
-        None => Ok((
-            prompt_for_identity(conn, network_genesis_hash, signer_owner_id, now)?,
-            ResolutionSource::Prompted,
-        )),
+    if let Some(label) = explicit {
+        let identity = identities::find_by_network_signer_owner_and_label(
+            conn,
+            network_genesis_hash,
+            signer_owner_id,
+            label,
+        )?
+        .with_context(|| {
+            format!(
+                "identity '{}' is not configured for the selected key source and network",
+                label
+            )
+        })?;
+        ensure_identity_selectable(&identity, now)?;
+        return Ok((identity, ResolutionSource::Explicit));
     }
+
+    let identity = Promptable::Missing {
+        value_name: "identity label",
+    }
+    .resolve_with(InputMode::from_flags(non_interactive, false), || {
+        prompt_for_identity(conn, network_genesis_hash, signer_owner_id, now)
+    })?
+    .into_value();
+    Ok((identity, ResolutionSource::Prompted))
 }
 
 fn prompt_for_identity(
@@ -2957,18 +2966,18 @@ async fn resolve_import_network_context(
     non_interactive: bool,
 ) -> Result<(String, NetworkEntry, v2::Endpoint, String, ResolutionSource)> {
     let app_config = load()?;
-    let selected_network = match network {
-        Some(name) => (name.to_owned(), ResolutionSource::Explicit),
-        None if non_interactive => {
-            bail!("network must be provided with `--network <NAME>` in --non-interactive mode")
+    let selected_network = if let Some(name) = network {
+        (name.to_owned(), ResolutionSource::Explicit)
+    } else {
+        let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+        let network_name = Promptable::Missing {
+            value_name: "network",
         }
-        None => {
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-            (
-                prompt_for_network_name(&app_config, active.as_deref())?,
-                ResolutionSource::Prompted,
-            )
-        }
+        .resolve_with(InputMode::from_flags(non_interactive, false), || {
+            prompt_for_network_name(&app_config, active.as_deref())
+        })?
+        .into_value();
+        (network_name, ResolutionSource::Prompted)
     };
 
     let entry = app_config
@@ -3073,27 +3082,26 @@ pub(crate) async fn resolve_account_network_context(
         return Ok((name, entry, endpoint, endpoint_label, source));
     }
 
-    let (selected_network, source) = match network {
-        Some(name) => (name.to_owned(), ResolutionSource::Explicit),
-        None => {
-            let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
-            match plan_default_network_resolution(
-                &app_config,
-                active.as_deref(),
-                non_interactive,
-                no_defaults,
-            )? {
-                DefaultNetworkResolutionPlan::Selected {
-                    network_name,
-                    source,
-                } => (network_name, source),
-                DefaultNetworkResolutionPlan::Prompt {
-                    active_network_name,
-                } => (
-                    prompt_for_network_name(&app_config, active_network_name)?,
-                    ResolutionSource::Prompted,
-                ),
-            }
+    let (selected_network, source) = if let Some(name) = network {
+        (name.to_owned(), ResolutionSource::Explicit)
+    } else {
+        let active = wallet_state::get(conn, wallet_state::ACTIVE_NETWORK_KEY)?;
+        match plan_default_network_resolution(
+            &app_config,
+            active.as_deref(),
+            non_interactive,
+            no_defaults,
+        )? {
+            DefaultNetworkResolutionPlan::Selected {
+                network_name,
+                source,
+            } => (network_name, source),
+            DefaultNetworkResolutionPlan::Prompt {
+                active_network_name,
+            } => (
+                prompt_for_network_name(&app_config, active_network_name)?,
+                ResolutionSource::Prompted,
+            ),
         }
     };
 
