@@ -235,7 +235,7 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
     } else {
         validate_blind_signing_context(&payload, &args)?;
     }
-    let _timing = resolve_update_timing(&args)?;
+    let timing = resolve_update_timing(&args)?;
     let chain_resolution = spinner();
     chain_resolution.start("Resolving governance authorization context from chain...");
     let chain_context = match resolve_update_chain_context(
@@ -256,9 +256,22 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
         }
     };
     log_resolved_context(&payload_context_lines(&payload, &chain_context))?;
+    let prepared = prepare_governance_update(&payload, &chain_context, timing)?;
 
     let block_item = if args.ledger {
-        build_ledger_signed_update_instruction(&payload, &chain_context, _timing, &args)?
+        let key_index = resolve_ledger_key_index(&args)?;
+        let signer_context = ledger_update_signer_context(key_index);
+        if !approve_governance_update_review(
+            "submission",
+            &network_name,
+            &endpoint_label,
+            &prepared,
+            &signer_context,
+            args.non_interactive,
+        )? {
+            return Ok(());
+        }
+        build_ledger_signed_prepared_update_instruction(&prepared, key_index, args.non_interactive)?
     } else {
         ensure_governance_keys_available_for_listing(
             conn,
@@ -271,7 +284,19 @@ async fn update(conn: &mut Connection, args: GovernanceUpdateArgs) -> Result<()>
         let vault = governance::unlock_vault(conn, &network_entry.genesis_hash, &password_value)?;
         let decrypted = governance::decrypted_keys(conn, &network_entry.genesis_hash, &vault.dek)?;
         let signers = resolve_update_signers(&args, &decrypted, &chain_context, &payload)?;
-        build_signed_update_instruction(&payload, &chain_context, &signers, _timing)?
+        let signer_context = local_update_signer_context(&signers);
+        if !approve_governance_update_review(
+            "submission",
+            &network_name,
+            &endpoint_label,
+            &prepared,
+            &signer_context,
+            args.non_interactive,
+        )? {
+            return Ok(());
+        }
+        let signer_outputs = sign_prepared_update_with_local_keys(&prepared, &signers)?;
+        assemble_signed_update_instruction(&prepared, signer_outputs)?
     };
     let transaction_hash =
         submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
@@ -783,33 +808,19 @@ async fn resolve_update_chain_context(
     })
 }
 
-fn build_signed_update_instruction(
-    payload: &ResolvedGovernanceUpdatePayload,
-    chain_context: &GovernanceUpdateChainContext,
-    signers: &[governance::DecryptedGovernanceKey],
-    timing: GovernanceUpdateTiming,
+fn build_ledger_signed_prepared_update_instruction(
+    prepared: &PreparedGovernanceUpdate,
+    key_index: u32,
+    non_interactive: bool,
 ) -> Result<BlockItem<Payload>> {
-    let prepared = prepare_governance_update(payload, chain_context, timing)?;
-    let signer_outputs = sign_prepared_update_with_local_keys(&prepared, signers)?;
-    assemble_signed_update_instruction(&prepared, signer_outputs)
-}
-
-fn build_ledger_signed_update_instruction(
-    payload: &ResolvedGovernanceUpdatePayload,
-    chain_context: &GovernanceUpdateChainContext,
-    timing: GovernanceUpdateTiming,
-    args: &GovernanceUpdateArgs,
-) -> Result<BlockItem<Payload>> {
-    let prepared = prepare_governance_update(payload, chain_context, timing)?;
-    let key_index = resolve_ledger_key_index(args)?;
     let spin = spinner();
     spin.start("Opening Governance Ledger app and resolving signer key...");
     let result = (|| {
         let transport = governance_ledger::HidTransport::open_first().map_err(ledger_error)?;
         let mut app = governance_ledger::GovernanceLedgerApp::new(transport);
         let outputs =
-            sign_prepared_update_with_ledger(&mut app, &prepared, key_index, args.non_interactive)?;
-        assemble_signed_update_instruction(&prepared, outputs)
+            sign_prepared_update_with_ledger(&mut app, prepared, key_index, non_interactive)?;
+        assemble_signed_update_instruction(prepared, outputs)
     })();
     spin.clear();
     result
@@ -1819,6 +1830,192 @@ fn payload_context_lines(
     lines
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GovernanceReviewSignerContext {
+    heading: &'static str,
+    lines: Vec<String>,
+}
+
+impl GovernanceReviewSignerContext {
+    fn new(heading: &'static str, lines: Vec<String>) -> Self {
+        Self { heading, lines }
+    }
+}
+
+fn render_governance_update_review(
+    action: &str,
+    network_name: &str,
+    endpoint_label: &str,
+    prepared: &PreparedGovernanceUpdate,
+    signer_context: &GovernanceReviewSignerContext,
+) -> Result<String> {
+    let mut lines = vec![
+        format!("Governance update {action}"),
+        String::new(),
+        "Network:".to_owned(),
+        format!("  {network_name} @ {endpoint_label}"),
+        String::new(),
+        "Update:".to_owned(),
+        format!("  payload: {}", prepared.payload.context_label()),
+        format!(
+            "  payload size: {} bytes",
+            prepared.encoded_payload.as_ref().len()
+        ),
+        format!("  sequence number: {}", prepared.header.seq_number.number),
+        format!(
+            "  effective time: {}",
+            format_update_review_time(prepared.timing.effective_time_seconds)?
+        ),
+        format!(
+            "  timeout: {}",
+            format_update_review_time(prepared.timing.timeout_seconds)?
+        ),
+    ];
+
+    lines.push(String::new());
+    lines.push(format!("{}:", signer_context.heading));
+    for line in &signer_context.lines {
+        lines.push(format!("  {line}"));
+    }
+
+    lines.push(String::new());
+    match render_payload_details(&prepared.payload)? {
+        Some(details) => {
+            lines.push("Payload details:".to_owned());
+            lines.extend(indent_multiline(&details, "  "));
+        }
+        None => {
+            lines.push("Payload details:".to_owned());
+            lines.push("  blind serialized payload; semantic details are unavailable".to_owned());
+            lines.push(format!(
+                "  raw payload bytes: {}",
+                prepared.encoded_payload.as_ref().len()
+            ));
+            lines.push(
+                "  warning: approve only if trusted tooling produced this payload and it was independently reviewed"
+                    .to_owned(),
+            );
+        }
+    }
+
+    Ok(lines.join("\n"))
+}
+
+fn format_update_review_time(seconds: u64) -> Result<String> {
+    if seconds == 0 {
+        return Ok("0 (immediate)".to_owned());
+    }
+    Ok(format!(
+        "{} ({})",
+        seconds,
+        format_unix_seconds_rfc3339(seconds)?
+    ))
+}
+
+fn render_payload_details(payload: &ResolvedGovernanceUpdatePayload) -> Result<Option<String>> {
+    match payload {
+        ResolvedGovernanceUpdatePayload::Known { payload, .. } => {
+            serde_json::to_string_pretty(payload)
+                .map(Some)
+                .context("failed to render governance update payload details")
+        }
+        ResolvedGovernanceUpdatePayload::Blind { .. } => Ok(None),
+    }
+}
+
+fn indent_multiline(value: &str, indent: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(|line| format!("{indent}{line}"))
+        .collect()
+}
+
+fn local_update_signer_context(
+    signers: &[governance::DecryptedGovernanceKey],
+) -> GovernanceReviewSignerContext {
+    GovernanceReviewSignerContext::new(
+        "Signing",
+        std::iter::once("mode: local governance vault".to_owned())
+            .chain(signers.iter().map(|signer| {
+                format!(
+                    "selected key: {}",
+                    governance::public_key_hex(&signer.public_key)
+                )
+            }))
+            .collect(),
+    )
+}
+
+fn ledger_update_signer_context(key_index: u32) -> GovernanceReviewSignerContext {
+    GovernanceReviewSignerContext::new(
+        "Signing",
+        vec![
+            "mode: Governance Ledger".to_owned(),
+            format!("Ledger key index: {key_index}"),
+        ],
+    )
+}
+
+fn local_detached_signer_context(verify_key: &str) -> GovernanceReviewSignerContext {
+    GovernanceReviewSignerContext::new(
+        "Detached signing",
+        vec![
+            "mode: local governance vault".to_owned(),
+            format!("selected key: {verify_key}"),
+        ],
+    )
+}
+
+fn ledger_detached_signer_context(key_index: u32) -> GovernanceReviewSignerContext {
+    GovernanceReviewSignerContext::new(
+        "Detached signing",
+        vec![
+            "mode: Governance Ledger".to_owned(),
+            format!("Ledger key index: {key_index}"),
+        ],
+    )
+}
+
+fn detached_submission_signer_context(
+    outputs: &[GovernanceSignerOutput],
+) -> GovernanceReviewSignerContext {
+    GovernanceReviewSignerContext::new(
+        "Detached signatures",
+        outputs
+            .iter()
+            .map(|output| format!("accepted signature index: {}", output.index.index))
+            .collect(),
+    )
+}
+
+fn approve_governance_update_review(
+    action: &str,
+    network_name: &str,
+    endpoint_label: &str,
+    prepared: &PreparedGovernanceUpdate,
+    signer_context: &GovernanceReviewSignerContext,
+    non_interactive: bool,
+) -> Result<bool> {
+    if non_interactive {
+        return Ok(true);
+    }
+    let review = render_governance_update_review(
+        action,
+        network_name,
+        endpoint_label,
+        prepared,
+        signer_context,
+    )?;
+    cliclack::log::info(review)?;
+    let approved = confirm(format!("Approve governance update {action}?"))
+        .initial_value(false)
+        .interact()?;
+    if !approved {
+        cliclack::log::warning(format!("governance update {action} declined by user"))?;
+    }
+    Ok(approved)
+}
+
 impl ResolvedGovernanceUpdatePayload {
     fn sequence_queue_hint(&self) -> Option<GovernanceSequenceQueue> {
         match self {
@@ -2498,6 +2695,17 @@ async fn sign_proposal(conn: &mut Connection, args: GovernanceProposalSignArgs) 
                     .with_context(|| format!("invalid Governance Ledger key index '{value}'"))?
             }
         };
+        let signer_context = ledger_detached_signer_context(key_index);
+        if !approve_governance_update_review(
+            "detached signing",
+            &network_name,
+            &endpoint_label,
+            &prepared,
+            &signer_context,
+            args.non_interactive,
+        )? {
+            return Ok(());
+        }
         let spin = spinner();
         spin.start("Opening Governance Ledger app and signing proposal...");
         let result: Result<GovernanceSignatureFile> = (|| {
@@ -2531,6 +2739,17 @@ async fn sign_proposal(conn: &mut Connection, args: GovernanceProposalSignArgs) 
             &prepared,
         )?;
         let verify_key = governance::public_key_hex(&selected.public_key);
+        let signer_context = local_detached_signer_context(&verify_key);
+        if !approve_governance_update_review(
+            "detached signing",
+            &network_name,
+            &endpoint_label,
+            &prepared,
+            &signer_context,
+            args.non_interactive,
+        )? {
+            return Ok(());
+        }
         let output = sign_detached_prepared_update_with_local_key(&prepared, &selected)?;
         signature_file_from_signer_output(verify_key, output)
     };
@@ -2623,6 +2842,17 @@ async fn submit_proposal(conn: &mut Connection, args: GovernanceProposalSubmitAr
         outputs.push(output);
     }
     ensure_signature_threshold(&prepared, outputs.len())?;
+    let signer_context = detached_submission_signer_context(&outputs);
+    if !approve_governance_update_review(
+        "submission",
+        &network_name,
+        &endpoint_label,
+        &prepared,
+        &signer_context,
+        args.non_interactive,
+    )? {
+        return Ok(());
+    }
     let block_item = assemble_signed_update_instruction(&prepared, outputs)?;
     let transaction_hash =
         submit_governance_update(&network_entry.node_endpoint, &endpoint_label, &block_item)
@@ -3568,6 +3798,104 @@ mod tests {
                 .unwrap(),
             specification_auxiliary_data: Vec::new(),
         })
+    }
+
+    fn prepared_protocol_update() -> PreparedGovernanceUpdate {
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: protocol_payload(),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::Protocol),
+            sequence_queue: GovernanceSequenceQueue::Protocol,
+        };
+        prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(7u64.into()),
+                sequence_number_source: Some(ResolutionSource::Inferred),
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn governance_review_renders_parsed_payload_details() {
+        let prepared = prepared_protocol_update();
+        let signer_context = ledger_update_signer_context(3);
+        let review = render_governance_update_review(
+            "detached signing",
+            "testnet",
+            "https://node.example",
+            &prepared,
+            &signer_context,
+        )
+        .unwrap();
+        assert!(review.contains("Governance update detached signing"));
+        assert!(review.contains("testnet @ https://node.example"));
+        assert!(review.contains("payload: UpdateProtocol"));
+        assert!(review.contains("sequence number: 7"));
+        assert!(review.contains("Ledger key index: 3"));
+        assert!(review.contains("Payload details:"));
+        assert!(review.contains("https://example.com/update"));
+    }
+
+    #[test]
+    fn governance_review_warns_for_blind_payloads() {
+        let payload = ResolvedGovernanceUpdatePayload::Blind {
+            bytes: vec![0xaa, 0xbb],
+            auth_family_hint: Some(GovernanceAuthFamily::Level2(
+                GovernanceCapability::CreatePlt,
+            )),
+            sequence_queue_hint: Some(GovernanceSequenceQueue::ProtocolLevelTokens),
+        };
+        let prepared = prepare_governance_update(
+            &payload,
+            &GovernanceUpdateChainContext {
+                chain_parameters: ChainParameters::default(),
+                sequence_number: Some(9u64.into()),
+                sequence_number_source: Some(ResolutionSource::Explicit),
+            },
+            GovernanceUpdateTiming {
+                effective_time_seconds: 0,
+                timeout_seconds: 1_800_000_000,
+            },
+        )
+        .unwrap();
+        let signer_context = local_detached_signer_context("abcd");
+        let review = render_governance_update_review(
+            "submission",
+            "testnet",
+            "endpoint",
+            &prepared,
+            &signer_context,
+        )
+        .unwrap();
+        assert!(review.contains("blind serialized"));
+        assert!(review.contains("semantic details are unavailable"));
+        assert!(review.contains("raw payload bytes: 2"));
+        assert!(review.contains("independently reviewed"));
+    }
+
+    #[test]
+    fn non_interactive_review_approval_skips_prompt() {
+        let prepared = prepared_protocol_update();
+        let signer_context = detached_submission_signer_context(&[GovernanceSignerOutput {
+            index: UpdateKeysIndex { index: 1 },
+            signature: Signature { sig: vec![0; 64] },
+        }]);
+        let approved = approve_governance_update_review(
+            "submission",
+            "testnet",
+            "endpoint",
+            &prepared,
+            &signer_context,
+            true,
+        )
+        .unwrap();
+        assert!(approved);
     }
 
     #[test]
