@@ -154,16 +154,18 @@ async fn list_accounts(conn: &mut Connection, args: AccountListArgs) -> Result<(
 }
 
 async fn show_account(conn: &mut Connection, args: AccountShowArgs) -> Result<()> {
-    let context = resolve_account_show_network_context(
+    let (context, selected_account) = resolve_account_show_network_context(
         conn,
         args.network.as_deref(),
         args.node,
+        &args.account,
         args.non_interactive,
         args.no_defaults,
     )
     .await?;
     let block = crate::smart_contracts::shared::parse_block_identifier(args.block.as_deref())?;
-    let target = resolve_account_show_target(conn, &context, &args.account)?;
+    let target =
+        resolve_account_show_target(conn, &context, &args.account, selected_account.as_ref())?;
     let view = match target {
         AccountShowTarget::RawAddress(address) => {
             let info = query_account_info(
@@ -344,6 +346,76 @@ async fn resolve_account_show_network_context(
     conn: &Connection,
     network: Option<&str>,
     node: Option<v2::Endpoint>,
+    account: &str,
+    non_interactive: bool,
+    no_defaults: bool,
+) -> Result<(AccountShowNetworkContext, Option<ResolvedAccountSelection>)> {
+    match plan_account_network_resolution(
+        Some(account),
+        network.is_some(),
+        node.is_some(),
+        non_interactive,
+    ) {
+        AccountNetworkResolutionPlan::UseExistingNetworkResolution => Ok((
+            resolve_account_show_network_context_without_assistance(
+                conn,
+                network,
+                node,
+                non_interactive,
+                no_defaults,
+            )
+            .await?,
+            None,
+        )),
+        AccountNetworkResolutionPlan::UseAccountAssistedLabel(account_label) => {
+            if finalized_local_accounts_by_label(conn, account_label, None)?.is_empty() {
+                return Ok((
+                    resolve_account_show_network_context_without_assistance(
+                        conn,
+                        network,
+                        node,
+                        non_interactive,
+                        no_defaults,
+                    )
+                    .await?,
+                    None,
+                ));
+            }
+
+            let active_network = resolve_active_network_preference(conn, no_defaults)?;
+            let selection = resolve_matching_local_account_selection(
+                conn,
+                account_label,
+                active_network.as_ref(),
+                false,
+            )?;
+            let network_name = resolve_configured_network_name_for_genesis_hash(
+                &selection.record.network_genesis_hash,
+                active_network.as_ref().map(|network| network.name.as_str()),
+            )?;
+            let network_source = match selection.source {
+                ResolutionSource::ActiveDefault => ResolutionSource::ActiveDefault,
+                ResolutionSource::Prompted => ResolutionSource::Prompted,
+                _ => ResolutionSource::Inferred,
+            };
+            let resolved = resolve_selected_network_context(network_name, network_source).await?;
+            Ok((
+                AccountShowNetworkContext {
+                    endpoint: resolved.endpoint,
+                    endpoint_label: resolved.endpoint_label,
+                    display_name: resolved.network_name,
+                    genesis_hash: resolved.network_entry.genesis_hash,
+                },
+                Some(selection),
+            ))
+        }
+    }
+}
+
+async fn resolve_account_show_network_context_without_assistance(
+    conn: &Connection,
+    network: Option<&str>,
+    node: Option<v2::Endpoint>,
     non_interactive: bool,
     no_defaults: bool,
 ) -> Result<AccountShowNetworkContext> {
@@ -396,9 +468,18 @@ fn resolve_account_show_target(
     conn: &Connection,
     context: &AccountShowNetworkContext,
     target: &str,
+    selected_account: Option<&ResolvedAccountSelection>,
 ) -> Result<AccountShowTarget> {
     if let Ok(address) = AccountAddress::from_str(target) {
         return Ok(AccountShowTarget::RawAddress(address));
+    }
+
+    if let Some(selection) = selected_account {
+        let metadata = local_metadata_for_record(conn, &selection.record)?;
+        return Ok(AccountShowTarget::LocalFinalized(
+            selection.record.clone(),
+            metadata,
+        ));
     }
 
     let record = accounts::find_by_network_and_label(conn, &context.genesis_hash, target)?
@@ -2187,8 +2268,86 @@ pub(crate) fn account_reference_suggestions(
             }
         })
         .collect::<Vec<_>>();
-    suggestions.sort_by(|a, b| a.text.cmp(&b.text));
+    suggestions.sort_by(|a, b| compare_natural_text(&a.text, &b.text));
     Ok(suggestions)
+}
+
+fn compare_natural_text(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+
+    loop {
+        match (left_chars.peek().copied(), right_chars.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left_ch), Some(right_ch)) => {
+                if left_ch.is_ascii_digit() && right_ch.is_ascii_digit() {
+                    let left_digits = take_digit_run(&mut left_chars);
+                    let right_digits = take_digit_run(&mut right_chars);
+                    let left_trimmed = left_digits.trim_start_matches('0');
+                    let right_trimmed = right_digits.trim_start_matches('0');
+                    let left_norm = if left_trimmed.is_empty() {
+                        "0"
+                    } else {
+                        left_trimmed
+                    };
+                    let right_norm = if right_trimmed.is_empty() {
+                        "0"
+                    } else {
+                        right_trimmed
+                    };
+                    match left_norm.len().cmp(&right_norm.len()) {
+                        Ordering::Equal => match left_norm.cmp(right_norm) {
+                            Ordering::Equal => match left_digits.len().cmp(&right_digits.len()) {
+                                Ordering::Equal => continue,
+                                other => return other,
+                            },
+                            other => return other,
+                        },
+                        other => return other,
+                    }
+                }
+
+                let left_next = left_chars.next().expect("peeked left char must exist");
+                let right_next = right_chars.next().expect("peeked right char must exist");
+                match left_next.cmp(&right_next) {
+                    Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+        }
+    }
+}
+
+fn take_digit_run(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut digits = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if !ch.is_ascii_digit() {
+            break;
+        }
+        digits.push(ch);
+        chars.next();
+    }
+    digits
+}
+
+fn filter_autocomplete_items(items: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return items.to_vec();
+    }
+    let words = query.split_whitespace().collect::<Vec<_>>();
+    items
+        .iter()
+        .filter(|item| {
+            let item_lower = item.to_lowercase();
+            words.iter().all(|word| item_lower.contains(word))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Resolve a non-sender account reference from explicit input or an interactive prompt.
@@ -2233,15 +2392,16 @@ pub(crate) fn resolve_account_reference(
     } else {
         account_reference_suggestions(conn, context.network_genesis_hash)?
     };
+    let autocomplete_items = suggestions
+        .iter()
+        .map(|suggestion| suggestion.text.clone())
+        .collect::<Vec<_>>();
     let value = Promptable::from_option(explicit.map(ToOwned::to_owned), "account reference")
         .resolve_with(InputMode::from_flags(non_interactive, false), || {
             Ok(input(prompt)
-                .autocomplete(
-                    suggestions
-                        .iter()
-                        .map(|suggestion| suggestion.text.clone())
-                        .collect::<Vec<_>>(),
-                )
+                .autocomplete(move |query: &str| {
+                    filter_autocomplete_items(&autocomplete_items, query)
+                })
                 .interact()?)
         })?
         .into_value();
@@ -3594,6 +3754,70 @@ mod tests {
     }
 
     #[test]
+    fn account_reference_suggestions_use_natural_label_sorting() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "bw-test", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "bw-test", "password").unwrap();
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "acc_0-10-0",
+            0,
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+        );
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "acc_0-2-0",
+            1,
+            "47b6Qe2XtZANHetanWKP1PbApLKtS3AyiCtcXaqLMbypKjCaRw",
+        );
+        finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis",
+            "acc_0-0-0",
+            2,
+            "4QkqdUnrjShrUrHpE96odLM6J77nWzEryifzqNnwNk4FYNge8a",
+        );
+
+        let suggestions = account_reference_suggestions(&conn, "genesis").unwrap();
+        let texts = suggestions
+            .into_iter()
+            .map(|suggestion| suggestion.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            texts,
+            vec![
+                "[bw-test] acc_0-0-0",
+                "[bw-test] acc_0-2-0",
+                "[bw-test] acc_0-10-0",
+            ]
+        );
+    }
+
+    #[test]
+    fn autocomplete_filter_preserves_existing_order_for_matches() {
+        let items = vec![
+            "[bw-test] acc_0-0-0".to_owned(),
+            "[bw-test] acc_0-2-0".to_owned(),
+            "[bw-test] acc_0-10-0".to_owned(),
+        ];
+
+        assert_eq!(filter_autocomplete_items(&items, "acc"), items);
+        assert_eq!(
+            filter_autocomplete_items(&items, "10"),
+            vec!["[bw-test] acc_0-10-0".to_owned()]
+        );
+    }
+
+    #[test]
     fn done_identity_requires_future_expiry_to_be_selectable() {
         assert!(is_identity_selectable(
             &identity(IdentityStatus::Done, Some(200)),
@@ -4077,6 +4301,7 @@ mod tests {
             &conn,
             &context,
             "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+            None,
         )
         .unwrap();
         assert!(matches!(target, AccountShowTarget::RawAddress(_)));
@@ -4111,11 +4336,51 @@ mod tests {
         )
         .unwrap();
 
-        let target =
-            resolve_account_show_target(&conn, &account_show_test_context("genesis-2"), "alice")
-                .unwrap();
+        let target = resolve_account_show_target(
+            &conn,
+            &account_show_test_context("genesis-2"),
+            "alice",
+            None,
+        )
+        .unwrap();
         match target {
             AccountShowTarget::LocalPending(metadata, _) => {
+                assert_eq!(metadata.label, "alice");
+                assert_eq!(metadata.seed.as_deref(), Some("seed"));
+            }
+            other => panic!("unexpected target: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_show_target_uses_selected_local_account_when_already_resolved() {
+        let mut conn = conn();
+        let seed = seeds::add(&conn, "seed", TEST_SEED_PHRASE.as_bytes(), "password").unwrap();
+        let unlocked = seeds::unlock_context(&conn, "seed", "password").unwrap();
+        let record_id = finalized_derived_account(
+            &mut conn,
+            &seed.id,
+            &unlocked.dek,
+            "genesis-2",
+            "alice",
+            0,
+            "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd",
+        );
+        let record = accounts::find_by_id(&conn, record_id).unwrap();
+
+        let target = resolve_account_show_target(
+            &conn,
+            &account_show_test_context("genesis-2"),
+            "alice",
+            Some(&ResolvedAccountSelection {
+                record: record.clone(),
+                source: ResolutionSource::Inferred,
+            }),
+        )
+        .unwrap();
+        match target {
+            AccountShowTarget::LocalFinalized(selected, metadata) => {
+                assert_eq!(selected.id, record.id);
                 assert_eq!(metadata.label, "alice");
                 assert_eq!(metadata.seed.as_deref(), Some("seed"));
             }

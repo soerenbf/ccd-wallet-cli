@@ -49,6 +49,9 @@ ccd-wallet
 │  │  ├─ init
 │  │  └─ receive
 │  └─ download-module
+├─ ccd                          [Implemented]
+│  ├─ transfer
+│  └─ schedule
 ├─ seed                         [Implemented]
 │  ├─ add
 │  ├─ delete
@@ -138,6 +141,8 @@ The `seed` command family remains the user-facing place for seed phrase manageme
 
 `transaction show <HASH>` inspects transaction lifecycle and outcome details through a resolved node. The optional `--show-payload` flag additionally attempts to display the original submitted block item payload and account transaction header when the transaction is present in committed or finalized block contents.
 
+`ccd` is the user-facing home for native CCD transfer authoring. `ccd transfer <SENDER> --recipient <ADDRESS_OR_LABEL> --amount <CCD>` submits a simple CCD transfer, and `ccd schedule <SENDER> --recipient <ADDRESS_OR_LABEL> --release <RFC3339=CCD>...` submits a scheduled CCD transfer. Both commands accept finalized local account labels for senders, accept raw account addresses or finalized local account labels for recipients, support optional memos, and keep transaction inspection under `transaction show` rather than under the `ccd` command space.
+
 `token compose <PLAN>` opens an interactive token MetaUpdate composer backed by a saved TOML plan. The composer supports adding token and lock operations, previewing the plan, and submitting the saved composition. `token compose preview <PLAN>` lists the operations recorded in the plan without requiring sender or network context. `token compose submit <PLAN> --sender <LABEL>` resolves the saved plan and submits the ordered operations as a single MetaUpdate account transaction.
 
 ## Planned command spaces
@@ -188,8 +193,7 @@ stake
 
 Some future transaction authoring areas remain intentionally unresolved in this change.
 In particular:
-- this document does not define a dedicated top-level `ccd` command space
-- this document does not finalize where miscellaneous non-token account transaction authoring will live
+- this document does not finalize where miscellaneous non-token account transaction authoring beyond CCD transfers will live
 - this document does not define any future token-composition syntax beyond the implemented `token compose` plan workflow
 
-These areas can be added later, but they should not conflict with the implemented `token` taxonomy and planned `stake` taxonomy defined here.
+These areas can be added later, but they should not conflict with the implemented `ccd` and `token` taxonomy and planned `stake` taxonomy defined here.

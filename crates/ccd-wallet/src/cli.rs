@@ -2,7 +2,7 @@ use crate::commands::{
     config::network::NetworkCommand,
     input::{
         AccountLabel, AccountReference, ContractAddressInput, InputModeArgs, NetworkNodeArgs,
-        SubmissionWaitArgs, TokenAmountInput,
+        ReleaseScheduleEntryInput, SubmissionWaitArgs, TokenAmountInput,
     },
 };
 use ccd_wallet_core::config;
@@ -44,6 +44,8 @@ pub enum Command {
     Transaction(Box<TransactionCommand>),
     /// Smart contract transaction commands.
     Contract(Box<ContractCommand>),
+    /// Native CCD transfer commands.
+    Ccd(Box<CcdCommand>),
     /// Protocol-level token commands.
     Token(Box<TokenCommand>),
     /// Governance key management commands.
@@ -94,6 +96,76 @@ pub struct TransactionShowArgs {
     /// Show the original submitted transaction payload when it can be retrieved from block contents.
     #[arg(long = "show-payload")]
     pub show_payload: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CcdCommand {
+    #[command(subcommand)]
+    pub command: CcdSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CcdSubcommand {
+    /// Transfer native CCD with an optional memo.
+    Transfer(Box<CcdTransferArgs>),
+    /// Transfer native CCD with a release schedule and optional memo.
+    Schedule(Box<CcdScheduleArgs>),
+}
+
+#[derive(Debug, Args)]
+pub struct CcdTransferArgs {
+    /// Local account label to sign with. If omitted, interactive mode opens an account selector after network resolution.
+    #[arg(value_name = "SENDER")]
+    pub sender: Option<AccountLabel>,
+
+    /// Recipient account address or finalized local account label. If omitted interactively, the CLI prompts.
+    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
+    pub recipient: Option<AccountReference>,
+
+    /// CCD amount as a decimal value. If omitted interactively, the CLI prompts.
+    #[arg(long = "amount", value_name = "CCD")]
+    pub amount: Option<Amount>,
+
+    /// Optional memo to include in the transfer.
+    #[arg(long = "memo", value_name = "TEXT")]
+    pub memo: Option<String>,
+
+    #[command(flatten)]
+    pub network_node: NetworkNodeArgs,
+
+    #[command(flatten)]
+    pub submission: SubmissionWaitArgs,
+
+    #[command(flatten)]
+    pub input_mode: InputModeArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct CcdScheduleArgs {
+    /// Local account label to sign with. If omitted, interactive mode opens an account selector after network resolution.
+    #[arg(value_name = "SENDER")]
+    pub sender: Option<AccountLabel>,
+
+    /// Recipient account address or finalized local account label. If omitted interactively, the CLI prompts.
+    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
+    pub recipient: Option<AccountReference>,
+
+    /// Release entry as `RFC3339=CCD`. Repeat to add multiple releases.
+    #[arg(long = "release", value_name = "RFC3339=CCD")]
+    pub releases: Vec<ReleaseScheduleEntryInput>,
+
+    /// Optional memo to include in the scheduled transfer.
+    #[arg(long = "memo", value_name = "TEXT")]
+    pub memo: Option<String>,
+
+    #[command(flatten)]
+    pub network_node: NetworkNodeArgs,
+
+    #[command(flatten)]
+    pub submission: SubmissionWaitArgs,
+
+    #[command(flatten)]
+    pub input_mode: InputModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -2091,6 +2163,84 @@ mod tests {
                 }
             },
             other => panic!("expected transaction command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ccd_transfer_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "ccd",
+            "transfer",
+            "alice",
+            "--recipient",
+            "bob",
+            "--amount",
+            "12.5",
+            "--memo",
+            "invoice 7",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Ccd(command) => match command.command {
+                CcdSubcommand::Transfer(args) => {
+                    assert_eq!(
+                        args.sender.as_ref().map(AccountLabel::as_str),
+                        Some("alice")
+                    );
+                    assert_eq!(args.recipient, Some("bob".parse().unwrap()));
+                    assert_eq!(args.amount, Some(Amount::from_micro_ccd(12_500_000)));
+                    assert_eq!(args.memo.as_deref(), Some("invoice 7"));
+                    assert_eq!(
+                        args.network_node
+                            .network
+                            .as_ref()
+                            .map(|network| network.as_str()),
+                        Some("testnet")
+                    );
+                }
+                other => panic!("expected ccd transfer command, got {other:?}"),
+            },
+            other => panic!("expected ccd command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_ccd_schedule_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "ccd",
+            "schedule",
+            "alice",
+            "--recipient",
+            "bob",
+            "--release",
+            "2026-07-01T00:00:00Z=10",
+            "--release",
+            "2026-10-01T00:00:00Z=15.5",
+            "--network",
+            "testnet",
+        ]);
+
+        match cli.command {
+            Command::Ccd(command) => match command.command {
+                CcdSubcommand::Schedule(args) => {
+                    assert_eq!(
+                        args.sender.as_ref().map(AccountLabel::as_str),
+                        Some("alice")
+                    );
+                    assert_eq!(args.recipient, Some("bob".parse().unwrap()));
+                    assert_eq!(args.releases.len(), 2);
+                    assert_eq!(
+                        args.releases[1].amount().unwrap(),
+                        Amount::from_micro_ccd(15_500_000)
+                    );
+                }
+                other => panic!("expected ccd schedule command, got {other:?}"),
+            },
+            other => panic!("expected ccd command, got {other:?}"),
         }
     }
 

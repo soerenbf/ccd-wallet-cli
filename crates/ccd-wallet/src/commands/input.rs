@@ -7,11 +7,14 @@
 
 use std::{fmt, future::Future, str::FromStr};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use ccd_wallet_core::config;
+use chrono::{DateTime, Utc};
 use clap::Args;
 use concordium_rust_sdk::{
-    common::types::AccountAddress, smart_contracts::common::ContractAddress, v2,
+    common::types::{AccountAddress, Amount, Timestamp},
+    smart_contracts::common::ContractAddress,
+    v2,
 };
 
 use crate::smart_contracts::shared::parse_contract_address;
@@ -352,6 +355,64 @@ impl FromStr for TokenAmountInput {
             bail!("token amount must not be negative");
         }
         Ok(Self(trimmed.to_owned()))
+    }
+}
+
+/// A scheduled-transfer release entry supplied as `RFC3339=CCD`.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ReleaseScheduleEntryInput {
+    timestamp_text: String,
+    amount_text: String,
+}
+
+impl ReleaseScheduleEntryInput {
+    /// Return the parsed release timestamp.
+    pub(crate) fn timestamp(&self) -> Result<Timestamp> {
+        let datetime = DateTime::parse_from_rfc3339(&self.timestamp_text).with_context(|| {
+            format!(
+                "invalid release timestamp '{}'; use an RFC3339 instant",
+                self.timestamp_text
+            )
+        })?;
+        let millis = datetime.with_timezone(&Utc).timestamp_millis();
+        if millis < 0 {
+            bail!("release timestamp must not be before the unix epoch");
+        }
+        Ok(Timestamp::from_timestamp_millis(millis as u64))
+    }
+
+    /// Return the parsed CCD amount.
+    pub(crate) fn amount(&self) -> Result<Amount> {
+        parse_decimal_ccd_amount_text(&self.amount_text)
+    }
+}
+
+impl fmt::Display for ReleaseScheduleEntryInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}={}", self.timestamp_text, self.amount_text)
+    }
+}
+
+impl FromStr for ReleaseScheduleEntryInput {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let trimmed = value.trim();
+        let Some((timestamp_text, amount_text)) = trimmed.split_once('=') else {
+            bail!("release entry must use RFC3339=CCD format");
+        };
+        let timestamp_text = timestamp_text.trim();
+        let amount_text = amount_text.trim();
+        if timestamp_text.is_empty() || amount_text.is_empty() {
+            bail!("release entry must use RFC3339=CCD format");
+        }
+        let parsed = Self {
+            timestamp_text: timestamp_text.to_owned(),
+            amount_text: amount_text.to_owned(),
+        };
+        let _ = parsed.timestamp()?;
+        let _ = parsed.amount()?;
+        Ok(parsed)
     }
 }
 
@@ -698,6 +759,49 @@ impl ValidationPolicy {
     }
 }
 
+fn parse_decimal_ccd_amount_text(value: &str) -> Result<Amount> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("amount must not be empty");
+    }
+    if value.starts_with('-') {
+        bail!("amount must not be negative");
+    }
+    let mut parts = value.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        bail!("amount must be a decimal CCD value such as 0, 1, or 1.25");
+    }
+    if whole.is_empty() || !whole.chars().all(|ch| ch.is_ascii_digit()) {
+        bail!("amount whole CCD part must contain digits only");
+    }
+    let whole_micro = whole
+        .parse::<u64>()?
+        .checked_mul(1_000_000)
+        .context("amount is too large")?;
+    let fraction_micro = match fraction {
+        None => 0,
+        Some(fraction) => {
+            if fraction.is_empty() {
+                bail!("amount fractional CCD part must contain digits only");
+            }
+            if !fraction.chars().all(|ch| ch.is_ascii_digit()) {
+                bail!("amount fractional CCD part must contain digits only");
+            }
+            if fraction.len() > 6 {
+                bail!("amount must use at most 6 fractional digits");
+            }
+            let padded = format!("{fraction:0<6}");
+            padded.parse::<u64>()?
+        }
+    };
+    let micro_ccd = whole_micro
+        .checked_add(fraction_micro)
+        .context("amount is too large")?;
+    Ok(Amount::from_micro_ccd(micro_ccd))
+}
+
 fn missing_value_error<T>(value_name: &'static str) -> Result<T> {
     bail!("missing required command-line value: {value_name}")
 }
@@ -847,6 +951,21 @@ mod tests {
         assert_eq!(amount.as_str(), "1.2300");
         assert!("".parse::<TokenAmountInput>().is_err());
         assert!("-1".parse::<TokenAmountInput>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn release_schedule_entry_input_parses_rfc3339_amount_pairs() -> Result<()> {
+        let entry = "2026-07-01T00:00:00Z=10.5".parse::<ReleaseScheduleEntryInput>()?;
+
+        assert_eq!(entry.to_string(), "2026-07-01T00:00:00Z=10.5");
+        assert_eq!(entry.amount()?.micro_ccd(), 10_500_000);
+        assert!("tomorrow=10".parse::<ReleaseScheduleEntryInput>().is_err());
+        assert!(
+            "2026-07-01T00:00:00Z"
+                .parse::<ReleaseScheduleEntryInput>()
+                .is_err()
+        );
         Ok(())
     }
 

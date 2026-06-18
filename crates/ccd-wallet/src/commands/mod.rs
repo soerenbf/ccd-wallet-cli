@@ -1,4 +1,5 @@
 pub mod account;
+pub mod ccd;
 pub mod config;
 pub mod connect;
 pub mod contract;
