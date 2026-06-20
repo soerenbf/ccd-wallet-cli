@@ -143,7 +143,9 @@ The `seed` command family remains the user-facing place for seed phrase manageme
 
 `ccd` is the user-facing home for native CCD transfer authoring. `ccd transfer <SENDER> --recipient <ADDRESS_OR_LABEL> --amount <CCD>` submits a simple CCD transfer, and `ccd schedule <SENDER> --recipient <ADDRESS_OR_LABEL> --release <RFC3339=CCD>...` submits a scheduled CCD transfer. Both commands accept finalized local account labels for senders, accept raw account addresses or finalized local account labels for recipients, support optional memos, and keep transaction inspection under `transaction show` rather than under the `ccd` command space.
 
-`token compose <PLAN>` opens an interactive token MetaUpdate composer backed by a saved TOML plan. The composer supports adding token and lock operations, previewing the plan, and submitting the saved composition. `token compose preview <PLAN>` lists the operations recorded in the plan without requiring sender or network context. `token compose submit <PLAN> --sender <LABEL>` resolves the saved plan and submits the ordered operations as a single MetaUpdate account transaction.
+`token lock create` creates protocol-level token locks. Use repeated `--recipient <ADDRESS_OR_LABEL>` values for limited-recipient locks, or `--any-recipient` to allow any eligible recipient account. Interactive lock creation prompts for recipient mode when neither recipient form is supplied. `token lock send` keeps limited-recipient validation for configured recipient lists and accepts any resolved recipient for any-recipient locks. `token lock show` renders any-recipient locks as `any eligible account`.
+
+`token compose <PLAN>` opens an interactive token MetaUpdate composer backed by a saved TOML plan. The composer supports adding token and lock operations, previewing the plan, and submitting the saved composition. `token compose preview <PLAN>` lists the operations recorded in the plan without requiring sender or network context. `token compose submit <PLAN> --sender <LABEL>` resolves the saved plan and submits the ordered operations as a single MetaUpdate account transaction. Compose lock creation accepts either repeated `--recipient` values or `--any-recipient`; saved plans serialize limited-recipient lock creation as `recipients = ["..."]` and any-recipient lock creation as `recipients = "any"`.
 
 ## Planned command spaces
 
@@ -194,6 +196,6 @@ stake
 Some future transaction authoring areas remain intentionally unresolved in this change.
 In particular:
 - this document does not finalize where miscellaneous non-token account transaction authoring beyond CCD transfers will live
-- this document does not define any future token-composition syntax beyond the implemented `token compose` plan workflow
+- this document only defines token-composition syntax for the implemented `token compose` plan workflow, including limited-recipient lock arrays and `recipients = "any"` for any-recipient locks
 
 These areas can be added later, but they should not conflict with the implemented `ccd` and `token` taxonomy and planned `stake` taxonomy defined here.

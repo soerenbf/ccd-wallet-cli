@@ -19,7 +19,7 @@ use concordium_rust_sdk::{
     base::{
         common::types::TransactionTime,
         contracts_common::AccountAddress,
-        protocol_level_locks::LockId,
+        protocol_level_locks::{LockId, LockRecipients},
         protocol_level_tokens::{
             TokenAmount, TokenId, meta_operations, meta_operations::MetaUpdateOperations,
         },
@@ -333,7 +333,7 @@ async fn resolve_meta_update_operations(
                 tokens,
                 keep_alive,
             } => {
-                let recipients = resolve_accounts(conn, context, recipients, "recipient")?;
+                let recipients = recipients.resolve_accounts(conn, context)?;
                 let expiry = shared::parse_expiry_time(expiry)?;
                 let grants = grants
                     .iter()
@@ -836,13 +836,18 @@ async fn validate_lock_recipient(
         return Ok(());
     }
     let configured = configured_recipients_for_lock_reference(Some(client), plan, lock).await?;
-    ensure!(
-        configured.iter().any(|configured| configured == recipient),
-        "recipient '{}' is not configured for lock '{}'",
-        recipient,
-        lock
-    );
-    Ok(())
+    match configured {
+        shared::LockRecipientMode::Any => Ok(()),
+        shared::LockRecipientMode::Limited(configured) => {
+            ensure!(
+                configured.iter().any(|configured| configured == recipient),
+                "recipient '{}' is not configured for lock '{}'",
+                recipient,
+                lock
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn select_recipient_for_lock_reference(plan: &Plan, lock: &str) -> Result<String> {
@@ -855,18 +860,25 @@ async fn select_recipient_for_lock_reference(plan: &Plan, lock: &str) -> Result<
         None
     };
     let recipients = configured_recipients_for_lock_reference(client.as_mut(), plan, lock).await?;
-    if recipients.is_empty() {
-        bail!("lock '{lock}' has no configured recipients");
+    match recipients {
+        shared::LockRecipientMode::Any => {
+            Ok(input("Recipient account address or @sender:").interact()?)
+        }
+        shared::LockRecipientMode::Limited(recipients) => {
+            if recipients.is_empty() {
+                bail!("lock '{lock}' has no configured recipients");
+            }
+            let items = recipients
+                .into_iter()
+                .map(|recipient| SelectItem {
+                    value: recipient.clone(),
+                    label: recipient,
+                    hint: String::new(),
+                })
+                .collect::<Vec<_>>();
+            select_always("Select recipient", &items, None)
+        }
     }
-    let items = recipients
-        .into_iter()
-        .map(|recipient| SelectItem {
-            value: recipient.clone(),
-            label: recipient,
-            hint: String::new(),
-        })
-        .collect::<Vec<_>>();
-    select_always("Select recipient", &items, None)
 }
 
 async fn configured_tokens_for_lock_reference(
@@ -892,7 +904,7 @@ async fn configured_recipients_for_lock_reference(
     client: Option<&mut concordium_rust_sdk::v2::Client>,
     plan: &Plan,
     lock: &str,
-) -> Result<Vec<String>> {
+) -> Result<shared::LockRecipientMode<String>> {
     match ParsedLockReference::parse(lock)? {
         ParsedLockReference::Latest => latest_lock_create_recipients(plan),
         ParsedLockReference::Created(index) => nth_lock_create_recipients(plan, index),
@@ -902,16 +914,20 @@ async fn configured_recipients_for_lock_reference(
             };
             let lock_id = lock.parse().context("invalid lock identifier")?;
             let info = shared::query_lock_info(client, lock_id).await?;
-            Ok(info
-                .recipients
-                .iter()
-                .map(|recipient| recipient.address.to_string())
-                .collect())
+            match info.recipients {
+                LockRecipients::Any => Ok(shared::LockRecipientMode::Any),
+                LockRecipients::Limited(recipients) => Ok(shared::LockRecipientMode::Limited(
+                    recipients
+                        .into_iter()
+                        .map(|recipient| recipient.address.to_string())
+                        .collect(),
+                )),
+            }
         }
     }
 }
 
-fn latest_lock_create_recipients(plan: &Plan) -> Result<Vec<String>> {
+fn latest_lock_create_recipients(plan: &Plan) -> Result<shared::LockRecipientMode<String>> {
     let index = plan
         .operations
         .iter()
@@ -923,7 +939,10 @@ fn latest_lock_create_recipients(plan: &Plan) -> Result<Vec<String>> {
     nth_lock_create_recipients(plan, index)
 }
 
-fn nth_lock_create_recipients(plan: &Plan, target: usize) -> Result<Vec<String>> {
+fn nth_lock_create_recipients(
+    plan: &Plan,
+    target: usize,
+) -> Result<shared::LockRecipientMode<String>> {
     let mut index = 0usize;
     for operation in &plan.operations {
         let PlanOperation::LockCreate { recipients, .. } = operation else {
@@ -931,7 +950,7 @@ fn nth_lock_create_recipients(plan: &Plan, target: usize) -> Result<Vec<String>>
         };
         index += 1;
         if index == target {
-            return Ok(recipients.clone());
+            return Ok(recipients.to_shared_mode());
         }
     }
     bail!("same-plan lock reference '@{target}' could not be resolved")
@@ -1034,13 +1053,7 @@ fn resolve_operation_account_references(
             tokens,
             keep_alive,
         } => PlanOperation::LockCreate {
-            recipients: resolve_plan_accounts(
-                conn,
-                genesis_hash,
-                &recipients,
-                "recipient",
-                unlocks,
-            )?,
+            recipients: recipients.resolve_plan_accounts(conn, genesis_hash, unlocks)?,
             expiry,
             grants: grants
                 .into_iter()
@@ -1291,6 +1304,7 @@ fn flag_candidates(words: &[String]) -> Vec<String> {
         (Some("metadata"), Some("update")) => &["--token", "--url", "--checksum-sha256"],
         (Some("lock"), Some("create")) => &[
             "--recipient",
+            "--any-recipient",
             "--expiry",
             "--grant",
             "--token",
@@ -1420,11 +1434,12 @@ async fn parse_plan_aware_lock_op(plan: &Plan, words: &[String]) -> Result<PlanO
         "send" => {
             let lock = args.take_positional_or_prompt("lock", "Lock id or @ reference:")?;
             let token = args.take_token_or_select_for_lock(plan, &lock).await?;
+            let source = args.take_or_prompt("source", "Source account address or @sender:")?;
             let recipient = args.take_recipient_or_select_for_lock(plan, &lock).await?;
             Ok(PlanOperation::LockSend {
                 lock,
                 token,
-                source: args.take_or_prompt("source", "Source account address or @sender:")?,
+                source,
                 recipient,
                 amount: args.take_or_prompt("amount", "Token amount:")?,
             })
@@ -1580,7 +1595,7 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
     let mut args = OperationArgs::from_words(words)?;
     match action.as_str() {
         "create" => Ok(PlanOperation::LockCreate {
-            recipients: args.take_many_or_prompt("recipient", "Recipients (comma-separated):")?,
+            recipients: args.take_lock_recipients()?,
             expiry: args.take_or_prompt("expiry", "Lock expiry:")?,
             grants: args.take_lock_grants()?,
             tokens: args.take_many_or_prompt("token", "Tokens (comma-separated):")?,
@@ -1626,7 +1641,7 @@ impl OperationArgs {
         while let Some(word) = words.pop() {
             if let Some(name) = word.strip_prefix("--") {
                 match name {
-                    "keep-alive" => flags.push(name.to_owned()),
+                    "keep-alive" | "any-recipient" => flags.push(name.to_owned()),
                     _ => options.push((name.to_owned(), words.required_word(name)?)),
                 }
             } else {
@@ -1651,6 +1666,30 @@ impl OperationArgs {
         Ok(confirm("Keep the lock alive after funds are returned?")
             .initial_value(false)
             .interact()?)
+    }
+
+    fn take_lock_recipients(&mut self) -> Result<PlanLockRecipients> {
+        let recipients = self.take_all("recipient");
+        if self.flag("any-recipient") {
+            if !recipients.is_empty() {
+                bail!("--any-recipient cannot be combined with --recipient");
+            }
+            return Ok(PlanLockRecipients::any());
+        }
+        if !recipients.is_empty() {
+            return Ok(PlanLockRecipients::limited(recipients));
+        }
+        let allow_any = confirm("Allow any eligible account to receive funds from this lock?")
+            .initial_value(false)
+            .interact()?;
+        if allow_any {
+            Ok(PlanLockRecipients::any())
+        } else {
+            Ok(PlanLockRecipients::limited(self.take_many_or_prompt(
+                "recipient",
+                "Recipients (comma-separated):",
+            )?))
+        }
     }
 
     fn take_optional(&mut self, name: &str) -> Option<String> {
@@ -1796,7 +1835,7 @@ fn help_text() -> &'static str {
   admin-roles assign --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   admin-roles revoke --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   metadata update --token TOKEN --url URL [--checksum-sha256 HEX]
-  lock create --recipient ACCOUNT --expiry TIME --grant GRANT --token TOKEN [--keep-alive]
+  lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--keep-alive]
   lock fund LOCK --token TOKEN --amount AMOUNT
   lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
   lock return LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
@@ -1809,6 +1848,10 @@ Plan commands:
 Session commands:
   help | ?
   exit
+
+Saved plan syntax:
+  lock-create recipients = ["ACCOUNT", ...] for limited-recipient locks
+  lock-create recipients = "any" for any-recipient locks, previewed as any eligible account
 
 Lock references:
   @          most recent preceding lock-create, canonicalized to @N on save
@@ -1896,7 +1939,7 @@ enum PlanOperation {
         checksum_sha256: Option<String>,
     },
     LockCreate {
-        recipients: Vec<String>,
+        recipients: PlanLockRecipients,
         expiry: String,
         grants: Vec<PlanLockGrant>,
         tokens: Vec<String>,
@@ -1924,6 +1967,83 @@ enum PlanOperation {
     LockCancel {
         lock: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PlanLockRecipients {
+    Any(String),
+    Limited(Vec<String>),
+}
+
+impl PlanLockRecipients {
+    fn any() -> Self {
+        Self::Any("any".to_owned())
+    }
+
+    fn limited(recipients: Vec<String>) -> Self {
+        Self::Limited(recipients)
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Any(value) if value == "any" => Ok(()),
+            Self::Any(value) => bail!(
+                "unsupported lock recipients value '{value}'; use recipients = \"any\" or an array of accounts"
+            ),
+            Self::Limited(_) => Ok(()),
+        }
+    }
+
+    fn preview(&self) -> String {
+        match self {
+            Self::Any(_) => "any eligible account".to_owned(),
+            Self::Limited(recipients) => recipients.join(", "),
+        }
+    }
+
+    fn to_shared_mode(&self) -> shared::LockRecipientMode<String> {
+        match self {
+            Self::Any(_) => shared::LockRecipientMode::Any,
+            Self::Limited(recipients) => shared::LockRecipientMode::Limited(recipients.clone()),
+        }
+    }
+
+    fn resolve_accounts(
+        &self,
+        conn: &Connection,
+        context: &mut shared::MutationContext,
+    ) -> Result<shared::LockRecipientMode<AccountAddress>> {
+        self.validate()?;
+        match self {
+            Self::Any(_) => Ok(shared::LockRecipientMode::Any),
+            Self::Limited(recipients) => Ok(shared::LockRecipientMode::Limited(resolve_accounts(
+                conn,
+                context,
+                recipients,
+                "recipient",
+            )?)),
+        }
+    }
+
+    fn resolve_plan_accounts(
+        self,
+        conn: &Connection,
+        genesis_hash: &str,
+        unlocks: &mut AccountReferenceUnlocks,
+    ) -> Result<Self> {
+        self.validate()?;
+        match self {
+            Self::Any(_) => Ok(Self::any()),
+            Self::Limited(recipients) => Ok(Self::Limited(resolve_plan_accounts(
+                conn,
+                genesis_hash,
+                &recipients,
+                "recipient",
+                unlocks,
+            )?)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2050,7 +2170,7 @@ impl PlanOperation {
                 "Create lock @{} for tokens [{}], recipients [{}], expiry {expiry}, grants [{}], keep alive {}",
                 lock_create_index.unwrap_or_default(),
                 tokens.join(", "),
-                recipients.join(", "),
+                recipients.preview(),
                 grants
                     .iter()
                     .map(PlanLockGrant::preview)
@@ -2266,6 +2386,9 @@ fn validate_lock_references(plan: &Plan) -> Result<()> {
     for operation in &plan.operations {
         if operation.is_lock_create() {
             lock_create_count += 1;
+            if let PlanOperation::LockCreate { recipients, .. } = operation {
+                recipients.validate()?;
+            }
         }
         let lock = match operation {
             PlanOperation::LockFund { lock, .. }
@@ -2306,7 +2429,7 @@ mod tests {
                     amount: "100".to_owned(),
                 },
                 PlanOperation::LockCreate {
-                    recipients: vec!["bob".to_owned()],
+                    recipients: PlanLockRecipients::limited(vec!["bob".to_owned()]),
                     expiry: "30d".to_owned(),
                     grants: vec![PlanLockGrant {
                         account: "alice".to_owned(),
@@ -2363,6 +2486,53 @@ amount = "100"
     }
 
     #[test]
+    fn parses_and_serializes_any_recipient_lock_create() {
+        let plan: Plan = toml::from_str(
+            r#"
+version = 1
+
+[[operations]]
+type = "lock-create"
+recipients = "any"
+expiry = "30d"
+tokens = ["CCD"]
+
+[[operations.grants]]
+account = "alice"
+capabilities = ["fund"]
+"#,
+        )
+        .expect("valid any-recipient plan");
+        let rendered = render_plan_preview(&plan, None).expect("preview renders");
+        assert!(rendered.contains("any eligible account"));
+        let serialized = toml::to_string_pretty(&plan).expect("serialize succeeds");
+        assert!(serialized.contains("recipients = \"any\""));
+        assert!(!serialized.contains("recipients = []"));
+    }
+
+    #[test]
+    fn rejects_unknown_string_recipient_sentinel() {
+        let plan: Plan = toml::from_str(
+            r#"
+version = 1
+
+[[operations]]
+type = "lock-create"
+recipients = "everyone"
+expiry = "30d"
+tokens = ["CCD"]
+
+[[operations.grants]]
+account = "alice"
+capabilities = ["fund"]
+"#,
+        )
+        .expect("string recipients parse before semantic validation");
+        let err = validate_lock_references(&plan).expect_err("unknown sentinel must fail");
+        assert!(err.to_string().contains("recipients"));
+    }
+
+    #[test]
     fn canonicalizes_latest_lock_reference_to_numbered_reference() {
         let mut plan = sample_plan();
         if let PlanOperation::LockFund { lock, .. } = &mut plan.operations[2] {
@@ -2394,7 +2564,7 @@ amount = "100"
     fn explicit_second_lock_reference_targets_second_prior_lock_create() {
         let mut plan = sample_plan();
         plan.operations.push(PlanOperation::LockCreate {
-            recipients: vec!["carol".to_owned()],
+            recipients: PlanLockRecipients::limited(vec!["carol".to_owned()]),
             expiry: "60d".to_owned(),
             grants: vec![PlanLockGrant {
                 account: "alice".to_owned(),
@@ -2414,7 +2584,10 @@ amount = "100"
     #[test]
     fn local_lock_recipient_lookup_returns_recipients() {
         let recipients = nth_lock_create_recipients(&sample_plan(), 1).expect("recipients resolve");
-        assert_eq!(recipients, vec!["bob".to_owned()]);
+        assert_eq!(
+            recipients,
+            shared::LockRecipientMode::Limited(vec!["bob".to_owned()])
+        );
     }
 
     #[test]
@@ -2430,6 +2603,7 @@ amount = "100"
             .map(|suggestion| suggestion.value)
             .collect::<Vec<_>>();
         assert!(flags.contains(&"--recipient".to_owned()));
+        assert!(flags.contains(&"--any-recipient".to_owned()));
         assert!(flags.contains(&"--keep-alive".to_owned()));
     }
 
@@ -2443,7 +2617,7 @@ amount = "100"
         path.push(format!("ccd-wallet-compose-complete-test-{unique}.toml"));
         let mut plan = sample_plan();
         plan.operations.push(PlanOperation::LockCreate {
-            recipients: vec!["carol".to_owned()],
+            recipients: PlanLockRecipients::limited(vec!["carol".to_owned()]),
             expiry: "60d".to_owned(),
             grants: vec![PlanLockGrant {
                 account: "alice".to_owned(),
@@ -2526,6 +2700,28 @@ amount = "100"
                     capabilities: vec!["fund".to_owned(), "send".to_owned()],
                 }]
         ));
+    }
+
+    #[test]
+    fn parses_add_lock_create_with_any_recipient() {
+        let command = parse_repl_command(
+            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --keep-alive",
+        )
+        .expect("parse succeeds");
+        assert!(matches!(
+            command,
+            ReplCommand::Add(PlanOperation::LockCreate { recipients: PlanLockRecipients::Any(value), .. })
+                if value == "any"
+        ));
+    }
+
+    #[test]
+    fn rejects_add_lock_create_with_mixed_recipient_modes() {
+        let err = parse_repl_command(
+            "lock create --any-recipient --recipient bob --expiry 1d --grant alice:fund --token CCD --keep-alive",
+        )
+        .expect_err("mixed recipient modes must fail");
+        assert!(err.to_string().contains("--any-recipient"));
     }
 
     #[test]

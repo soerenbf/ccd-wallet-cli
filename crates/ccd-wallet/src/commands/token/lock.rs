@@ -10,8 +10,8 @@ use crate::{
         token::shared,
     },
 };
-use anyhow::Result;
-use cliclack::spinner;
+use anyhow::{Result, bail};
+use cliclack::{confirm, spinner};
 use concordium_rust_sdk::protocol_level_tokens::{
     LockId, TokenId,
     lock_client::{self, FundTokens, ReturnTokens, SendTokens, Validation},
@@ -22,6 +22,7 @@ use rusqlite::Connection;
 struct PreparedTokenLockCreate {
     context: shared::PreparedTokenMutationContext,
     recipients: Vec<AccountReference>,
+    any_recipient: bool,
     expiry: String,
     grants: Vec<String>,
     tokens: Vec<TokenId>,
@@ -41,6 +42,7 @@ impl PreparedTokenLockCreate {
                 false,
             )?,
             recipients: args.recipients,
+            any_recipient: args.any_recipient,
             expiry: args.expiry,
             grants: args.grants,
             tokens: args.tokens,
@@ -55,6 +57,58 @@ struct PreparedTokenLockFund {
     lock_id: Promptable<LockId>,
     token_id: Promptable<TokenId>,
     amount: Promptable<TokenAmountInput>,
+}
+
+fn resolve_create_recipients(
+    conn: &Connection,
+    context: &mut shared::MutationContext,
+    prepared: &PreparedTokenLockCreate,
+) -> Result<shared::LockRecipientMode<concordium_rust_sdk::base::contracts_common::AccountAddress>>
+{
+    if prepared.any_recipient {
+        return Ok(shared::LockRecipientMode::Any);
+    }
+
+    if !prepared.recipients.is_empty() {
+        let recipient_inputs = prepared
+            .recipients
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        return Ok(shared::LockRecipientMode::Limited(
+            shared::parse_account_addresses(conn, context, &recipient_inputs, "recipient")?,
+        ));
+    }
+
+    if !prepared.context.input_mode().prompts_allowed() {
+        bail!("provide at least one --recipient or use --any-recipient in --non-interactive mode");
+    }
+
+    let allow_any = confirm("Allow any eligible account to receive funds from this lock?")
+        .initial_value(false)
+        .interact()?;
+    if allow_any {
+        return Ok(shared::LockRecipientMode::Any);
+    }
+
+    let mut recipients = Vec::new();
+    loop {
+        recipients.push(shared::resolve_account_address(
+            conn,
+            context,
+            None,
+            "Recipient account address or local label:",
+            "recipient",
+            false,
+        )?);
+        let another = confirm("Add another recipient?")
+            .initial_value(false)
+            .interact()?;
+        if !another {
+            break;
+        }
+    }
+    Ok(shared::LockRecipientMode::Limited(recipients))
 }
 
 impl PreparedTokenLockFund {
@@ -163,13 +217,7 @@ impl PreparedTokenLockCancel {
 pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Result<()> {
     let prepared = PreparedTokenLockCreate::from_args(args)?;
     let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
-    let recipient_inputs = prepared
-        .recipients
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let recipients =
-        shared::parse_account_addresses(conn, &mut context, &recipient_inputs, "recipient")?;
+    let recipients = resolve_create_recipients(conn, &mut context, &prepared)?;
     let expiry = shared::parse_expiry_time(&prepared.expiry)?;
     let unresolved_grants = if prepared.grants.is_empty() {
         if !prepared.context.input_mode().prompts_allowed() {
@@ -198,11 +246,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let recipient_summary = recipients
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let recipient_summary = shared::render_lock_recipient_mode(&recipients);
     let config = shared::build_lock_config(recipients, expiry, grants, prepared.tokens, keep_alive);
 
     cliclack::log::info(format!(
@@ -330,7 +374,7 @@ pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<(
     Ok(())
 }
 
-/// Send locked funds to a configured recipient.
+/// Send locked funds to a recipient allowed by the lock configuration.
 pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<()> {
     let prepared = PreparedTokenLockSend::from_args(args)?;
     let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;

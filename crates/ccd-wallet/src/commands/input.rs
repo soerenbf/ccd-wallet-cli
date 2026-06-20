@@ -253,7 +253,7 @@ impl FromStr for NetworkName {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        validate_cli_label("network name", value)?;
+        validate_network_name(value)?;
         Ok(Self(value.to_owned()))
     }
 }
@@ -414,6 +414,13 @@ impl FromStr for ReleaseScheduleEntryInput {
         let _ = parsed.amount()?;
         Ok(parsed)
     }
+}
+
+fn validate_network_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("network name must not be empty");
+    }
+    Ok(())
 }
 
 fn validate_cli_label(kind: &str, label: &str) -> Result<()> {
@@ -929,10 +936,16 @@ mod tests {
     }
 
     #[test]
-    fn label_newtypes_reject_invalid_characters() {
+    fn network_name_accepts_configured_alias_syntax() {
         assert!("testnet".parse::<NetworkName>().is_ok());
+        assert!("local/p11-locks".parse::<NetworkName>().is_ok());
+        assert!("".parse::<NetworkName>().is_err());
+    }
+
+    #[test]
+    fn key_source_label_rejects_invalid_characters() {
         assert!("ledger-main_1".parse::<KeySourceLabel>().is_ok());
-        assert!("bad label".parse::<NetworkName>().is_err());
+        assert!("bad label".parse::<KeySourceLabel>().is_err());
     }
 
     #[test]

@@ -24,7 +24,7 @@ use concordium_rust_sdk::{
         hashes::Hash,
         protocol_level_locks::{
             LockConfig, LockController, LockControllerSimpleV0, LockControllerSimpleV0Capability,
-            LockControllerSimpleV0Grant, LockId, LockInfo,
+            LockControllerSimpleV0Grant, LockId, LockInfo, LockRecipients,
         },
         protocol_level_tokens::{
             MetadataUrl, TokenAdminRole, TokenAmount, TokenId, TokenModuleState,
@@ -684,13 +684,7 @@ pub(super) fn render_lock_info(info: &LockInfo) -> Result<String> {
         String::new(),
         "Recipients:".to_owned(),
     ];
-    if info.recipients.is_empty() {
-        lines.push("  none".to_owned());
-    } else {
-        for recipient in &info.recipients {
-            lines.push(format!("  - {}", recipient.address));
-        }
-    }
+    lines.extend(render_lock_recipients_lines(&info.recipients));
 
     lines.push(String::new());
     lines.push("Controller:".to_owned());
@@ -904,19 +898,58 @@ pub(super) fn resolve_lock_keep_alive(
         .interact()?)
 }
 
+/// Unresolved lock recipient mode selected by CLI or compose input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LockRecipientMode<T> {
+    /// Any eligible account can receive locked funds.
+    Any,
+    /// Only the listed accounts can receive locked funds.
+    Limited(Vec<T>),
+}
+
+/// Render a lock recipient mode for confirmation and preview output.
+pub(super) fn render_lock_recipient_mode<T: ToString>(recipients: &LockRecipientMode<T>) -> String {
+    match recipients {
+        LockRecipientMode::Any => "any eligible account".to_owned(),
+        LockRecipientMode::Limited(recipients) => recipients
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// Render protocol lock recipients as human-readable lines.
+pub(super) fn render_lock_recipients_lines(recipients: &LockRecipients) -> Vec<String> {
+    match recipients {
+        LockRecipients::Any => vec!["  any eligible account".to_owned()],
+        LockRecipients::Limited(recipients) if recipients.is_empty() => vec!["  none".to_owned()],
+        LockRecipients::Limited(recipients) => recipients
+            .iter()
+            .map(|recipient| format!("  - {}", recipient.address))
+            .collect(),
+    }
+}
+
 /// Build a simple-v0 lock configuration from CLI inputs.
 pub(super) fn build_lock_config(
-    recipients: Vec<AccountAddress>,
+    recipients: LockRecipientMode<AccountAddress>,
     expiry: TransactionTime,
     grants: Vec<LockControllerSimpleV0Grant>,
     tokens: Vec<TokenId>,
     keep_alive: bool,
 ) -> LockConfig {
+    let recipients = match recipients {
+        LockRecipientMode::Any => LockRecipients::Any,
+        LockRecipientMode::Limited(recipients) => LockRecipients::Limited(
+            recipients
+                .into_iter()
+                .map(concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from)
+                .collect(),
+        ),
+    };
     LockConfig {
-        recipients: recipients
-            .into_iter()
-            .map(concordium_rust_sdk::protocol_level_tokens::CborHolderAccount::from)
-            .collect(),
+        recipients,
         expiry,
         controller: LockController::SimpleV0(LockControllerSimpleV0 {
             grants,
@@ -990,11 +1023,16 @@ fn now_unix_seconds() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_lock_grant_roles, parse_token_admin_role, parse_token_amount,
-        parse_unresolved_lock_grant,
+        LockRecipientMode, build_lock_config, parse_lock_grant_roles, parse_token_admin_role,
+        parse_token_amount, parse_unresolved_lock_grant, render_lock_recipient_mode,
+        render_lock_recipients_lines,
     };
-    use concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Capability;
     use concordium_rust_sdk::base::protocol_level_tokens::TokenAdminRole;
+    use concordium_rust_sdk::base::{
+        common::types::TransactionTime,
+        contracts_common::AccountAddress,
+        protocol_level_locks::{LockControllerSimpleV0Capability, LockRecipients},
+    };
 
     #[test]
     fn parses_decimal_token_amount_with_padding() {
@@ -1041,5 +1079,45 @@ mod tests {
     fn rejects_unknown_lock_capability() {
         let err = parse_unresolved_lock_grant("alice:fund,nonsense").unwrap_err();
         assert!(err.to_string().contains("nonsense"));
+    }
+
+    #[test]
+    fn renders_any_lock_recipients() {
+        assert_eq!(
+            render_lock_recipient_mode::<String>(&LockRecipientMode::Any),
+            "any eligible account"
+        );
+        assert_eq!(
+            render_lock_recipients_lines(&LockRecipients::Any),
+            vec!["  any eligible account".to_owned()]
+        );
+    }
+
+    #[test]
+    fn builds_any_recipient_lock_config() {
+        let config = build_lock_config(
+            LockRecipientMode::Any,
+            TransactionTime::from_seconds(1),
+            Vec::new(),
+            vec!["CCD".parse().unwrap()],
+            false,
+        );
+        assert!(matches!(config.recipients, LockRecipients::Any));
+    }
+
+    #[test]
+    fn builds_limited_recipient_lock_config() {
+        let address = AccountAddress([7u8; 32]);
+        let config = build_lock_config(
+            LockRecipientMode::Limited(vec![address]),
+            TransactionTime::from_seconds(1),
+            Vec::new(),
+            vec!["CCD".parse().unwrap()],
+            false,
+        );
+        match config.recipients {
+            LockRecipients::Limited(recipients) => assert_eq!(recipients[0].address, address),
+            LockRecipients::Any => panic!("expected limited recipients"),
+        }
     }
 }

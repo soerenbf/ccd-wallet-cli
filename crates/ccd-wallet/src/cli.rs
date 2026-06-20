@@ -1593,21 +1593,29 @@ pub enum TokenLockSubcommand {
     Create(Box<TokenLockCreateArgs>),
     /// Fund an existing lock.
     Fund(Box<TokenLockFundArgs>),
-    /// Send locked funds to a configured recipient.
+    /// Send locked funds to a limited-recipient or any-recipient lock target.
     Send(Box<TokenLockSendArgs>),
     /// Return locked funds to the source account.
     Return(Box<TokenLockReturnArgs>),
     /// Cancel an existing lock.
     Cancel(Box<TokenLockCancelArgs>),
-    /// Show protocol-level lock information.
+    /// Show protocol-level lock information, including limited or any-recipient status.
     Show(Box<TokenLockShowArgs>),
 }
 
 #[derive(Debug, Args)]
 pub struct TokenLockCreateArgs {
-    /// Accounts that can receive funds from the lock. Accepts raw addresses or finalized local account labels. Repeat to add multiple recipients.
-    #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL", required = true)]
+    /// Accounts that can receive funds from a limited-recipient lock. Accepts raw addresses or finalized local account labels. Repeat to add multiple recipients.
+    #[arg(
+        long = "recipient",
+        value_name = "ADDRESS_OR_LABEL",
+        conflicts_with = "any_recipient"
+    )]
     pub recipients: Vec<AccountReference>,
+
+    /// Allow any eligible account to receive funds from the lock.
+    #[arg(long = "any-recipient", conflicts_with = "recipients")]
+    pub any_recipient: bool,
 
     /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds.
     #[arg(long = "expiry", value_name = "TIME")]
@@ -1703,7 +1711,7 @@ pub struct TokenLockSendArgs {
     #[arg(long = "source", value_name = "ADDRESS_OR_LABEL")]
     pub source: Option<AccountReference>,
 
-    /// Recipient account address or finalized local account label that must be configured on the lock.
+    /// Recipient account address or finalized local account label. Limited-recipient locks require a configured recipient; any-recipient locks accept any eligible account.
     #[arg(long = "recipient", value_name = "ADDRESS_OR_LABEL")]
     pub recipient: Option<AccountReference>,
 
@@ -3182,6 +3190,60 @@ mod tests {
             },
             other => panic!("expected token command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_token_lock_create_with_any_recipient() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--any-recipient",
+            "--expiry",
+            "1h",
+            "--grant",
+            "operator:fund,send",
+            "--token",
+            "CCD",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert!(args.any_recipient);
+                        assert!(args.recipients.is_empty());
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_token_lock_create_mixed_recipient_modes() {
+        let err = Cli::try_parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--any-recipient",
+            "--recipient",
+            "treasury",
+            "--expiry",
+            "1h",
+            "--grant",
+            "operator:fund,send",
+            "--token",
+            "CCD",
+        ])
+        .expect_err("mixed recipient modes must fail");
+        assert!(err.to_string().contains("cannot be used with"));
     }
 
     #[test]

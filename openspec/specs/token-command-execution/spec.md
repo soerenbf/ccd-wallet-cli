@@ -75,11 +75,16 @@ Covered inputs include recipient, target, source, repeated target and recipient 
 - **THEN** the CLI resolves the later local account reference without prompting again for the same seed password
 
 ### Requirement: Token lock commands manage protocol-level locks
-The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, returns, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For lock creation, omitted `--keep-alive` SHALL prompt in interactive mode with No selected by default and SHALL default to false in non-interactive mode. For fund, send, return, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and return SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted.
+The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, returns, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the CLI SHALL support either repeated `--recipient` values for limited-recipient locks or `--any-recipient` for any-recipient locks, and those inputs SHALL be mutually exclusive. In interactive mode, when neither limited recipients nor `--any-recipient` is supplied, the CLI SHALL prompt for recipient mode before collecting any recipient-account inputs. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For lock creation, omitted `--keep-alive` SHALL prompt in interactive mode with No selected by default and SHALL default to false in non-interactive mode. For fund, send, return, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and return SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted. For lock send, limited-recipient locks SHALL continue to require a configured recipient, while any-recipient locks SHALL accept any resolved recipient account.
 
-#### Scenario: User creates a token lock
-- **WHEN** a user runs `ccd-wallet token lock create` with the required lock configuration and signing account context
-- **THEN** the CLI submits a protocol-level lock-creation transaction
+#### Scenario: User creates a limited-recipient token lock
+- **WHEN** a user runs `ccd-wallet token lock create` with one or more `--recipient` values, the required lock configuration, and signing account context
+- **THEN** the CLI submits a protocol-level lock-creation transaction with a limited recipient set
+- **AND** the CLI reports the submitted transaction hash
+
+#### Scenario: User creates an any-recipient token lock
+- **WHEN** a user runs `ccd-wallet token lock create --any-recipient` with the required lock configuration and signing account context
+- **THEN** the CLI submits a protocol-level lock-creation transaction with any-recipient lock configuration
 - **AND** the CLI reports the submitted transaction hash
 
 #### Scenario: User creates a token lock without grant arguments interactively
@@ -92,6 +97,16 @@ The CLI SHALL let a user manage protocol-level token locks through nested `token
 - **WHEN** a user runs `ccd-wallet token lock create` without `--keep-alive` in interactive mode
 - **THEN** the CLI asks whether to keep the lock alive after funds are returned
 - **AND** the default selected answer is No
+
+#### Scenario: User creates a token lock without recipient mode interactively
+- **WHEN** a user runs `ccd-wallet token lock create` without `--recipient` values and without `--any-recipient` in interactive mode
+- **THEN** the CLI prompts the user to choose between any-recipient and limited-recipient lock creation
+- **AND** the CLI only prompts for recipient account inputs when the user chooses the limited-recipient option
+
+#### Scenario: Token lock create rejects mixed recipient modes
+- **WHEN** a user runs `ccd-wallet token lock create` with both `--any-recipient` and one or more `--recipient` values
+- **THEN** the CLI rejects the invocation before submission
+- **AND** the error explains that those inputs are mutually exclusive
 
 #### Scenario: Token lock create rejects unknown grant capability
 - **WHEN** a user runs `ccd-wallet token lock create --grant alice:fund,nonsense`
@@ -110,10 +125,15 @@ The CLI SHALL let a user manage protocol-level token locks through nested `token
 - **THEN** the CLI submits a protocol-level lock funding transaction for that lock
 - **AND** the CLI reports the submitted transaction hash
 
-#### Scenario: User sends from an existing token lock
-- **WHEN** a user runs `ccd-wallet token lock send` with a lock identifier, `--token TOKEN_ID`, source, recipient, amount, and signing account context
+#### Scenario: User sends from an existing limited-recipient token lock
+- **WHEN** a user runs `ccd-wallet token lock send` with a limited-recipient lock identifier, `--token TOKEN_ID`, source, configured recipient, amount, and signing account context
 - **THEN** the CLI submits a protocol-level lock-controlled send transaction for that lock
 - **AND** the CLI reports the submitted transaction hash
+
+#### Scenario: User sends from an existing any-recipient token lock
+- **WHEN** a user runs `ccd-wallet token lock send` with an any-recipient lock identifier, `--token TOKEN_ID`, source, recipient, amount, and signing account context
+- **THEN** the CLI accepts the resolved recipient without requiring membership in a configured recipient list
+- **AND** submits a protocol-level lock-controlled send transaction for that lock
 
 #### Scenario: User sends interactively and token selector shows locked balances
 - **WHEN** a user runs `ccd-wallet token lock send` with a lock identifier and source address but no `--token` in interactive mode
@@ -128,7 +148,6 @@ The CLI SHALL let a user manage protocol-level token locks through nested `token
 - **WHEN** a user runs `ccd-wallet token lock cancel` with a lock identifier and signing account context
 - **THEN** the CLI submits a protocol-level lock cancellation transaction
 - **AND** the CLI reports the submitted transaction hash
-
 ### Requirement: MetaUpdate transaction events render as human-readable one-line summaries
 The CLI SHALL render MetaUpdate transaction events as concise single-line entries rather than pretty-printed JSON arrays. Token transfer events SHALL render as `Transfer <amount> <token>: <from> -> <to>` with optional `(locked @ <lock-id>)` annotations when lock context is present in the event payload. Lock lifecycle events SHALL render as `Lock created: <lock-id>` or `Lock destroyed: <lock-id>`.
 
@@ -137,13 +156,17 @@ The CLI SHALL render MetaUpdate transaction events as concise single-line entrie
 - **THEN** the event section shows a line of the form `- Transfer <amount> <token-id>: <sender> -> <sender> (locked @ <lock-id>)`
 
 ### Requirement: Token lock commands can inspect lock state
-The CLI SHALL let a user inspect protocol-level lock state through `ccd-wallet token lock show` using the protocol lock-info query support.
+The CLI SHALL let a user inspect protocol-level lock state through `ccd-wallet token lock show` using the protocol lock-info query support. Human-readable lock output SHALL distinguish between limited-recipient locks and any-recipient locks, rendering the any-recipient variant as `any eligible account`.
 
-#### Scenario: User shows lock details
-- **WHEN** a user runs `ccd-wallet token lock show` with a lock identifier and network or node context
+#### Scenario: User shows limited-recipient lock details
+- **WHEN** a user runs `ccd-wallet token lock show` for a lock configured with explicit recipient accounts
 - **THEN** the CLI queries lock information for that identifier
-- **AND** the CLI prints a human-readable summary of the resolved lock state
+- **AND** the CLI prints a human-readable summary listing those recipient accounts
 
+#### Scenario: User shows any-recipient lock details
+- **WHEN** a user runs `ccd-wallet token lock show` for a lock configured with the any-recipient variant
+- **THEN** the CLI queries lock information for that identifier
+- **AND** the CLI prints a human-readable summary describing the recipients as `any eligible account`
 ### Requirement: Token compose commands submit composed MetaUpdate operations
 The CLI SHALL expose a `token compose` command family for building, previewing, and submitting token composition plans. Submitted plans SHALL use protocol-level MetaUpdate transaction support and SHALL submit all planned operations in one account transaction.
 
