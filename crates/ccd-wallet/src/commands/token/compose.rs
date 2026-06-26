@@ -160,7 +160,7 @@ async fn submit_prepared(conn: &Connection, prepared: PreparedTokenComposeSubmit
         context.network_name, context.endpoint_label, context.wallet.address, summary
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token composition? Type y to approve:",
+        "Approve and submit this token composition?",
         "token composition declined by user",
     )? {
         return Ok(());

@@ -68,7 +68,7 @@ pub(super) async fn update(conn: &Connection, args: TokenMetadataUpdateArgs) -> 
             .unwrap_or_else(|| "none".to_owned()),
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token metadata update? Type y to approve:",
+        "Approve and submit this token metadata update?",
         "token metadata update declined by user",
     )? {
         return Ok(());

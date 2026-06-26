@@ -103,7 +103,7 @@ async fn submit_list_update(
         target_summary,
     ))?;
     if !shared::confirm_submission(
-        &format!("Approve and submit this token {list_name} update? Type y to approve:"),
+        &format!("Approve and submit this token {list_name} update?"),
         &format!("token {list_name} update declined by user"),
     )? {
         return Ok(());

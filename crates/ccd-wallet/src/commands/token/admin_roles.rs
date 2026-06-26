@@ -76,6 +76,12 @@ async fn submit_admin_role_update(
         &prepared.roles,
         !prepared.context.input_mode().prompts_allowed(),
     )?;
+    let rendered_roles = roles
+        .iter()
+        .copied()
+        .map(shared::render_token_admin_role)
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut token_client = shared::init_token_client(context.client.clone(), token_id).await?;
     let action = if assign { "assign" } else { "revoke" };
 
@@ -86,10 +92,10 @@ async fn submit_admin_role_update(
         context.wallet.address,
         token_client.token_info().token_id,
         target,
-        prepared.roles.join(", "),
+        rendered_roles,
     ))?;
     if !shared::confirm_submission(
-        &format!("Approve and submit this token admin-roles {action}? Type y to approve:"),
+        &format!("Approve and submit this token admin-roles {action}?"),
         &format!("token admin-roles {action} declined by user"),
     )? {
         return Ok(());

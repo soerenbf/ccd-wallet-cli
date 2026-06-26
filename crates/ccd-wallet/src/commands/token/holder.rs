@@ -121,7 +121,7 @@ pub(super) async fn transfer(conn: &Connection, args: TokenTransferArgs) -> Resu
         payload.amount,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token transfer? Type y to approve:",
+        "Approve and submit this token transfer?",
         "token transfer declined by user",
     )? {
         return Ok(());
@@ -193,7 +193,7 @@ async fn submit_amount_change(conn: &Connection, args: TokenAmountArgs, mint: bo
         token_amount,
     ))?;
     if !shared::confirm_submission(
-        &format!("Approve and submit this token {verb}? Type y to approve:"),
+        &format!("Approve and submit this token {verb}?"),
         &format!("token {verb} declined by user"),
     )? {
         return Ok(());

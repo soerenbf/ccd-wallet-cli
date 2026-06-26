@@ -260,7 +260,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         if keep_alive { "yes" } else { "no" },
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock creation? Type y to approve:",
+        "Approve and submit this token lock creation?",
         "token lock creation declined by user",
     )? {
         return Ok(());
@@ -341,7 +341,7 @@ pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<(
         payload.amount,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock funding? Type y to approve:",
+        "Approve and submit this token lock funding?",
         "token lock funding declined by user",
     )? {
         return Ok(());
@@ -448,7 +448,7 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
         payload.amount,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock send? Type y to approve:",
+        "Approve and submit this token lock send?",
         "token lock send declined by user",
     )? {
         return Ok(());
@@ -540,7 +540,7 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
         payload.amount,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock return? Type y to approve:",
+        "Approve and submit this token lock return?",
         "token lock return declined by user",
     )? {
         return Ok(());
@@ -592,7 +592,7 @@ pub(super) async fn cancel(conn: &Connection, args: TokenLockCancelArgs) -> Resu
         lock_client.lock_info().lock,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock cancellation? Type y to approve:",
+        "Approve and submit this token lock cancellation?",
         "token lock cancellation declined by user",
     )? {
         return Ok(());

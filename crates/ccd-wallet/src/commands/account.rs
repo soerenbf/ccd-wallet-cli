@@ -964,7 +964,9 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
 
     let seed = seeds::find_by_label(conn, &key_source_label)?
         .with_context(|| format!("seed '{}' is not configured", key_source_label))?;
-    let password: String = password(format!("Password for seed '{}': ", seed.label)).interact()?;
+    let password: String = password(format!("Password for seed '{}': ", seed.label))
+        .allow_empty()
+        .interact()?;
     let unlocked_seed = seeds::unlock_context(conn, &seed.label, &password)?;
 
     if identity.status == IdentityStatus::Pending {

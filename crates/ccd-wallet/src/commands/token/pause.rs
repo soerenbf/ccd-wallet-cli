@@ -60,7 +60,7 @@ async fn submit_pause_change(conn: &Connection, args: TokenPauseArgs, pause: boo
         token_client.token_info().token_id,
     ))?;
     if !shared::confirm_submission(
-        &format!("Approve and submit this token {action}? Type y to approve:"),
+        &format!("Approve and submit this token {action}?"),
         &format!("token {action} declined by user"),
     )? {
         return Ok(());

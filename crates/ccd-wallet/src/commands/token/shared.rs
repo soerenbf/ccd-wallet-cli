@@ -499,6 +499,19 @@ pub(super) fn parse_token_admin_role(input: &str) -> Result<TokenAdminRole> {
     }
 }
 
+/// Render a token admin role using the CLI spelling.
+pub(super) const fn render_token_admin_role(role: TokenAdminRole) -> &'static str {
+    match role {
+        TokenAdminRole::UpdateAdminRoles => "update-admin-roles",
+        TokenAdminRole::Mint => "mint",
+        TokenAdminRole::Burn => "burn",
+        TokenAdminRole::UpdateAllowList => "update-allow-list",
+        TokenAdminRole::UpdateDenyList => "update-deny-list",
+        TokenAdminRole::Pause => "pause",
+        TokenAdminRole::UpdateMetadata => "update-metadata",
+    }
+}
+
 /// Parse a metadata checksum from hex.
 pub(super) fn parse_checksum_sha_256(input: Option<&str>) -> Result<Option<Hash>> {
     input
@@ -560,13 +573,11 @@ pub(super) fn parse_account_addresses(
 
 /// Prompt for an approval confirmation.
 pub(super) fn confirm_submission(prompt: &str, declined_message: &str) -> Result<bool> {
-    let confirmation: String = input(prompt).default_input("n").interact()?;
-    if confirmation.eq_ignore_ascii_case("y") || confirmation.eq_ignore_ascii_case("yes") {
-        Ok(true)
-    } else {
-        cliclack::log::warning(declined_message)?;
-        Ok(false)
+    if confirm(prompt).initial_value(false).interact()? {
+        return Ok(true);
     }
+    cliclack::log::warning(declined_message)?;
+    Ok(false)
 }
 
 /// Wait for transaction finalization and render a summary.
@@ -1025,7 +1036,7 @@ mod tests {
     use super::{
         LockRecipientMode, build_lock_config, parse_lock_grant_roles, parse_token_admin_role,
         parse_token_amount, parse_unresolved_lock_grant, render_lock_recipient_mode,
-        render_lock_recipients_lines,
+        render_lock_recipients_lines, render_token_admin_role,
     };
     use concordium_rust_sdk::base::protocol_level_tokens::TokenAdminRole;
     use concordium_rust_sdk::base::{
@@ -1055,6 +1066,15 @@ mod tests {
         assert_eq!(
             parse_token_admin_role("update-metadata").unwrap(),
             TokenAdminRole::UpdateMetadata
+        );
+    }
+
+    #[test]
+    fn renders_protocol_near_admin_role_names() {
+        assert_eq!(render_token_admin_role(TokenAdminRole::Mint), "mint");
+        assert_eq!(
+            render_token_admin_role(TokenAdminRole::UpdateMetadata),
+            "update-metadata"
         );
     }
 
