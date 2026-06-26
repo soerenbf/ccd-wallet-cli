@@ -1617,16 +1617,16 @@ pub struct TokenLockCreateArgs {
     #[arg(long = "any-recipient", conflicts_with = "recipients")]
     pub any_recipient: bool,
 
-    /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds.
+    /// Lock expiry time as relative duration, RFC3339 timestamp, or unix seconds. If omitted interactively, the CLI prompts for it.
     #[arg(long = "expiry", value_name = "TIME")]
-    pub expiry: String,
+    pub expiry: Option<String>,
 
     /// Controller grant in the form `<ACCOUNT_OR_LABEL:ROLE[,ROLE...]>`. Repeat for multiple grants. If omitted interactively, the CLI prompts for grants.
     #[arg(long = "grant", value_name = "GRANT")]
     pub grants: Vec<String>,
 
-    /// Token identifiers governed by the lock controller. Repeat to add multiple tokens.
-    #[arg(long = "token", value_name = "TOKEN_ID", required = true)]
+    /// Token identifiers governed by the lock controller. Repeat to add multiple tokens. If omitted interactively, the CLI prompts for them.
+    #[arg(long = "token", value_name = "TOKEN_ID")]
     pub tokens: Vec<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
     /// Keep the lock alive after all funds have been returned.
@@ -1684,6 +1684,10 @@ pub struct TokenLockFundArgs {
     #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
 
+    /// Skip client-side lock validation before submission. The node may still reject the transaction.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
+
     /// Return after successful submission without waiting for finalization.
     #[arg(long = "no-wait")]
     pub no_wait: bool,
@@ -1731,6 +1735,10 @@ pub struct TokenLockSendArgs {
     #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
 
+    /// Skip client-side lock validation before submission. The node may still reject the transaction.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
+
     /// Return after successful submission without waiting for finalization.
     #[arg(long = "no-wait")]
     pub no_wait: bool,
@@ -1774,6 +1782,10 @@ pub struct TokenLockReturnArgs {
     #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
 
+    /// Skip client-side lock validation before submission. The node may still reject the transaction.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
+
     /// Return after successful submission without waiting for finalization.
     #[arg(long = "no-wait")]
     pub no_wait: bool,
@@ -1804,6 +1816,10 @@ pub struct TokenLockCancelArgs {
     /// Concordium node gRPC endpoint.
     #[arg(long = "node", env = config::NODE_ENDPOINT_ENV, value_name = "ENDPOINT")]
     pub node: Option<v2::Endpoint>,
+
+    /// Skip client-side lock validation before submission. The node may still reject the transaction.
+    #[arg(long = "no-validate")]
+    pub no_validate: bool,
 
     /// Return after successful submission without waiting for finalization.
     #[arg(long = "no-wait")]
@@ -3179,7 +3195,7 @@ mod tests {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Lock(command) => match command.command {
                     TokenLockSubcommand::Create(args) => {
-                        assert_eq!(args.expiry, "1h");
+                        assert_eq!(args.expiry.as_deref(), Some("1h"));
                         assert_eq!(args.tokens.len(), 1);
                         assert_eq!(args.tokens[0].to_string(), "CCD");
                         assert_eq!(args.account.as_deref(), Some("alice"));
@@ -3268,7 +3284,7 @@ mod tests {
                 TokenSubcommand::Lock(command) => match command.command {
                     TokenLockSubcommand::Create(args) => {
                         assert!(args.grants.is_empty());
-                        assert_eq!(args.expiry, "1h");
+                        assert_eq!(args.expiry.as_deref(), Some("1h"));
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
                 },
@@ -3339,6 +3355,7 @@ mod tests {
                         assert!(args.lock_id.is_none());
                         assert!(args.token_id.is_none());
                         assert!(args.amount.is_none());
+                        assert!(!args.no_validate);
                     }
                     other => panic!("expected token lock fund command, got {other:?}"),
                 },
@@ -3450,6 +3467,49 @@ mod tests {
                         assert_eq!(args.grants, vec!["operator:fund,send,cancel"]);
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_create_without_expiry_or_token_for_interactive_prompting() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--account",
+            "alice",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert!(args.expiry.is_none());
+                        assert!(args.tokens.is_empty());
+                        assert_eq!(args.account.as_deref(), Some("alice"));
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_token_lock_fund_with_no_validate() {
+        let cli = Cli::parse_from(["ccd-wallet", "token", "lock", "fund", "--no-validate"]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Fund(args) => assert!(args.no_validate),
+                    other => panic!("expected token lock fund command, got {other:?}"),
                 },
                 other => panic!("expected token lock command, got {other:?}"),
             },

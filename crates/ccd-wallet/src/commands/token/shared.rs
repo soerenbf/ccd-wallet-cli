@@ -251,6 +251,21 @@ pub(super) fn prompt_token_id() -> Result<TokenId> {
     value.parse().context("invalid token identifier")
 }
 
+/// Prompt for one or more token identifiers.
+pub(super) fn prompt_token_ids() -> Result<Vec<TokenId>> {
+    let mut token_ids = Vec::new();
+    loop {
+        token_ids.push(prompt_token_id()?);
+        let another = confirm("Add another token?")
+            .initial_value(false)
+            .interact()?;
+        if !another {
+            break;
+        }
+    }
+    Ok(token_ids)
+}
+
 /// Prompt for a required string value.
 pub(super) fn prompt_required_string(prompt: &str) -> Result<String> {
     Ok(input(prompt).interact()?)

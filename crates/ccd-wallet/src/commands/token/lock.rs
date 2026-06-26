@@ -6,7 +6,7 @@ use crate::{
         TokenLockSendArgs, TokenLockShowArgs,
     },
     commands::{
-        input::{AccountReference, Promptable, TokenAmountInput},
+        input::{AccountReference, Promptable, TokenAmountInput, ValidationPolicy},
         token::shared,
     },
 };
@@ -23,7 +23,7 @@ struct PreparedTokenLockCreate {
     context: shared::PreparedTokenMutationContext,
     recipients: Vec<AccountReference>,
     any_recipient: bool,
-    expiry: String,
+    expiry: Promptable<String>,
     grants: Vec<String>,
     tokens: Vec<TokenId>,
     keep_alive: bool,
@@ -43,7 +43,7 @@ impl PreparedTokenLockCreate {
             )?,
             recipients: args.recipients,
             any_recipient: args.any_recipient,
-            expiry: args.expiry,
+            expiry: Promptable::from_option(args.expiry, "expiry"),
             grants: args.grants,
             tokens: args.tokens,
             keep_alive: args.keep_alive,
@@ -54,6 +54,7 @@ impl PreparedTokenLockCreate {
 #[derive(Clone, Debug)]
 struct PreparedTokenLockFund {
     context: shared::PreparedTokenMutationContext,
+    validation: ValidationPolicy,
     lock_id: Promptable<LockId>,
     token_id: Promptable<TokenId>,
     amount: Promptable<TokenAmountInput>,
@@ -123,6 +124,7 @@ impl PreparedTokenLockFund {
                 args.no_wait,
                 true,
             )?,
+            validation: ValidationPolicy::from_no_validate(args.no_validate),
             lock_id: Promptable::from_option(args.lock_id, "lock id"),
             token_id: Promptable::from_option(args.token_id, "token id"),
             amount: Promptable::from_option(args.amount, "amount"),
@@ -133,6 +135,7 @@ impl PreparedTokenLockFund {
 #[derive(Clone, Debug)]
 struct PreparedTokenLockSend {
     context: shared::PreparedTokenMutationContext,
+    validation: ValidationPolicy,
     lock_id: Promptable<LockId>,
     token_id: Promptable<TokenId>,
     source: Promptable<AccountReference>,
@@ -152,6 +155,7 @@ impl PreparedTokenLockSend {
                 args.no_wait,
                 true,
             )?,
+            validation: ValidationPolicy::from_no_validate(args.no_validate),
             lock_id: Promptable::from_option(args.lock_id, "lock id"),
             token_id: Promptable::from_option(args.token_id, "token id"),
             source: Promptable::from_option(args.source, "source"),
@@ -164,6 +168,7 @@ impl PreparedTokenLockSend {
 #[derive(Clone, Debug)]
 struct PreparedTokenLockReturn {
     context: shared::PreparedTokenMutationContext,
+    validation: ValidationPolicy,
     lock_id: Promptable<LockId>,
     token_id: Promptable<TokenId>,
     source: Promptable<AccountReference>,
@@ -182,6 +187,7 @@ impl PreparedTokenLockReturn {
                 args.no_wait,
                 true,
             )?,
+            validation: ValidationPolicy::from_no_validate(args.no_validate),
             lock_id: Promptable::from_option(args.lock_id, "lock id"),
             token_id: Promptable::from_option(args.token_id, "token id"),
             source: Promptable::from_option(args.source, "source"),
@@ -193,6 +199,7 @@ impl PreparedTokenLockReturn {
 #[derive(Clone, Debug)]
 struct PreparedTokenLockCancel {
     context: shared::PreparedTokenMutationContext,
+    validation: ValidationPolicy,
     lock_id: Promptable<LockId>,
 }
 
@@ -208,9 +215,30 @@ impl PreparedTokenLockCancel {
                 args.no_wait,
                 true,
             )?,
+            validation: ValidationPolicy::from_no_validate(args.no_validate),
             lock_id: Promptable::from_option(args.lock_id, "lock id"),
         })
     }
+}
+
+fn lock_validation(policy: ValidationPolicy) -> Result<Validation> {
+    if policy.should_validate() {
+        return Ok(Validation::Validate);
+    }
+    cliclack::log::warning(
+        "Skipping client-side lock validation; the node may still reject the transaction.",
+    )?;
+    Ok(Validation::NoValidation)
+}
+
+fn confirm_validation_bypass(error: &str) -> Result<bool> {
+    cliclack::log::warning(format!(
+        "Validation failed: {error}. You can still try submitting, but the node may reject the transaction."
+    ))?;
+    confirm("Submit anyway?")
+        .initial_value(false)
+        .interact()
+        .map_err(Into::into)
 }
 
 /// Create a protocol-level lock.
@@ -218,7 +246,13 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
     let prepared = PreparedTokenLockCreate::from_args(args)?;
     let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
     let recipients = resolve_create_recipients(conn, &mut context, &prepared)?;
-    let expiry = shared::parse_expiry_time(&prepared.expiry)?;
+    let expiry_input = prepared
+        .expiry
+        .resolve_with(prepared.context.input_mode(), || {
+            shared::prompt_required_string("Lock expiry:")
+        })?
+        .into_value();
+    let expiry = shared::parse_expiry_time(&expiry_input)?;
     let unresolved_grants = if prepared.grants.is_empty() {
         if !prepared.context.input_mode().prompts_allowed() {
             anyhow::bail!("at least one --grant must be provided in --non-interactive mode");
@@ -240,14 +274,21 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         prepared.keep_alive,
         !prepared.context.input_mode().prompts_allowed(),
     )?;
-    let token_summary = prepared
-        .tokens
+    let tokens = if prepared.tokens.is_empty() {
+        if !prepared.context.input_mode().prompts_allowed() {
+            bail!("at least one --token must be provided in --non-interactive mode");
+        }
+        shared::prompt_token_ids()?
+    } else {
+        prepared.tokens.clone()
+    };
+    let token_summary = tokens
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let recipient_summary = shared::render_lock_recipient_mode(&recipients);
-    let config = shared::build_lock_config(recipients, expiry, grants, prepared.tokens, keep_alive);
+    let config = shared::build_lock_config(recipients, expiry, grants, tokens, keep_alive);
 
     cliclack::log::info(format!(
         "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nkeep alive: {}",
@@ -255,7 +296,7 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         context.endpoint_label,
         context.wallet.address,
         recipient_summary,
-        prepared.expiry,
+        expiry_input,
         token_summary,
         if keep_alive { "yes" } else { "no" },
     ))?;
@@ -347,17 +388,45 @@ pub(super) async fn fund(conn: &Connection, args: TokenLockFundArgs) -> Result<(
         return Ok(());
     }
 
+    let validation = lock_validation(prepared.validation)?;
     let spin = spinner();
     spin.start("Submitting token lock funding...");
-    let transaction_hash = lock_client
+    let transaction_hash = match lock_client
         .fund(
             &context.wallet,
-            payload,
+            payload.clone(),
             Some(lock_client::TransactionMetadata::default()),
-            Validation::Validate,
+            validation,
         )
-        .await?;
-    spin.clear();
+        .await
+    {
+        Ok(transaction_hash) => transaction_hash,
+        Err(error) => {
+            if validation == Validation::Validate && prepared.context.input_mode().prompts_allowed()
+            {
+                spin.clear();
+                if confirm_validation_bypass(&error.to_string())? {
+                    let spin = spinner();
+                    spin.start("Submitting token lock funding without client-side validation...");
+                    let transaction_hash = lock_client
+                        .fund(
+                            &context.wallet,
+                            payload,
+                            Some(lock_client::TransactionMetadata::default()),
+                            Validation::NoValidation,
+                        )
+                        .await?;
+                    spin.clear();
+                    transaction_hash
+                } else {
+                    return Err(error.into());
+                }
+            } else {
+                spin.clear();
+                return Err(error.into());
+            }
+        }
+    };
     cliclack::log::success(format!(
         "Submitted token lock funding on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
@@ -454,17 +523,45 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
         return Ok(());
     }
 
+    let validation = lock_validation(prepared.validation)?;
     let spin = spinner();
     spin.start("Submitting token lock send...");
-    let transaction_hash = lock_client
+    let transaction_hash = match lock_client
         .send(
             &context.wallet,
-            payload,
+            payload.clone(),
             Some(lock_client::TransactionMetadata::default()),
-            Validation::Validate,
+            validation,
         )
-        .await?;
-    spin.clear();
+        .await
+    {
+        Ok(transaction_hash) => transaction_hash,
+        Err(error) => {
+            if validation == Validation::Validate && prepared.context.input_mode().prompts_allowed()
+            {
+                spin.clear();
+                if confirm_validation_bypass(&error.to_string())? {
+                    let spin = spinner();
+                    spin.start("Submitting token lock send without client-side validation...");
+                    let transaction_hash = lock_client
+                        .send(
+                            &context.wallet,
+                            payload,
+                            Some(lock_client::TransactionMetadata::default()),
+                            Validation::NoValidation,
+                        )
+                        .await?;
+                    spin.clear();
+                    transaction_hash
+                } else {
+                    return Err(error.into());
+                }
+            } else {
+                spin.clear();
+                return Err(error.into());
+            }
+        }
+    };
     cliclack::log::success(format!(
         "Submitted token lock send on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
@@ -546,17 +643,45 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
         return Ok(());
     }
 
+    let validation = lock_validation(prepared.validation)?;
     let spin = spinner();
     spin.start("Submitting token lock return...");
-    let transaction_hash = lock_client
+    let transaction_hash = match lock_client
         .return_funds(
             &context.wallet,
-            payload,
+            payload.clone(),
             Some(lock_client::TransactionMetadata::default()),
-            Validation::Validate,
+            validation,
         )
-        .await?;
-    spin.clear();
+        .await
+    {
+        Ok(transaction_hash) => transaction_hash,
+        Err(error) => {
+            if validation == Validation::Validate && prepared.context.input_mode().prompts_allowed()
+            {
+                spin.clear();
+                if confirm_validation_bypass(&error.to_string())? {
+                    let spin = spinner();
+                    spin.start("Submitting token lock return without client-side validation...");
+                    let transaction_hash = lock_client
+                        .return_funds(
+                            &context.wallet,
+                            payload,
+                            Some(lock_client::TransactionMetadata::default()),
+                            Validation::NoValidation,
+                        )
+                        .await?;
+                    spin.clear();
+                    transaction_hash
+                } else {
+                    return Err(error.into());
+                }
+            } else {
+                spin.clear();
+                return Err(error.into());
+            }
+        }
+    };
     cliclack::log::success(format!(
         "Submitted token lock return on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
@@ -598,17 +723,47 @@ pub(super) async fn cancel(conn: &Connection, args: TokenLockCancelArgs) -> Resu
         return Ok(());
     }
 
+    let validation = lock_validation(prepared.validation)?;
     let spin = spinner();
     spin.start("Submitting token lock cancellation...");
-    let transaction_hash = lock_client
+    let transaction_hash = match lock_client
         .cancel(
             &context.wallet,
             None,
             Some(lock_client::TransactionMetadata::default()),
-            Validation::Validate,
+            validation,
         )
-        .await?;
-    spin.clear();
+        .await
+    {
+        Ok(transaction_hash) => transaction_hash,
+        Err(error) => {
+            if validation == Validation::Validate && prepared.context.input_mode().prompts_allowed()
+            {
+                spin.clear();
+                if confirm_validation_bypass(&error.to_string())? {
+                    let spin = spinner();
+                    spin.start(
+                        "Submitting token lock cancellation without client-side validation...",
+                    );
+                    let transaction_hash = lock_client
+                        .cancel(
+                            &context.wallet,
+                            None,
+                            Some(lock_client::TransactionMetadata::default()),
+                            Validation::NoValidation,
+                        )
+                        .await?;
+                    spin.clear();
+                    transaction_hash
+                } else {
+                    return Err(error.into());
+                }
+            } else {
+                spin.clear();
+                return Err(error.into());
+            }
+        }
+    };
     cliclack::log::success(format!(
         "Submitted token lock cancellation on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
