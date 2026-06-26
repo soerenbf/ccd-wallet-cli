@@ -863,11 +863,7 @@ async fn run_seed_recovery(
     let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
         .context("stored seed phrase is not UTF-8")?
         .to_owned();
-    let net = infer_net(
-        network_name,
-        network_entry.wallet_proxy.as_deref(),
-        &network_entry.node_endpoint,
-    );
+    let net = infer_net(&network_entry.genesis_hash);
     let wallet = Arc::new(ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?);
 
     let spin = spinner();
@@ -2039,20 +2035,14 @@ fn prompt_for_network_name(
     select_or_single("Select network", &items, initial.as_ref())
 }
 
-pub(crate) fn infer_net(
-    network_name: &str,
-    wallet_proxy: Option<&str>,
-    endpoint_label: &str,
-) -> Net {
-    let haystack = format!(
-        "{network_name} {} {endpoint_label}",
-        wallet_proxy.unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
-        Net::Testnet
-    } else {
+const MAINNET_GENESIS_HASH: &str =
+    "9dd9ca4d19e9393877d2c44b70f89acbfc0883c2243e5eeaecc0d1cd0503f478";
+
+pub(crate) fn infer_net(network_genesis_hash: &str) -> Net {
+    if network_genesis_hash == MAINNET_GENESIS_HASH {
         Net::Mainnet
+    } else {
+        Net::Testnet
     }
 }
 

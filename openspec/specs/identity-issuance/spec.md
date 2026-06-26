@@ -125,7 +125,7 @@ Before proceeding with local password entry, Ledger export approval, provider co
 - **THEN** the CLI exits with an actionable error before contacting the identity provider
 
 ### Requirement: Identity issuance can be initiated interactively
-`identity new <LABEL> --interactive` SHALL fetch the list of available identity providers from the active (or specified) node and present an arrow-key selection prompt before proceeding. The command SHALL display the resolved key-source/network context before provider selection.
+`identity new <LABEL> --interactive` SHALL fetch the list of issuable identity providers from the selected network's `wallet_proxy` and present an arrow-key selection prompt before proceeding. The command SHALL display the resolved key-source/network context before provider selection. The selected provider SHALL also be validated against the active (or specified) node before issuance continues.
 
 #### Scenario: Interactive mode lists available providers
 - **WHEN** the user runs `identity new my-identity --interactive` with a reachable node
@@ -134,7 +134,7 @@ Before proceeding with local password entry, Ledger export approval, provider co
 
 #### Scenario: Interactive mode with key-source and network overrides
 - **WHEN** the user runs `identity new --interactive --seed main --network testnet`
-- **THEN** the CLI uses the specified key source and network for both IP list lookup and issuance request construction
+- **THEN** the CLI uses the specified key source and network for both wallet-proxy provider lookup and issuance request construction
 - **AND** displays `key source: main` and `network: testnet @ <node-endpoint>` in a compact aligned block before provider selection
 
 #### Scenario: Interactive mode prompts missing values
@@ -148,8 +148,10 @@ Before proceeding with local password entry, Ledger export approval, provider co
 - **THEN** the CLI selects that provider automatically
 - **AND** does not render a one-item selector
 
-#### Scenario: Node unreachable in interactive mode
-- **WHEN** the node is unreachable when fetching the IP list
+#### Scenario: Wallet proxy or node unavailable in interactive mode
+- **WHEN** the wallet proxy is unreachable when fetching the issuance provider list
+- **THEN** the CLI exits with an actionable error describing the connection failure
+- **WHEN** the node is unreachable when validating the selected provider or loading issuance inputs
 - **THEN** the CLI exits with an actionable error describing the connection failure
 
 ### Requirement: Identity issuance follows the Concordium v1 HTTP protocol
@@ -168,6 +170,16 @@ The CLI SHALL implement the v1 issuance protocol by orchestrating node queries, 
 
 #### Scenario: Wallet proxy does not provide provider metadata
 - **WHEN** the selected `wallet_proxy` does not return metadata for the chosen identity provider
+- **THEN** the CLI exits with an actionable error before browser handoff
+
+#### Scenario: Requested provider is unavailable for issuance
+- **WHEN** the user supplies `--provider <ID>`
+- **AND** the selected network's `wallet_proxy` does not list that provider
+- **THEN** the CLI exits with an actionable error before browser handoff
+
+#### Scenario: Wallet proxy and node provider registries disagree
+- **WHEN** the selected `wallet_proxy` lists the chosen provider
+- **AND** the selected node does not register that provider on-chain
 - **THEN** the CLI exits with an actionable error before browser handoff
 
 #### Scenario: Identity provider responds with a redirect

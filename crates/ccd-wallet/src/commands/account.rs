@@ -980,7 +980,7 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
     let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
         .context("stored seed phrase is not UTF-8")?
         .to_owned();
-    let net = infer_net(&network_name, &network_entry.node_endpoint, &endpoint_label);
+    let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
     let wallet = ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?;
 
     let spin = spinner();
@@ -2610,7 +2610,7 @@ pub(crate) fn build_export_wallet_account_with_unlocks(
 ) -> Result<WalletAccount> {
     match account.source_kind {
         accounts::AccountSourceKind::Derived => {
-            build_derived_export_wallet_account(conn, network_name, network_entry, account, unlocks)
+            build_derived_export_wallet_account(conn, network_entry, account, unlocks)
         }
         accounts::AccountSourceKind::Imported => {
             build_imported_export_wallet_account(conn, network_name, account, unlocks)
@@ -2620,7 +2620,6 @@ pub(crate) fn build_export_wallet_account_with_unlocks(
 
 fn build_derived_export_wallet_account(
     conn: &Connection,
-    network_name: &str,
     network_entry: &NetworkEntry,
     account: &accounts::AccountRecord,
     unlocks: &mut AccountReferenceUnlocks,
@@ -2639,11 +2638,7 @@ fn build_derived_export_wallet_account(
         .context("seed phrase is not valid UTF-8")?
         .to_owned();
     unlocks.seed_deks.insert(seed.id.clone(), unlocked.dek);
-    let net = infer_net(
-        network_name,
-        &network_entry.node_endpoint,
-        &network_entry.node_endpoint,
-    );
+    let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
     wallet_account_from_derived_parts(payload.account_address, &seed_phrase, account, net)
 }
 
@@ -3329,15 +3324,6 @@ async fn fetch_anonymity_revokers(
         bail!("no anonymity revokers are available on the selected network");
     }
     Ok(revokers)
-}
-
-fn infer_net(network_name: &str, node_endpoint: &str, endpoint_label: &str) -> Net {
-    let haystack = format!("{network_name} {node_endpoint} {endpoint_label}").to_ascii_lowercase();
-    if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
-        Net::Testnet
-    } else {
-        Net::Mainnet
-    }
 }
 
 fn prompt_for_matching_network_name(

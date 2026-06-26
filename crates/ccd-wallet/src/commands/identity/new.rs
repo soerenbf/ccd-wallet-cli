@@ -124,12 +124,6 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
     spin.start("Fetching identity providers...");
     let ip_infos = fetch_identity_providers(&mut client).await?;
     spin.clear();
-    let ip_info = select_provider(
-        &ip_infos,
-        args.provider,
-        args.interactive,
-        args.non_interactive,
-    )?;
 
     let spin = spinner();
     spin.start("Fetching wallet proxy metadata...");
@@ -139,8 +133,13 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
         .context("selected network has no wallet_proxy configured")?;
     let wallet_proxy_entries = client::fetch_wallet_proxy_ip_info(wallet_proxy).await?;
     spin.clear();
-    let wallet_proxy_entry =
-        select_wallet_proxy_entry(&wallet_proxy_entries, ip_info.ip_identity.0)?;
+    let wallet_proxy_entry = select_wallet_proxy_provider(
+        &wallet_proxy_entries,
+        args.provider,
+        args.interactive,
+        args.non_interactive,
+    )?;
+    let ip_info = resolve_node_provider(&ip_infos, wallet_proxy_entry.ip_info.ip_identity.0)?;
 
     let spin = spinner();
     spin.start("Fetching anonymity revokers...");
@@ -149,11 +148,7 @@ async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs)
 
     let key_source = signer_owners::find_by_label(conn, &key_source_label)?
         .with_context(|| format!("key source '{}' is not configured", key_source_label))?;
-    let net = infer_net(
-        &network_name,
-        network_entry.wallet_proxy.as_deref(),
-        &endpoint_label,
-    );
+    let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
     let request_context = IdentityRequestContext {
         conn,
         network_entry: &network_entry,
@@ -400,37 +395,41 @@ async fn fetch_anonymity_revokers(
     Ok(revokers)
 }
 
-fn select_provider(
-    providers: &[IpInfo<concordium_rust_sdk::id::constants::IpPairing>],
+fn select_wallet_proxy_provider(
+    entries: &[WalletProxyIpEntry],
     provider: Option<u32>,
     interactive: bool,
     non_interactive: bool,
-) -> Result<&IpInfo<concordium_rust_sdk::id::constants::IpPairing>> {
+) -> Result<&WalletProxyIpEntry> {
     match (provider, interactive) {
-        (Some(id), false) => providers
+        (Some(id), false) => entries
             .iter()
-            .find(|ip| ip.ip_identity.0 == id)
+            .find(|entry| entry.ip_info.ip_identity.0 == id)
             .with_context(|| {
-                format!("identity provider {id} is not registered on the selected network")
+                format!(
+                    "identity provider {id} is unavailable for issuance on the selected network"
+                )
             }),
-        (None, true) => select_provider_interactively(providers),
+        (None, true) => select_provider_interactively(entries),
         (Some(_), true) => bail!("--provider and --interactive are mutually exclusive"),
         (None, false) if non_interactive => {
             bail!("specify either --provider <ID> or --interactive in --non-interactive mode")
         }
-        (None, false) => select_provider_interactively(providers),
+        (None, false) => select_provider_interactively(entries),
     }
 }
 
-fn select_wallet_proxy_entry(
-    entries: &[WalletProxyIpEntry],
+fn resolve_node_provider(
+    providers: &[IpInfo<concordium_rust_sdk::id::constants::IpPairing>],
     provider_id: u32,
-) -> Result<&WalletProxyIpEntry> {
-    entries
+) -> Result<&IpInfo<concordium_rust_sdk::id::constants::IpPairing>> {
+    providers
         .iter()
-        .find(|entry| entry.ip_info.ip_identity.0 == provider_id)
+        .find(|ip| ip.ip_identity.0 == provider_id)
         .with_context(|| {
-            format!("wallet proxy did not provide metadata for identity provider {provider_id}")
+            format!(
+                "wallet proxy lists identity provider {provider_id}, but it is not registered on the selected network"
+            )
         })
 }
 
@@ -590,19 +589,6 @@ fn prompt_for_network_name(
         .collect::<Vec<_>>();
     let initial = active.map(str::to_owned);
     select_or_single("Select network", &items, initial.as_ref())
-}
-
-fn infer_net(network_name: &str, wallet_proxy: Option<&str>, endpoint_label: &str) -> Net {
-    let haystack = format!(
-        "{network_name} {} {endpoint_label}",
-        wallet_proxy.unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
-        Net::Testnet
-    } else {
-        Net::Mainnet
-    }
 }
 
 async fn resolve_identity_network_context(
@@ -823,21 +809,19 @@ async fn resolve_identity_network_context(
     ))
 }
 
-fn select_provider_interactively(
-    providers: &[IpInfo<concordium_rust_sdk::id::constants::IpPairing>],
-) -> Result<&IpInfo<concordium_rust_sdk::id::constants::IpPairing>> {
-    let items = providers
+fn select_provider_interactively(entries: &[WalletProxyIpEntry]) -> Result<&WalletProxyIpEntry> {
+    let items = entries
         .iter()
-        .map(|ip| SelectItem {
-            value: ip.ip_identity.0,
-            label: ip.ip_description.name.clone(),
-            hint: format!("provider id: {}", ip.ip_identity.0),
+        .map(|entry| SelectItem {
+            value: entry.ip_info.ip_identity.0,
+            label: entry.ip_info.ip_description.name.clone(),
+            hint: format!("provider id: {}", entry.ip_info.ip_identity.0),
         })
         .collect::<Vec<_>>();
     let selected_id = select_or_single("Select identity provider", &items, None)?;
-    providers
+    entries
         .iter()
-        .find(|ip| ip.ip_identity.0 == selected_id)
+        .find(|entry| entry.ip_info.ip_identity.0 == selected_id)
         .context("selected identity provider was not found")
 }
 

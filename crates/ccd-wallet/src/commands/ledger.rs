@@ -337,11 +337,7 @@ async fn run_ledger_recovery_with_app<T: LedgerTransport>(
     prompts: &mut impl seed::SeedPrompts,
     app: &mut ConcordiumLedgerApp<T>,
 ) -> Result<()> {
-    let export_network = ledger_export_network(seed::infer_net(
-        network_name,
-        network_entry.wallet_proxy.as_deref(),
-        &network_entry.node_endpoint,
-    ));
+    let export_network = ledger_export_network(seed::infer_net(&network_entry.genesis_hash));
     let app = RefCell::new(app);
     let mut identity_material_for =
         |ip_identity: u32, identity_index: u32| -> Result<IdentityRecoveryMaterial> {

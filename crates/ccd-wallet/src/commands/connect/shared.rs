@@ -10,7 +10,7 @@ use ccd_wallet_core::{
         seeds,
         signer_owners::{self, SignerOwnerKind},
     },
-    wallet::{ConcordiumHdWallet, Net},
+    wallet::ConcordiumHdWallet,
 };
 use cliclack::password;
 use concordium_rust_sdk::{
@@ -192,9 +192,7 @@ fn unlock_wallet_account_candidate(
     account: &AccountRecord,
 ) -> Result<WalletAccount> {
     match account.source_kind {
-        AccountSourceKind::Derived => {
-            unlock_derived_wallet_account(conn, network_name, network_entry, account)
-        }
+        AccountSourceKind::Derived => unlock_derived_wallet_account(conn, network_entry, account),
         AccountSourceKind::Imported => unlock_imported_wallet_account(conn, network_name, account),
     }
 }
@@ -217,7 +215,6 @@ fn ensure_seed_backed_account(conn: &Connection, account: &AccountRecord) -> Res
 
 fn unlock_derived_wallet_account(
     conn: &Connection,
-    network_name: &str,
     network_entry: &NetworkEntry,
     account: &AccountRecord,
 ) -> Result<WalletAccount> {
@@ -233,11 +230,7 @@ fn unlock_derived_wallet_account(
     let payload = accounts::decrypt_private_payload(conn, account.id, &unlocked.dek)?;
     let seed_phrase =
         std::str::from_utf8(&unlocked.secret).context("seed phrase is not valid UTF-8")?;
-    let net = infer_net(
-        network_name,
-        network_entry.wallet_proxy.as_deref(),
-        &network_entry.node_endpoint,
-    );
+    let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
     let wallet = ConcordiumHdWallet::from_seed_phrase(seed_phrase, net)?;
     let signing_key = wallet.get_account_signing_key(
         account.ip_identity,
@@ -277,19 +270,6 @@ fn unlock_imported_wallet_account(
         "accountKeys": payload.account_keys,
     }))
     .context("failed to build signer for imported account")
-}
-
-fn infer_net(network_name: &str, wallet_proxy: Option<&str>, endpoint_label: &str) -> Net {
-    let haystack = format!(
-        "{network_name} {} {endpoint_label}",
-        wallet_proxy.unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    if haystack.contains("testnet") || haystack.contains("staging") || haystack.contains("test") {
-        Net::Testnet
-    } else {
-        Net::Mainnet
-    }
 }
 
 pub(super) fn parse_amount_micro_ccd(value: &str) -> Result<Amount> {
