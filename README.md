@@ -73,6 +73,15 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
   cargo run -p ccd-wallet -- node info
 ```
 
+### Example: inspect chain parameters
+
+```bash
+cargo run -p ccd-wallet -- node chain-parameters --network testnet
+cargo run -p ccd-wallet -- node chain-parameters --network testnet --block best --json
+```
+
+`node chain-parameters` queries all normalized parameters at the last finalized block unless `--block <BLOCK>` is supplied. It follows the same endpoint and active-network resolution behavior as other read-only commands, and `--no-defaults` forces explicit configured-network selection. Human output is sectioned; `--json` emits one pretty-printed camel-case document with the endpoint, resolved block hash, and stable parameter fields. Protocol-version-specific fields are `null` when unavailable. P11 responses include `maxLockDuration` and the `tokenParameters` governance authorization structure.
+
 ### Example: register and manage networks
 
 ```bash
@@ -347,7 +356,7 @@ cargo run -p ccd-wallet -- governance update --serialized <HEX> --blind --sign-a
 
 `governance update` signs and submits governance update payloads using keys from the governance key vault. Use `--json <FILE>` for a decoded JSON payload file, or `--serialized <HEX>` for Concordium-serialized update payload bytes. In interactive mode, omitting the value after `--json` prompts for pasted JSON, and omitting the value after `--serialized` prompts for pasted hex. As a Create PLT convenience only, JSON payloads may provide `initializationParameters` as JSON instead of hex; the wallet converts that field to Concordium CBOR before signing.
 
-For known payloads, the wallet decodes the update type, derives the authorization family and sequence-number queue, queries live chain parameters, and prompts for signers if `--key <VERIFY_KEY>` is omitted. Signer prompts reuse the governance key rows from `governance keys list`, sort keys authorized for the current update first, and preselect authorized keys up to the required threshold when the threshold is known.
+For known payloads, the wallet decodes the update type, derives the authorization family and sequence-number queue, queries live chain parameters, and prompts for signers if `--key <VERIFY_KEY>` is omitted. Signer prompts reuse the governance key rows from `governance keys list`, sort keys authorized for the current update first, and preselect authorized keys up to the required threshold when the threshold is known. P11 Max Lock Duration payloads are typed updates that use the `tokenParameters` authorization structure and dedicated maximum-lock-duration sequence queue; see `examples/governance-updates/max-lock-duration.json`. Local governance keys support these updates and V3 level-2 authorization updates. Governance Ledger signing currently rejects both families before device interaction because their APDU operations are not defined by the supported device protocol.
 
 For unknown serialized payloads, use `--blind` only after independently reviewing the payload with trusted tooling. Blind signing emits warnings. If the payload cannot be decoded and `--sign-as <AUTH_FAMILY>` is omitted, you must provide explicit `--key <VERIFY_KEY>` signer flags and `--sequence-number <N>`. `--sign-as` is a helper for cases where you know the authorization family; examples include `protocol`, `create-plt`, `root`, and `level1`.
 

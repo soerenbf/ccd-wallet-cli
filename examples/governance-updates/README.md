@@ -30,3 +30,4 @@ Review and replace every placeholder value before signing or proposing an update
 - `block-energy-limit-cpv2.json` — block energy limit.
 - `finalization-committee-parameters-cpv2.json` — finalization committee parameters.
 - `validator-score-parameters-cpv3.json` — validator score parameters.
+- `max-lock-duration.json` — maximum relative duration for protocol-level token locks. Durations accept measures such as `30d`, `12h`, or `1d 12h`.

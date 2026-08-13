@@ -983,6 +983,7 @@ pub(super) fn build_lock_config(
             keep_alive,
             memo: None,
         }),
+        metadata: None,
     }
 }
 

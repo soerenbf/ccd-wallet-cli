@@ -1,5 +1,7 @@
+mod chain_parameters;
+
 use crate::{
-    cli::{NodeInfoArgs, NodeSubcommand},
+    cli::{NodeChainParametersArgs, NodeInfoArgs, NodeSubcommand},
     commands::ui::{SelectItem, select_or_single},
 };
 use anyhow::{Context, Result, bail};
@@ -28,6 +30,7 @@ pub(crate) struct ResolvedEndpoint {
 pub async fn run(conn: &Connection, command: NodeSubcommand) -> Result<()> {
     match command {
         NodeSubcommand::Info(args) => info(conn, args).await,
+        NodeSubcommand::ChainParameters(args) => chain_parameters(conn, args).await,
     }
 }
 
@@ -128,6 +131,36 @@ fn prompt_for_network_name(
         .collect::<Vec<_>>();
     let initial = active.map(str::to_owned);
     select_or_single("Select network", &items, initial.as_ref())
+}
+
+async fn chain_parameters(conn: &Connection, args: NodeChainParametersArgs) -> Result<()> {
+    let ResolvedEndpoint {
+        endpoint,
+        endpoint_label,
+        ..
+    } = resolve_endpoint_context(conn, args.network, args.node, args.no_defaults)?;
+    let block = crate::smart_contracts::shared::parse_block_identifier(args.block.as_deref())?;
+    let mut client = config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+    let response = client
+        .get_block_chain_parameters(&block)
+        .await
+        .with_context(|| {
+            format!("failed to query chain parameters from node at {endpoint_label}")
+        })?;
+    let output = chain_parameters::ChainParametersOutput::try_new(
+        endpoint_label,
+        response.block_hash.to_string(),
+        &response.response,
+    )?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("{}", chain_parameters::render_human(&output)?);
+    }
+    Ok(())
 }
 
 async fn info(conn: &Connection, args: NodeInfoArgs) -> Result<()> {

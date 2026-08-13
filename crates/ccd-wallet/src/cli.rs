@@ -2136,6 +2136,36 @@ pub struct NodeCommand {
 pub enum NodeSubcommand {
     /// Retrieve information from a Concordium node.
     Info(NodeInfoArgs),
+    /// Show normalized chain parameters at a selected block.
+    ChainParameters(NodeChainParametersArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NodeChainParametersArgs {
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(
+        long = "node",
+        env = config::NODE_ENDPOINT_ENV,
+        conflicts_with = "network",
+        value_name = "ENDPOINT"
+    )]
+    pub node: Option<v2::Endpoint>,
+
+    /// Block selector to query. Defaults to the last finalized block.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Emit machine-readable JSON output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Disable silent use of the active network and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2161,6 +2191,50 @@ pub struct NodeInfoArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_node_chain_parameters_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "node",
+            "chain-parameters",
+            "--network",
+            "testnet",
+            "--block",
+            "best",
+            "--json",
+            "--no-defaults",
+        ]);
+
+        match cli.command {
+            Command::Node(command) => match command.command {
+                NodeSubcommand::ChainParameters(args) => {
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.node.is_none());
+                    assert_eq!(args.block.as_deref(), Some("best"));
+                    assert!(args.json);
+                    assert!(args.no_defaults);
+                }
+                other => panic!("expected chain-parameters command, got {other:?}"),
+            },
+            other => panic!("expected node command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn node_chain_parameters_rejects_network_and_node() {
+        let result = Cli::try_parse_from([
+            "ccd-wallet",
+            "node",
+            "chain-parameters",
+            "--network",
+            "testnet",
+            "--node",
+            "https://grpc.testnet.concordium.com:20000",
+        ]);
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn parses_transaction_show_command() {

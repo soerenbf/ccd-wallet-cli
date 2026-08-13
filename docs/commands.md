@@ -28,7 +28,8 @@ The following tree reflects the current command surface implemented in `crates/c
 ```text
 ccd-wallet
 ├─ node                         [Implemented]
-│  └─ info
+│  ├─ info
+│  └─ chain-parameters
 ├─ network                      [Implemented]
 │  ├─ add
 │  ├─ delete
@@ -126,6 +127,10 @@ ccd-wallet
 │     └─ submit <PLAN>
 └─ connect                      [Implemented]
 ```
+
+## Node inspection
+
+`node chain-parameters` queries all normalized chain parameters at the last finalized block by default. It accepts the same read-only query controls as comparable inspection commands: `--network <NAME>` or `--node <ENDPOINT>` for mutually exclusive endpoint selection, `--block <BLOCK>` for an explicit block selector, `--no-defaults` to require configured-network selection instead of silently using the active network, and `--json` for pretty-printed camel-case JSON. Human output is sectioned for inspection; JSON output includes stable fields, using `null` for parameters unavailable at the selected protocol version. Both modes include the resolved endpoint and block hash.
 
 ## Key-source terminology
 

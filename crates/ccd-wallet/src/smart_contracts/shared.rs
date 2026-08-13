@@ -309,6 +309,31 @@ mod tests {
     }
 
     #[test]
+    fn block_identifier_defaults_to_last_final_and_accepts_best() {
+        assert_eq!(
+            parse_block_identifier(None).unwrap(),
+            BlockIdentifier::LastFinal
+        );
+        assert_eq!(
+            parse_block_identifier(Some("last-final")).unwrap(),
+            BlockIdentifier::LastFinal
+        );
+        assert_eq!(
+            parse_block_identifier(Some("best")).unwrap(),
+            BlockIdentifier::Best
+        );
+    }
+
+    #[test]
+    fn invalid_block_identifier_is_actionable() {
+        let err = parse_block_identifier(Some("not-a-block")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid block selector 'not-a-block'")
+        );
+    }
+
+    #[test]
     fn contract_address_defaults_subindex() {
         let address = parse_contract_address("42").unwrap();
         assert_eq!(address.index, 42);

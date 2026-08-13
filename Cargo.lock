@@ -809,7 +809,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "concordium-contracts-common"
 version = "9.2.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "base64 0.21.7",
  "bs58",
@@ -830,7 +830,7 @@ dependencies = [
 [[package]]
 name = "concordium-contracts-common-derive"
 version = "4.1.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -840,7 +840,7 @@ dependencies = [
 [[package]]
 name = "concordium-rust-sdk"
 version = "9.0.1"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -873,7 +873,7 @@ dependencies = [
 [[package]]
 name = "concordium-smart-contract-engine"
 version = "6.1.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -897,7 +897,7 @@ dependencies = [
 [[package]]
 name = "concordium-wasm"
 version = "5.1.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "anyhow",
  "concordium-contracts-common",
@@ -909,7 +909,7 @@ dependencies = [
 [[package]]
 name = "concordium_base"
 version = "10.0.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "aes",
  "anyhow",
@@ -959,7 +959,7 @@ dependencies = [
 [[package]]
 name = "concordium_base_derive"
 version = "1.2.0"
-source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=release%2Fp11#c724626dcded4057e2ed1e6d40208d0055214048"
+source = "git+https://github.com/Concordium/concordium-rust-sdk?branch=sz%2Flocks%2Fmax-lock-duration#6161a902f7fcf3bcbe08f80bca04b9fc254e47b1"
 dependencies = [
  "convert_case 0.8.0",
  "darling 0.20.11",

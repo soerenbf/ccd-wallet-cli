@@ -103,6 +103,7 @@ enum GovernanceCapability {
     Cooldown,
     CreatePlt,
     Emergency,
+    TokenParameters,
     EuroEnergy,
     Foundation,
     GasRewards,
@@ -123,6 +124,7 @@ impl GovernanceCapability {
             GovernanceCapability::Cooldown => "cooldown",
             GovernanceCapability::CreatePlt => "create plt",
             GovernanceCapability::Emergency => "emergency",
+            GovernanceCapability::TokenParameters => "token parameters",
             GovernanceCapability::EuroEnergy => "euro/energy",
             GovernanceCapability::Foundation => "foundation",
             GovernanceCapability::GasRewards => "gas rewards",
@@ -429,6 +431,7 @@ enum GovernanceSequenceQueue {
     FinalizationCommitteeParameters,
     ValidatorScoreParameters,
     ProtocolLevelTokens,
+    MaxLockDuration,
 }
 
 impl GovernanceSequenceQueue {
@@ -458,6 +461,7 @@ impl GovernanceSequenceQueue {
             }
             GovernanceSequenceQueue::ValidatorScoreParameters => "validator score parameters",
             GovernanceSequenceQueue::ProtocolLevelTokens => "protocol level tokens",
+            GovernanceSequenceQueue::MaxLockDuration => "maximum lock duration",
         }
     }
 
@@ -487,6 +491,7 @@ impl GovernanceSequenceQueue {
             }
             UpdateType::UpdateValidatorScoreParameters => Self::ValidatorScoreParameters,
             UpdateType::UpdateCreatePLT => Self::ProtocolLevelTokens,
+            UpdateType::UpdateMaxLockDuration => Self::MaxLockDuration,
         }
     }
 
@@ -518,6 +523,7 @@ impl GovernanceSequenceQueue {
             }
             GovernanceSequenceQueue::ValidatorScoreParameters => next.validator_score_parameters,
             GovernanceSequenceQueue::ProtocolLevelTokens => next.protocol_level_tokens,
+            GovernanceSequenceQueue::MaxLockDuration => next.max_lock_duration,
         }
     }
 }
@@ -563,6 +569,9 @@ impl GovernanceAuthFamily {
             }
             GovernanceAuthFamily::Level2(GovernanceCapability::Emergency) => {
                 GovernanceSequenceQueue::Protocol
+            }
+            GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters) => {
+                GovernanceSequenceQueue::MaxLockDuration
             }
             GovernanceAuthFamily::Level2(GovernanceCapability::EuroEnergy) => {
                 GovernanceSequenceQueue::EuroPerEnergy
@@ -772,6 +781,9 @@ fn auth_family_for_update_type(update_type: UpdateType) -> GovernanceAuthFamily 
         }
         UpdateType::UpdateCreatePLT => {
             GovernanceAuthFamily::Level2(GovernanceCapability::CreatePlt)
+        }
+        UpdateType::UpdateMaxLockDuration => {
+            GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters)
         }
     }
 }
@@ -1047,15 +1059,24 @@ fn signer_output_from_signature_file(
 }
 
 fn validate_ledger_signing_context(payload: &ResolvedGovernanceUpdatePayload) -> Result<()> {
-    if matches!(payload, ResolvedGovernanceUpdatePayload::Blind { .. }) {
+    let ResolvedGovernanceUpdatePayload::Known { payload, .. } = payload else {
         bail!(
             "Ledger governance signing does not support blind signing unknown serialized governance update payloads"
         );
-    }
-    if payload.auth_family_hint().is_none() {
-        bail!(
-            "Ledger governance signing requires a decoded governance update authorization family"
-        );
+    };
+    match payload {
+        UpdatePayload::MaxLockDuration(_) => bail!(
+            "Ledger governance signing does not support maximum-lock-duration updates; use local governance signing"
+        ),
+        UpdatePayload::Root(
+            concordium_rust_sdk::base::updates::RootUpdate::Level2KeysUpdateV3(_),
+        )
+        | UpdatePayload::Level1(
+            concordium_rust_sdk::base::updates::Level1Update::Level2KeysUpdateV3(_),
+        ) => bail!(
+            "Ledger governance signing does not support level-2 authorization V3 updates; use local governance signing"
+        ),
+        _ => {}
     }
     Ok(())
 }
@@ -1366,6 +1387,9 @@ fn sign_prepared_update_with_ledger_path<T: governance_ledger::GovernanceLedgerT
         UpdatePayload::ElectionDifficulty(_) => bail!(
             "Ledger governance signing does not support election-difficulty governance updates"
         ),
+        UpdatePayload::MaxLockDuration(_) => bail!(
+            "Ledger governance signing does not support maximum-lock-duration governance updates"
+        ),
     }
 }
 
@@ -1422,6 +1446,9 @@ fn sign_root_update_with_ledger<T: governance_ledger::GovernanceLedgerTransport>
                 )),
             )
             .map_err(ledger_error),
+        RootUpdate::Level2KeysUpdateV3(_) => {
+            bail!("Ledger governance signing does not support level-2 authorization V3 updates")
+        }
     }
 }
 
@@ -1471,6 +1498,9 @@ fn sign_level1_update_with_ledger<T: governance_ledger::GovernanceLedgerTranspor
                 )),
             )
             .map_err(ledger_error),
+        Level1Update::Level2KeysUpdateV3(_) => {
+            bail!("Ledger governance signing does not support level-2 authorization V3 updates")
+        }
     }
 }
 
@@ -2279,6 +2309,9 @@ fn parse_auth_family(value: &str) -> Result<GovernanceAuthFamily> {
         "time" | "time-parameters" => Ok(GovernanceAuthFamily::Level2(GovernanceCapability::Time)),
         "create-plt" | "protocol-level-token" | "protocol-level-tokens" => Ok(
             GovernanceAuthFamily::Level2(GovernanceCapability::CreatePlt),
+        ),
+        "token-parameters" | "max-lock-duration" | "maximum-lock-duration" => Ok(
+            GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters),
         ),
         other => bail!("unknown governance authorization family '{other}'"),
     }
@@ -3382,6 +3415,7 @@ fn level2_access_structure_for_capability(
         GovernanceCapability::Cooldown => level2.cooldown_parameters.as_ref(),
         GovernanceCapability::CreatePlt => level2.create_plt.as_ref(),
         GovernanceCapability::Emergency => level2.emergency.as_ref(),
+        GovernanceCapability::TokenParameters => level2.token_parameters.as_ref(),
         GovernanceCapability::EuroEnergy => level2.euro_per_energy.as_ref(),
         GovernanceCapability::Foundation => level2.foundation_account.as_ref(),
         GovernanceCapability::GasRewards => level2.param_gas_rewards.as_ref(),
@@ -3427,6 +3461,9 @@ fn level2_capabilities_for_index(
     }
     if is_authorized(level2.emergency.as_ref()) {
         capabilities.push(GovernanceCapability::Emergency);
+    }
+    if is_authorized(level2.token_parameters.as_ref()) {
+        capabilities.push(GovernanceCapability::TokenParameters);
     }
     if is_authorized(level2.euro_per_energy.as_ref()) {
         capabilities.push(GovernanceCapability::EuroEnergy);
@@ -3624,6 +3661,10 @@ mod tests {
                         authorized_keys: [0u16.into()].into_iter().collect(),
                         threshold: 1u16.try_into().unwrap(),
                     }),
+                    token_parameters: Some(concordium_rust_sdk::base::updates::AccessStructure {
+                        authorized_keys: [0u16.into()].into_iter().collect(),
+                        threshold: 1u16.try_into().unwrap(),
+                    }),
                 }),
             },
             ..Default::default()
@@ -3638,6 +3679,7 @@ mod tests {
             matched[0].capabilities,
             vec![
                 GovernanceCapability::CreatePlt,
+                GovernanceCapability::TokenParameters,
                 GovernanceCapability::Protocol
             ]
         );
@@ -4177,6 +4219,146 @@ mod tests {
     }
 
     #[test]
+    fn max_lock_duration_payload_resolves_typed_context() {
+        let raw = r#"{"updateType":"maxLockDuration","update":"30d"}"#.to_owned();
+        let resolved =
+            resolve_update_payload(GovernanceUpdatePayloadInput::Json(raw), &update_args())
+                .unwrap();
+        let ResolvedGovernanceUpdatePayload::Known {
+            payload,
+            auth_family,
+            sequence_queue,
+        } = resolved
+        else {
+            panic!("expected known payload");
+        };
+
+        assert!(matches!(payload, UpdatePayload::MaxLockDuration(_)));
+        assert_eq!(
+            auth_family,
+            GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters)
+        );
+        assert_eq!(sequence_queue, GovernanceSequenceQueue::MaxLockDuration);
+    }
+
+    #[test]
+    fn serialized_max_lock_duration_payload_is_not_blind() {
+        let payload = UpdatePayload::MaxLockDuration(
+            concordium_rust_sdk::smart_contracts::common::Duration::from_days(30),
+        );
+        let encoded = EncodedUpdatePayload::encode(&payload);
+        let resolved = resolve_update_payload(
+            GovernanceUpdatePayloadInput::Serialized(encoded.as_ref().to_vec()),
+            &update_args(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            resolved,
+            ResolvedGovernanceUpdatePayload::Known {
+                auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters),
+                sequence_queue: GovernanceSequenceQueue::MaxLockDuration,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn max_lock_duration_blind_sign_aliases_use_token_parameters() {
+        for alias in [
+            "token-parameters",
+            "max-lock-duration",
+            "maximum-lock-duration",
+        ] {
+            assert_eq!(
+                parse_auth_family(alias).unwrap(),
+                GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters)
+            );
+        }
+        assert_eq!(
+            GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters)
+                .default_sequence_queue(),
+            GovernanceSequenceQueue::MaxLockDuration
+        );
+    }
+
+    fn authorizations_v3() -> concordium_rust_sdk::base::updates::AuthorizationsV1 {
+        use concordium_rust_sdk::base::updates::{AccessStructure, AuthorizationsV0};
+
+        let access = || AccessStructure {
+            authorized_keys: [0u16.into()].into_iter().collect(),
+            threshold: 1u16.try_into().unwrap(),
+        };
+        concordium_rust_sdk::base::updates::AuthorizationsV1 {
+            v0: AuthorizationsV0 {
+                keys: vec![UpdatePublicKey::from(&key())],
+                emergency: access(),
+                protocol: access(),
+                election_difficulty: access(),
+                euro_per_energy: access(),
+                micro_gtu_per_euro: access(),
+                foundation_account: access(),
+                mint_distribution: access(),
+                transaction_fee_distribution: access(),
+                param_gas_rewards: access(),
+                pool_parameters: access(),
+                add_anonymity_revoker: access(),
+                add_identity_provider: access(),
+            },
+            cooldown_parameters: access(),
+            time_parameters: access(),
+            create_plt: Some(access()),
+            token_parameters: Some(access()),
+        }
+    }
+
+    #[test]
+    fn authorization_v3_payloads_remain_typed_but_are_rejected_for_ledger() {
+        use concordium_rust_sdk::base::updates::{Level1Update, RootUpdate};
+
+        let payloads = [
+            UpdatePayload::Root(RootUpdate::Level2KeysUpdateV3(
+                Box::new(authorizations_v3()),
+            )),
+            UpdatePayload::Level1(Level1Update::Level2KeysUpdateV3(Box::new(
+                authorizations_v3(),
+            ))),
+        ];
+        for payload in payloads {
+            let encoded = EncodedUpdatePayload::encode(&payload);
+            let decoded = encoded.decode().unwrap();
+            assert!(matches!(
+                decoded,
+                UpdatePayload::Root(RootUpdate::Level2KeysUpdateV3(_))
+                    | UpdatePayload::Level1(Level1Update::Level2KeysUpdateV3(_))
+            ));
+            let resolved = ResolvedGovernanceUpdatePayload::Known {
+                auth_family: auth_family_for_update_type(payload.update_type()),
+                sequence_queue: GovernanceSequenceQueue::from_update_type(payload.update_type()),
+                payload,
+            };
+            let err = validate_ledger_signing_context(&resolved).unwrap_err();
+            assert!(err.to_string().contains("authorization V3"));
+            assert!(err.to_string().contains("local governance signing"));
+        }
+    }
+
+    #[test]
+    fn ledger_rejects_max_lock_duration_before_device_interaction() {
+        let payload = ResolvedGovernanceUpdatePayload::Known {
+            payload: UpdatePayload::MaxLockDuration(
+                concordium_rust_sdk::smart_contracts::common::Duration::from_days(30),
+            ),
+            auth_family: GovernanceAuthFamily::Level2(GovernanceCapability::TokenParameters),
+            sequence_queue: GovernanceSequenceQueue::MaxLockDuration,
+        };
+
+        let err = validate_ledger_signing_context(&payload).unwrap_err();
+        assert!(err.to_string().contains("maximum-lock-duration"));
+        assert!(err.to_string().contains("local governance signing"));
+    }
+
+    #[test]
     fn ledger_path_is_derived_from_update_family_and_key_index() {
         let payload = ResolvedGovernanceUpdatePayload::Known {
             payload: protocol_payload(),
@@ -4241,6 +4423,7 @@ mod tests {
                     cooldown_parameters: None,
                     time_parameters: None,
                     create_plt: None,
+                    token_parameters: None,
                 }),
                 ..Default::default()
             },
@@ -4308,6 +4491,7 @@ mod tests {
                     cooldown_parameters: None,
                     time_parameters: None,
                     create_plt: None,
+                    token_parameters: None,
                 }),
                 ..Default::default()
             },
@@ -4363,6 +4547,7 @@ mod tests {
                     cooldown_parameters: None,
                     time_parameters: None,
                     create_plt: None,
+                    token_parameters: None,
                 }),
                 ..Default::default()
             },
@@ -4453,6 +4638,7 @@ mod tests {
                     cooldown_parameters: None,
                     time_parameters: None,
                     create_plt: None,
+                    token_parameters: None,
                 }),
                 ..Default::default()
             },
