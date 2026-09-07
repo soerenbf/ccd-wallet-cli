@@ -815,8 +815,17 @@ pub struct IdentityNewArgs {
     pub interactive: bool,
 
     /// Key-source label to use. Defaults to the active key source.
-    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
+    #[arg(
+        long = "seed",
+        alias = "key-source",
+        value_name = "LABEL",
+        conflicts_with = "ledger"
+    )]
     pub seed: Option<String>,
+
+    /// Use the connected enrolled Ledger device as the key source.
+    #[arg(long, conflicts_with = "seed")]
+    pub ledger: bool,
 
     /// Registered network name to resolve from the config store.
     #[arg(long = "network", value_name = "NAME")]
@@ -1015,8 +1024,21 @@ pub struct AccountNewArgs {
     pub identity: Option<String>,
 
     /// Key-source label to use. Defaults to the active key source.
-    #[arg(long = "seed", alias = "key-source", value_name = "LABEL")]
+    #[arg(
+        long = "seed",
+        alias = "key-source",
+        value_name = "LABEL",
+        conflicts_with = "ledger"
+    )]
     pub seed: Option<String>,
+
+    /// Use the connected enrolled Ledger device as the key source.
+    #[arg(long, conflicts_with = "seed")]
+    pub ledger: bool,
+
+    /// Explicitly allow Ledger account-creation secrets to be exported temporarily in non-interactive mode.
+    #[arg(long = "allow-ledger-secret-export")]
+    pub allow_ledger_secret_export: bool,
 
     /// Registered network name to resolve from the config store.
     #[arg(long = "network", value_name = "NAME")]
@@ -1629,6 +1651,14 @@ pub struct TokenLockCreateArgs {
     #[arg(long = "token", value_name = "TOKEN_ID")]
     pub tokens: Vec<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
+    /// Optional user-facing lock name. If omitted interactively, the CLI prompts with empty input allowed.
+    #[arg(long = "name", value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Optional user-facing lock description. If omitted interactively, the CLI prompts with empty input allowed.
+    #[arg(long = "description", value_name = "DESCRIPTION")]
+    pub description: Option<String>,
+
     /// Keep the lock alive after all funds have been returned.
     #[arg(long = "keep-alive")]
     pub keep_alive: bool,
@@ -2138,6 +2168,36 @@ pub enum NodeSubcommand {
     Info(NodeInfoArgs),
     /// Show normalized chain parameters at a selected block.
     ChainParameters(NodeChainParametersArgs),
+    /// Show pending chain updates and next update sequence numbers.
+    ChainUpdates(NodeChainUpdatesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct NodeChainUpdatesArgs {
+    /// Registered network name to resolve from the config store.
+    #[arg(long = "network", conflicts_with = "node", value_name = "NAME")]
+    pub network: Option<String>,
+
+    /// Concordium node gRPC endpoint.
+    #[arg(
+        long = "node",
+        env = config::NODE_ENDPOINT_ENV,
+        conflicts_with = "network",
+        value_name = "ENDPOINT"
+    )]
+    pub node: Option<v2::Endpoint>,
+
+    /// Block selector to query. Defaults to the last finalized block.
+    #[arg(long = "block", value_name = "BLOCK")]
+    pub block: Option<String>,
+
+    /// Emit machine-readable JSON output.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Disable silent use of the active network and force explicit selection.
+    #[arg(long = "no-defaults")]
+    pub no_defaults: bool,
 }
 
 #[derive(Debug, Args)]
@@ -2219,6 +2279,50 @@ mod tests {
             },
             other => panic!("expected node command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_node_chain_updates_command() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "node",
+            "chain-updates",
+            "--network",
+            "testnet",
+            "--block",
+            "best",
+            "--json",
+            "--no-defaults",
+        ]);
+
+        match cli.command {
+            Command::Node(command) => match command.command {
+                NodeSubcommand::ChainUpdates(args) => {
+                    assert_eq!(args.network.as_deref(), Some("testnet"));
+                    assert!(args.node.is_none());
+                    assert_eq!(args.block.as_deref(), Some("best"));
+                    assert!(args.json);
+                    assert!(args.no_defaults);
+                }
+                other => panic!("expected chain-updates command, got {other:?}"),
+            },
+            other => panic!("expected node command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn node_chain_updates_rejects_network_and_node() {
+        let result = Cli::try_parse_from([
+            "ccd-wallet",
+            "node",
+            "chain-updates",
+            "--network",
+            "testnet",
+            "--node",
+            "https://grpc.testnet.concordium.com:20000",
+        ]);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2899,6 +3003,7 @@ mod tests {
                     assert_eq!(args.label.as_deref(), Some("alice-id"));
                     assert_eq!(args.provider, Some(7));
                     assert_eq!(args.seed.as_deref(), Some("ledger-main"));
+                    assert!(!args.ledger);
                     assert_eq!(args.network.as_deref(), Some("testnet"));
                     assert!(args.allow_ledger_secret_export);
                 }
@@ -2906,6 +3011,35 @@ mod tests {
             },
             other => panic!("expected identity command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_identity_new_with_ledger_source() {
+        let cli = Cli::parse_from(["ccd-wallet", "identity", "new", "alice-id", "--ledger"]);
+        let Command::Identity(command) = cli.command else {
+            panic!("expected identity command");
+        };
+        let IdentitySubcommand::New(args) = command.command else {
+            panic!("expected identity new command");
+        };
+        assert!(args.ledger);
+        assert!(args.seed.is_none());
+    }
+
+    #[test]
+    fn rejects_conflicting_identity_new_sources() {
+        assert!(
+            Cli::try_parse_from([
+                "ccd-wallet",
+                "identity",
+                "new",
+                "alice-id",
+                "--seed",
+                "primary",
+                "--ledger",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2994,12 +3128,51 @@ mod tests {
                     assert_eq!(args.label.as_deref(), Some("alice"));
                     assert_eq!(args.identity.as_deref(), Some("alice-id"));
                     assert_eq!(args.seed.as_deref(), Some("ledger-main"));
+                    assert!(!args.ledger);
+                    assert!(!args.allow_ledger_secret_export);
                     assert_eq!(args.network.as_deref(), Some("testnet"));
                 }
                 other => panic!("expected account new command, got {other:?}"),
             },
             other => panic!("expected account command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_account_new_with_ledger_source_and_export_approval() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "account",
+            "new",
+            "alice",
+            "--ledger",
+            "--allow-ledger-secret-export",
+        ]);
+        let Command::Account(command) = cli.command else {
+            panic!("expected account command");
+        };
+        let AccountSubcommand::New(args) = command.command else {
+            panic!("expected account new command");
+        };
+        assert!(args.ledger);
+        assert!(args.seed.is_none());
+        assert!(args.allow_ledger_secret_export);
+    }
+
+    #[test]
+    fn rejects_conflicting_account_new_sources() {
+        assert!(
+            Cli::try_parse_from([
+                "ccd-wallet",
+                "account",
+                "new",
+                "alice",
+                "--seed",
+                "primary",
+                "--ledger",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -3261,6 +3434,10 @@ mod tests {
             "4UC8o4m8AgTxt5VBFMdLwMCwwJQVJwjesNzW7RPXkACynrULmd:fund,send,cancel",
             "--token",
             "CCD",
+            "--name",
+            "Treasury vesting",
+            "--description",
+            "Quarterly contributor allocation",
             "--account",
             "alice",
         ]);
@@ -3272,6 +3449,11 @@ mod tests {
                         assert_eq!(args.expiry.as_deref(), Some("1h"));
                         assert_eq!(args.tokens.len(), 1);
                         assert_eq!(args.tokens[0].to_string(), "CCD");
+                        assert_eq!(args.name.as_deref(), Some("Treasury vesting"));
+                        assert_eq!(
+                            args.description.as_deref(),
+                            Some("Quarterly contributor allocation")
+                        );
                         assert_eq!(args.account.as_deref(), Some("alice"));
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
@@ -3565,6 +3747,8 @@ mod tests {
                     TokenLockSubcommand::Create(args) => {
                         assert!(args.expiry.is_none());
                         assert!(args.tokens.is_empty());
+                        assert!(args.name.is_none());
+                        assert!(args.description.is_none());
                         assert_eq!(args.account.as_deref(), Some("alice"));
                     }
                     other => panic!("expected token lock create command, got {other:?}"),
@@ -3573,6 +3757,55 @@ mod tests {
             },
             other => panic!("expected token command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_non_interactive_token_lock_create_without_metadata() {
+        let cli = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--any-recipient",
+            "--expiry",
+            "1h",
+            "--grant",
+            "operator:fund",
+            "--token",
+            "CCD",
+            "--account",
+            "alice",
+            "--non-interactive",
+        ]);
+
+        match cli.command {
+            Command::Token(command) => match command.command {
+                TokenSubcommand::Lock(command) => match command.command {
+                    TokenLockSubcommand::Create(args) => {
+                        assert!(args.non_interactive);
+                        assert!(args.name.is_none());
+                        assert!(args.description.is_none());
+                    }
+                    other => panic!("expected token lock create command, got {other:?}"),
+                },
+                other => panic!("expected token lock command, got {other:?}"),
+            },
+            other => panic!("expected token command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_arbitrary_token_lock_metadata_option() {
+        let err = Cli::try_parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "create",
+            "--metadata",
+            "issuer=Concordium",
+        ])
+        .expect_err("arbitrary metadata option must fail");
+        assert!(err.to_string().contains("unexpected argument '--metadata'"));
     }
 
     #[test]

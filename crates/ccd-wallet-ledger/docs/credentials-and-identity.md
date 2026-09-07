@@ -25,11 +25,11 @@ A credential deployment request contains:
 `CredentialSigningPayload` groups the staged credential fields sent to the device:
 
 - verification-key count
-- key index / scheme / public key
-- signature threshold / credential ID / identity fields
-- anonymity revoker identity data
+- one key index / scheme / public key entry per APDU
+- account signature threshold / credential ID / identity provider / anonymity-revocation threshold / AR count
+- one anonymity-revoker identity and encrypted-share pair per APDU
 - credential date fields
-- revealed attributes
+- revealed attributes, staged as a tag plus raw UTF-8 byte length followed by raw UTF-8 bytes
 - proof length
 - proof chunks
 
@@ -54,6 +54,12 @@ The update-credentials command uses a P2 subprotocol. The crate preserves the re
 The app 5.4.1 legacy new-path private-key export protocol can export PRFKey and IDCredSec for a selected identity provider and identity index, but it does not export deterministic signature blinding randomness. App 5.5.0+ purpose-based identity credential creation export adds the missing signature blinding randomness and returns all three values as length-prefixed 32-byte fields. Higher-level identity issuance code must reject legacy raw responses when a recoverable Ledger-backed identity requires all three values.
 
 A physical Ledger device running Concordium app `5.6.2` has been used to validate that the purpose-based identity issuance flow works end-to-end for Ledger-backed `identity new`.
+
+## Ledger-backed account creation
+
+Account creation requires Concordium Ledger app `5.6.4` or newer. After explicit approval, higher-level wallet code obtains two transient purpose-based exports: Account Creation returns length-prefixed `32/32/64` fields (PRFKey, IDCredSec, and an extended commitment-randomness root), while Identity Recovery returns IDCredSec and signature blinding randomness. The matching IDCredSec values are required before host-side credential and proof construction proceeds.
+
+The extended 64-byte root supports hardened derivation of attribute randomness. It is not an account signing key: the account signing key remains on the Ledger device, which returns the final credential-deployment signature. Exported and derived secret material must be zeroized and never persisted.
 
 ## Design intent
 

@@ -545,6 +545,33 @@ fn format_count(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+pub(crate) fn resolve_connected_ledger_owner<T: LedgerTransport>(
+    conn: &Connection,
+    app: &mut ConcordiumLedgerApp<T>,
+) -> Result<signer_owners::SignerOwnerRecord> {
+    let connected_key = read_canonical_public_key(app, false)?;
+    let mut matches = Vec::new();
+    for owner in signer_owners::list(conn)? {
+        if owner.kind != SignerOwnerKind::Ledger {
+            continue;
+        }
+        if signer_owners::find_ledger_details_by_owner_id(conn, &owner.id)?
+            .is_some_and(|details| details.canonical_public_key == connected_key)
+        {
+            matches.push(owner);
+        }
+    }
+    match matches.as_slice() {
+        [owner] => Ok(owner.clone()),
+        [] => {
+            bail!("connected Ledger is not enrolled; run `ccd-wallet ledger setup <LABEL>` first")
+        }
+        _ => bail!(
+            "connected Ledger matches multiple enrolled key sources; remove the duplicate enrollment"
+        ),
+    }
+}
+
 pub(crate) fn verify_connected_ledger_owner<T: LedgerTransport>(
     conn: &Connection,
     signer_owner_id: &str,
@@ -737,6 +764,29 @@ mod tests {
         let commands = app.transport().commands();
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].p1, 0x01);
+    }
+
+    #[test]
+    fn resolves_connected_ledger_to_its_unique_enrolled_owner() {
+        let conn = conn();
+        let owner = ledger_owner(&conn, "ledger", 7);
+        ledger_owner(&conn, "other", 8);
+        let mut app = ConcordiumLedgerApp::new(MockTransport::new([public_key_reply(7)]));
+
+        let resolved = resolve_connected_ledger_owner(&conn, &mut app).unwrap();
+
+        assert_eq!(resolved.id, owner.id);
+    }
+
+    #[test]
+    fn rejects_unenrolled_connected_ledger() {
+        let conn = conn();
+        ledger_owner(&conn, "ledger", 7);
+        let mut app = ConcordiumLedgerApp::new(MockTransport::new([public_key_reply(8)]));
+
+        let err = resolve_connected_ledger_owner(&conn, &mut app).unwrap_err();
+
+        assert!(err.to_string().contains("not enrolled"));
     }
 
     #[test]

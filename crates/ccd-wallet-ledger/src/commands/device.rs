@@ -229,10 +229,8 @@ pub fn build_export_private_key_new_command(request: &ExportPrivateKeyNewRequest
 pub fn export_private_key_new<T: LedgerTransport>(
     transport: &mut T,
     request: &ExportPrivateKeyNewRequest,
-) -> Result<Vec<u8>> {
-    Ok(transport
-        .exchange(&build_export_private_key_new_command(request))?
-        .data)
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    transport.exchange_secret(&build_export_private_key_new_command(request))
 }
 
 /// Build a legacy new-path private-key export command.
@@ -353,6 +351,21 @@ mod tests {
         });
         assert_eq!(command.p1, P1_ACCOUNT_CREATION);
         assert_eq!(command.p2, 0x01);
+    }
+
+    #[test]
+    fn purpose_based_export_returns_zeroizing_status_stripped_payload() {
+        let mut transport = MockTransport::new([ok_reply(vec![1, 2])]);
+        let exported: zeroize::Zeroizing<Vec<u8>> = export_private_key_new(
+            &mut transport,
+            &ExportPrivateKeyNewRequest {
+                export_type: ExportPrivateKeyNewType::AccountCreation,
+                network: ExportPrivateKeyNetwork::Testnet,
+                payload: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(&*exported, &[1, 2]);
     }
 
     #[test]

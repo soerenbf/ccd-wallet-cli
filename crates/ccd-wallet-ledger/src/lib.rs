@@ -191,7 +191,7 @@ impl<T: LedgerTransport> ConcordiumLedgerApp<T> {
     pub fn export_private_key_new(
         &mut self,
         request: &ExportPrivateKeyNewRequest,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
         commands::device::export_private_key_new(&mut self.transport, request)
     }
 

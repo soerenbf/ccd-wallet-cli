@@ -98,6 +98,15 @@ For identity issuance on app 5.5.0+, callers should use:
 - `payload`: `identity_provider[uint32] || identity[uint32]`
 - response order: IDCredSec, PRFKey, signature blinding randomness
 
+### Account creation (app 5.6.4+)
+
+Ledger-backed account creation requires Concordium Ledger app 5.6.4 or newer. It uses two purpose-based exports after explicit user approval:
+
+- **Account Creation** (`ExportPrivateKeyNewType::AccountCreation`) uses `identity_provider[uint32] || identity[uint32] || account[uint32]` and returns exactly three length-prefixed fields in this order: `[32][PRFKey]`, `[32][IDCredSec]`, and `[64][extended commitment-randomness root]`. The 64-byte field is the private-key and chain-code pair used for hardened attribute-randomness derivation.
+- **Identity Recovery** (`ExportPrivateKeyNewType::IdRecovery`) uses `identity_provider[uint32] || identity[uint32]` and returns `[32][IDCredSec]` and `[32][signature blinding randomness]`. Higher-level callers must reject the material if its IDCredSec does not match the Account Creation export.
+
+These exports are security-sensitive and must remain transient host memory only. They provide credential-construction material, not the account signing private key; that key remains on the Ledger device, which supplies the credential-deployment signature.
+
 ## Identity issuance warning
 
 App 5.4.1 legacy new-path export can provide `PRFKey || IDCredSec`, but it does not expose deterministic signature blinding randomness. App 5.5.0+ purpose-based identity credential creation export provides all three recovery-critical issuance values. Higher-level Ledger-backed identity issuance flows must reject app 5.4.1 raw responses rather than completing with host-generated replacement randomness.
@@ -106,4 +115,4 @@ Real-device validation confirmed that this purpose-based identity issuance path 
 
 ## Security guidance
 
-This crate only exposes protocol operations. Higher-level tools should decide whether these commands are appropriate, how to warn users, where bytes may be stored, and how to prevent accidental secret disclosure.
+This crate only exposes protocol operations. Higher-level tools should decide whether these commands are appropriate, how to warn users, where bytes may be stored, and how to prevent accidental secret disclosure. In particular, account-creation and identity-recovery exports must be zeroized after transient credential construction and must never be persisted or treated as an account signing key.

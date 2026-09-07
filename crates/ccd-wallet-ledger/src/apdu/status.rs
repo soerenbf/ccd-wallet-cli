@@ -1,6 +1,7 @@
 //! Ledger APDU status-word handling.
 
 use crate::error::{LedgerError, Result};
+use zeroize::Zeroizing;
 
 /// Successful Ledger APDU status word.
 pub const STATUS_OK: u16 = 0x9000;
@@ -97,4 +98,47 @@ pub fn split_status_word(reply: Vec<u8>) -> Result<Vec<u8>> {
     ]));
     status.ensure_ok()?;
     Ok(reply[..status_index].to_vec())
+}
+
+/// Validate and remove the trailing status word from a secret APDU reply in place.
+///
+/// The raw reply is zeroized on every error path. On success, its allocation is retained for the
+/// zeroizing status-stripped payload.
+pub fn strip_secret_status_word_in_place(
+    mut reply: Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<Vec<u8>>> {
+    if reply.len() < 2 {
+        return Err(LedgerError::MalformedResponse {
+            actual_len: reply.len(),
+        });
+    }
+    let status_index = reply.len() - 2;
+    let status = StatusWord(u16::from_be_bytes([
+        reply[status_index],
+        reply[status_index + 1],
+    ]));
+    reply.truncate(status_index);
+    status.ensure_ok()?;
+    Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_secret_status_in_place() {
+        let mut raw = Zeroizing::new(vec![1, 2, 0x90, 0]);
+        let allocation = raw.as_mut_ptr();
+        let payload = strip_secret_status_word_in_place(raw).unwrap();
+        assert_eq!(payload.as_ptr(), allocation);
+        assert_eq!(&*payload, &[1, 2]);
+    }
+
+    #[test]
+    fn rejects_secret_status_without_copying_payload() {
+        let error =
+            strip_secret_status_word_in_place(Zeroizing::new(vec![1, 0x69, 0x85])).unwrap_err();
+        assert!(matches!(error, LedgerError::UserDeclined));
+    }
 }

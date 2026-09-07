@@ -78,9 +78,13 @@ CCD_WALLET_NODE_ENDPOINT=https://grpc.testnet.concordium.com:20000 \
 ```bash
 cargo run -p ccd-wallet -- node chain-parameters --network testnet
 cargo run -p ccd-wallet -- node chain-parameters --network testnet --block best --json
+cargo run -p ccd-wallet -- node chain-updates --network testnet
+cargo run -p ccd-wallet -- node chain-updates --network testnet --block best --json
 ```
 
 `node chain-parameters` queries all normalized parameters at the last finalized block unless `--block <BLOCK>` is supplied. It follows the same endpoint and active-network resolution behavior as other read-only commands, and `--no-defaults` forces explicit configured-network selection. Human output is sectioned; `--json` emits one pretty-printed camel-case document with the endpoint, resolved block hash, and stable parameter fields. Protocol-version-specific fields are `null` when unavailable. P11 responses include `maxLockDuration` and the `tokenParameters` governance authorization structure.
+
+`node chain-updates` uses the same selectors and output modes to show every next governance update sequence number together with all pending updates. The command first resolves the requested block selector and then queries pending updates at that concrete block hash, ensuring both sections describe one snapshot even for `best`. JSON output contains `endpoint`, `blockHash`, `nextSequenceNumbers`, and `pendingUpdates`; P11 output includes the `maxLockDuration` sequence queue and typed pending Max Lock Duration effects.
 
 ### Example: register and manage networks
 

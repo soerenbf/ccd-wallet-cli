@@ -24,10 +24,10 @@ use concordium_rust_sdk::{
         hashes::Hash,
         protocol_level_locks::{
             LockConfig, LockController, LockControllerSimpleV0, LockControllerSimpleV0Capability,
-            LockControllerSimpleV0Grant, LockId, LockInfo, LockRecipients,
+            LockControllerSimpleV0Grant, LockId, LockInfo, LockMetadata, LockRecipients,
         },
         protocol_level_tokens::{
-            MetadataUrl, TokenAdminRole, TokenAmount, TokenId, TokenModuleState,
+            MetadataUrl, RawCbor, TokenAdminRole, TokenAmount, TokenId, TokenModuleState,
         },
     },
     protocol_level_tokens::{LockInfoResponse, TokenInfo, token_client::TokenClient},
@@ -269,6 +269,17 @@ pub(super) fn prompt_token_ids() -> Result<Vec<TokenId>> {
 /// Prompt for a required string value.
 pub(super) fn prompt_required_string(prompt: &str) -> Result<String> {
     Ok(input(prompt).interact()?)
+}
+
+/// Prompt for optional text, treating empty input as absent.
+pub(super) fn prompt_optional_string(prompt: &str) -> Result<Option<String>> {
+    let value: String = input(prompt).required(false).interact()?;
+    Ok(normalize_optional_text(Some(value)))
+}
+
+/// Normalize optional user-facing text while preserving non-empty content.
+pub(super) fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// Resolve token admin roles from explicit CLI input or an interactive multi-select.
@@ -708,8 +719,12 @@ pub(super) fn render_lock_info(info: &LockInfo) -> Result<String> {
         format!("Lock ID: {}", info.lock),
         format!("Expiry: {}", format_transaction_time(info.expiry)?),
         String::new(),
-        "Recipients:".to_owned(),
+        "Metadata:".to_owned(),
     ];
+    lines.extend(render_lock_metadata_lines(info.metadata.as_ref()));
+
+    lines.push(String::new());
+    lines.push("Recipients:".to_owned());
     lines.extend(render_lock_recipients_lines(&info.recipients));
 
     lines.push(String::new());
@@ -765,6 +780,27 @@ pub(super) fn render_lock_info(info: &LockInfo) -> Result<String> {
     }
 
     Ok(lines.join("\n"))
+}
+
+fn render_lock_metadata_lines(metadata: Option<&RawCbor>) -> Vec<String> {
+    let Some(metadata) = metadata else {
+        return vec!["  none".to_owned()];
+    };
+    let Ok(metadata) = LockMetadata::decode_raw_cbor(metadata) else {
+        return vec!["  unrecognized".to_owned()];
+    };
+
+    let mut lines = Vec::new();
+    if let Some(name) = metadata.name {
+        lines.push(format!("  Name: {name}"));
+    }
+    if let Some(description) = metadata.description {
+        lines.push(format!("  Description: {description}"));
+    }
+    if lines.is_empty() {
+        lines.push("  no recognized fields".to_owned());
+    }
+    lines
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -957,6 +993,26 @@ pub(super) fn render_lock_recipients_lines(recipients: &LockRecipients) -> Vec<S
     }
 }
 
+/// Build raw lock metadata from the supported user-facing fields.
+pub(super) fn build_lock_metadata(
+    name: Option<String>,
+    description: Option<String>,
+) -> Option<RawCbor> {
+    let name = normalize_optional_text(name);
+    let description = normalize_optional_text(description);
+    if name.is_none() && description.is_none() {
+        return None;
+    }
+    Some(
+        LockMetadata {
+            name,
+            description,
+            ..Default::default()
+        }
+        .encode_raw_cbor(),
+    )
+}
+
 /// Build a simple-v0 lock configuration from CLI inputs.
 pub(super) fn build_lock_config(
     recipients: LockRecipientMode<AccountAddress>,
@@ -964,6 +1020,8 @@ pub(super) fn build_lock_config(
     grants: Vec<LockControllerSimpleV0Grant>,
     tokens: Vec<TokenId>,
     keep_alive: bool,
+    name: Option<String>,
+    description: Option<String>,
 ) -> LockConfig {
     let recipients = match recipients {
         LockRecipientMode::Any => LockRecipients::Any,
@@ -983,7 +1041,7 @@ pub(super) fn build_lock_config(
             keep_alive,
             memo: None,
         }),
-        metadata: None,
+        metadata: build_lock_metadata(name, description),
     }
 }
 
@@ -1050,15 +1108,16 @@ fn now_unix_seconds() -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LockRecipientMode, build_lock_config, parse_lock_grant_roles, parse_token_admin_role,
-        parse_token_amount, parse_unresolved_lock_grant, render_lock_recipient_mode,
-        render_lock_recipients_lines, render_token_admin_role,
+        LockRecipientMode, build_lock_config, build_lock_metadata, parse_lock_grant_roles,
+        parse_token_admin_role, parse_token_amount, parse_unresolved_lock_grant,
+        render_lock_metadata_lines, render_lock_recipient_mode, render_lock_recipients_lines,
+        render_token_admin_role,
     };
-    use concordium_rust_sdk::base::protocol_level_tokens::TokenAdminRole;
     use concordium_rust_sdk::base::{
         common::types::TransactionTime,
         contracts_common::AccountAddress,
-        protocol_level_locks::{LockControllerSimpleV0Capability, LockRecipients},
+        protocol_level_locks::{LockControllerSimpleV0Capability, LockMetadata, LockRecipients},
+        protocol_level_tokens::{RawCbor, TokenAdminRole},
     };
 
     #[test]
@@ -1137,6 +1196,8 @@ mod tests {
             Vec::new(),
             vec!["CCD".parse().unwrap()],
             false,
+            None,
+            None,
         );
         assert!(matches!(config.recipients, LockRecipients::Any));
     }
@@ -1150,10 +1211,74 @@ mod tests {
             Vec::new(),
             vec!["CCD".parse().unwrap()],
             false,
+            None,
+            None,
         );
         match config.recipients {
             LockRecipients::Limited(recipients) => assert_eq!(recipients[0].address, address),
             LockRecipients::Any => panic!("expected limited recipients"),
         }
+    }
+
+    #[test]
+    fn builds_only_supported_lock_metadata_fields() {
+        let raw = build_lock_metadata(
+            Some("Treasury vesting".to_owned()),
+            Some("Quarterly allocation".to_owned()),
+        )
+        .expect("metadata is present");
+        let metadata = LockMetadata::decode_raw_cbor(&raw).expect("metadata decodes");
+        assert_eq!(metadata.name.as_deref(), Some("Treasury vesting"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Quarterly allocation")
+        );
+        assert!(metadata.additional.is_empty());
+    }
+
+    #[test]
+    fn builds_partial_lock_metadata() {
+        let name_only =
+            build_lock_metadata(Some("Named".to_owned()), None).expect("name produces metadata");
+        let name_only = LockMetadata::decode_raw_cbor(&name_only).expect("metadata decodes");
+        assert_eq!(name_only.name.as_deref(), Some("Named"));
+        assert!(name_only.description.is_none());
+
+        let description_only = build_lock_metadata(None, Some("Described".to_owned()))
+            .expect("description produces metadata");
+        let description_only =
+            LockMetadata::decode_raw_cbor(&description_only).expect("metadata decodes");
+        assert!(description_only.name.is_none());
+        assert_eq!(description_only.description.as_deref(), Some("Described"));
+    }
+
+    #[test]
+    fn omits_empty_lock_metadata() {
+        assert!(build_lock_metadata(None, None).is_none());
+        assert!(build_lock_metadata(Some("  ".to_owned()), Some(String::new())).is_none());
+    }
+
+    #[test]
+    fn renders_absent_recognized_and_unrecognized_lock_metadata() {
+        assert_eq!(render_lock_metadata_lines(None), vec!["  none"]);
+
+        let raw = build_lock_metadata(
+            Some("Treasury vesting".to_owned()),
+            Some("Quarterly allocation".to_owned()),
+        )
+        .expect("metadata is present");
+        assert_eq!(
+            render_lock_metadata_lines(Some(&raw)),
+            vec![
+                "  Name: Treasury vesting".to_owned(),
+                "  Description: Quarterly allocation".to_owned(),
+            ]
+        );
+
+        let malformed = RawCbor::from(vec![0xff]);
+        assert_eq!(
+            render_lock_metadata_lines(Some(&malformed)),
+            vec!["  unrecognized"]
+        );
     }
 }

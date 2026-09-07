@@ -1,9 +1,10 @@
 //! Transport abstraction for APDU exchange with a Ledger device.
 
 use crate::{
-    apdu::{ApduCommand, ApduReply, split_status_word},
+    apdu::{ApduCommand, ApduReply, split_status_word, strip_secret_status_word_in_place},
     error::{LedgerError, Result},
 };
+use zeroize::Zeroizing;
 
 /// Minimal transport interface required by Concordium Ledger command logic.
 ///
@@ -54,6 +55,20 @@ pub trait LedgerTransport {
     fn exchange(&mut self, command: &ApduCommand) -> Result<ApduReply> {
         let data = split_status_word(self.exchange_raw(command)?)?;
         Ok(ApduReply::new(data))
+    }
+
+    /// Send a secret-export APDU command and return a zeroizing status-stripped payload.
+    ///
+    /// Unlike [`Self::exchange`], this path takes ownership of the raw transport reply directly
+    /// into a [`Zeroizing`] buffer and removes the APDU status word without copying the payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transport exchange fails, the reply is malformed, or the Ledger
+    /// app returns a non-success status word. Raw reply buffers are zeroized on all such errors.
+    fn exchange_secret(&mut self, command: &ApduCommand) -> Result<Zeroizing<Vec<u8>>> {
+        let reply = Zeroizing::new(self.exchange_raw(command)?);
+        strip_secret_status_word_in_place(reply)
     }
 }
 

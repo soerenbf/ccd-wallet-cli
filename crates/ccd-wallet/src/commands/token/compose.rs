@@ -331,6 +331,8 @@ async fn resolve_meta_update_operations(
                 expiry,
                 grants,
                 tokens,
+                name,
+                description,
                 keep_alive,
             } => {
                 let recipients = recipients.resolve_accounts(conn, context)?;
@@ -343,8 +345,15 @@ async fn resolve_meta_update_operations(
                     .iter()
                     .map(|token| parse_token_id(token))
                     .collect::<Result<Vec<_>>>()?;
-                let config =
-                    shared::build_lock_config(recipients, expiry, grants, tokens, *keep_alive);
+                let config = shared::build_lock_config(
+                    recipients,
+                    expiry,
+                    grants,
+                    tokens,
+                    *keep_alive,
+                    name.clone(),
+                    description.clone(),
+                );
                 operations.push(meta_operations::lock_create(config));
             }
             PlanOperation::LockFund {
@@ -1051,6 +1060,8 @@ fn resolve_operation_account_references(
             expiry,
             grants,
             tokens,
+            name,
+            description,
             keep_alive,
         } => PlanOperation::LockCreate {
             recipients: recipients.resolve_plan_accounts(conn, genesis_hash, unlocks)?,
@@ -1060,6 +1071,8 @@ fn resolve_operation_account_references(
                 .map(|grant| grant.resolve_account(conn, genesis_hash, unlocks))
                 .collect::<Result<Vec<_>>>()?,
             tokens,
+            name,
+            description,
             keep_alive,
         },
         PlanOperation::LockSend {
@@ -1308,6 +1321,8 @@ fn flag_candidates(words: &[String]) -> Vec<String> {
             "--expiry",
             "--grant",
             "--token",
+            "--name",
+            "--description",
             "--keep-alive",
         ],
         (Some("lock"), Some("fund")) => &["--token", "--amount"],
@@ -1594,13 +1609,26 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
     let action = words.required_word("lock action")?;
     let mut args = OperationArgs::from_words(words)?;
     match action.as_str() {
-        "create" => Ok(PlanOperation::LockCreate {
-            recipients: args.take_lock_recipients()?,
-            expiry: args.take_or_prompt("expiry", "Lock expiry:")?,
-            grants: args.take_lock_grants()?,
-            tokens: args.take_many_or_prompt("token", "Tokens (comma-separated):")?,
-            keep_alive: args.take_keep_alive()?,
-        }),
+        "create" => {
+            let recipients = args.take_lock_recipients()?;
+            let expiry = args.take_or_prompt("expiry", "Lock expiry:")?;
+            let grants = args.take_lock_grants()?;
+            let tokens = args.take_many_or_prompt("token", "Tokens (comma-separated):")?;
+            let name = args.take_optional_or_prompt("name", "Lock name (optional):")?;
+            let description =
+                args.take_optional_or_prompt("description", "Lock description (optional):")?;
+            let keep_alive = args.take_keep_alive()?;
+            args.ensure_no_remaining_values()?;
+            Ok(PlanOperation::LockCreate {
+                recipients,
+                expiry,
+                grants,
+                tokens,
+                name,
+                description,
+                keep_alive,
+            })
+        }
         "fund" => Ok(PlanOperation::LockFund {
             lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
             token: args.take_or_prompt("token", "Token identifier:")?,
@@ -1723,6 +1751,27 @@ impl OperationArgs {
             .map(|resolved| resolved.into_value())
     }
 
+    fn take_optional_or_prompt(
+        &mut self,
+        name: &'static str,
+        prompt: &str,
+    ) -> Result<Option<String>> {
+        match self.take_optional(name) {
+            Some(value) => Ok(shared::normalize_optional_text(Some(value))),
+            None => shared::prompt_optional_string(prompt),
+        }
+    }
+
+    fn ensure_no_remaining_values(&self) -> Result<()> {
+        if let Some((name, _)) = self.options.first() {
+            bail!("unknown lock create option '--{name}'");
+        }
+        if let Some(value) = self.positionals.front() {
+            bail!("unexpected lock create argument '{value}'");
+        }
+        Ok(())
+    }
+
     fn take_positional_or_prompt(&mut self, name: &'static str, prompt: &str) -> Result<String> {
         let input = Promptable::from_option(self.positionals.pop_front(), name);
         input
@@ -1835,7 +1884,7 @@ fn help_text() -> &'static str {
   admin-roles assign --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   admin-roles revoke --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   metadata update --token TOKEN --url URL [--checksum-sha256 HEX]
-  lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--keep-alive]
+  lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--name NAME] [--description DESCRIPTION] [--keep-alive]
   lock fund LOCK --token TOKEN --amount AMOUNT
   lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
   lock return LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
@@ -1852,6 +1901,7 @@ Session commands:
 Saved plan syntax:
   lock-create recipients = ["ACCOUNT", ...] for limited-recipient locks
   lock-create recipients = "any" for any-recipient locks, previewed as any eligible account
+  lock-create name and description are optional; no arbitrary metadata fields are supported
 
 Lock references:
   @          most recent preceding lock-create, canonicalized to @N on save
@@ -1943,6 +1993,10 @@ enum PlanOperation {
         expiry: String,
         grants: Vec<PlanLockGrant>,
         tokens: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
         #[serde(default)]
         keep_alive: bool,
     },
@@ -2165,19 +2219,35 @@ impl PlanOperation {
                 expiry,
                 grants,
                 tokens,
+                name,
+                description,
                 keep_alive,
-            } => format!(
-                "Create lock @{} for tokens [{}], recipients [{}], expiry {expiry}, grants [{}], keep alive {}",
-                lock_create_index.unwrap_or_default(),
-                tokens.join(", "),
-                recipients.preview(),
-                grants
-                    .iter()
-                    .map(PlanLockGrant::preview)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-                if *keep_alive { "yes" } else { "no" }
-            ),
+            } => {
+                let mut metadata = Vec::new();
+                if let Some(name) = name {
+                    metadata.push(format!("name: {name}"));
+                }
+                if let Some(description) = description {
+                    metadata.push(format!("description: {description}"));
+                }
+                let metadata = if metadata.is_empty() {
+                    "none".to_owned()
+                } else {
+                    metadata.join(", ")
+                };
+                format!(
+                    "Create lock @{} for tokens [{}], recipients [{}], expiry {expiry}, grants [{}], metadata [{metadata}], keep alive {}",
+                    lock_create_index.unwrap_or_default(),
+                    tokens.join(", "),
+                    recipients.preview(),
+                    grants
+                        .iter()
+                        .map(PlanLockGrant::preview)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    if *keep_alive { "yes" } else { "no" }
+                )
+            }
             Self::LockFund {
                 lock,
                 token,
@@ -2436,6 +2506,8 @@ mod tests {
                         capabilities: vec!["fund".to_owned()],
                     }],
                     tokens: vec!["CCD".to_owned()],
+                    name: None,
+                    description: None,
                     keep_alive: false,
                 },
                 PlanOperation::LockFund {
@@ -2482,7 +2554,89 @@ amount = "100"
         assert!(rendered.contains("Network:"));
         assert!(rendered.contains("1. Mint 100 CCD"));
         assert!(rendered.contains("2. Create lock @1"));
+        assert!(rendered.contains("metadata [none]"));
         assert!(rendered.contains("3. Fund lock @1 with 100 CCD"));
+    }
+
+    #[test]
+    fn parses_serializes_and_previews_lock_metadata() {
+        let plan: Plan = toml::from_str(
+            r#"
+version = 1
+
+[[operations]]
+type = "lock-create"
+recipients = "any"
+expiry = "30d"
+tokens = ["CCD"]
+name = "Treasury vesting"
+description = "Quarterly contributor allocation"
+
+[[operations.grants]]
+account = "alice"
+capabilities = ["fund"]
+"#,
+        )
+        .expect("valid metadata plan");
+        let serialized = toml::to_string_pretty(&plan).expect("serialize succeeds");
+        assert!(serialized.contains("name = \"Treasury vesting\""));
+        assert!(serialized.contains("description = \"Quarterly contributor allocation\""));
+        let rendered = render_plan_preview(&plan, None).expect("preview renders");
+        assert!(rendered.contains("name: Treasury vesting"));
+        assert!(rendered.contains("description: Quarterly contributor allocation"));
+    }
+
+    #[test]
+    fn compose_lock_config_encodes_supported_metadata() {
+        let config = shared::build_lock_config(
+            shared::LockRecipientMode::Any,
+            TransactionTime::from_seconds(1),
+            Vec::new(),
+            vec!["CCD".parse().expect("valid token id")],
+            false,
+            Some("Treasury vesting".to_owned()),
+            Some("Quarterly contributor allocation".to_owned()),
+        );
+        let raw = config.metadata.expect("metadata is encoded");
+        let metadata =
+            concordium_rust_sdk::base::protocol_level_locks::LockMetadata::decode_raw_cbor(&raw)
+                .expect("metadata decodes");
+        assert_eq!(metadata.name.as_deref(), Some("Treasury vesting"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Quarterly contributor allocation")
+        );
+        assert!(metadata.additional.is_empty());
+    }
+
+    #[test]
+    fn preserves_lock_metadata_when_resolving_account_references() {
+        let operation = PlanOperation::LockCreate {
+            recipients: PlanLockRecipients::any(),
+            expiry: "30d".to_owned(),
+            grants: vec![PlanLockGrant {
+                account: "@sender".to_owned(),
+                capabilities: vec!["fund".to_owned()],
+            }],
+            tokens: vec!["CCD".to_owned()],
+            name: Some("Treasury vesting".to_owned()),
+            description: Some("Quarterly contributor allocation".to_owned()),
+            keep_alive: false,
+        };
+        let conn = Connection::open_in_memory().expect("in-memory db opens");
+        let mut unlocks = AccountReferenceUnlocks::new();
+        let resolved =
+            resolve_operation_account_references(&conn, "genesis-a", operation, &mut unlocks)
+                .expect("references resolve");
+        assert!(matches!(
+            resolved,
+            PlanOperation::LockCreate {
+                name: Some(name),
+                description: Some(description),
+                ..
+            } if name == "Treasury vesting"
+                && description == "Quarterly contributor allocation"
+        ));
     }
 
     #[test]
@@ -2571,6 +2725,8 @@ capabilities = ["fund"]
                 capabilities: vec!["fund".to_owned()],
             }],
             tokens: vec!["CCD".to_owned()],
+            name: None,
+            description: None,
             keep_alive: false,
         });
         plan.operations.push(PlanOperation::LockFund {
@@ -2604,6 +2760,8 @@ capabilities = ["fund"]
             .collect::<Vec<_>>();
         assert!(flags.contains(&"--recipient".to_owned()));
         assert!(flags.contains(&"--any-recipient".to_owned()));
+        assert!(flags.contains(&"--name".to_owned()));
+        assert!(flags.contains(&"--description".to_owned()));
         assert!(flags.contains(&"--keep-alive".to_owned()));
     }
 
@@ -2624,6 +2782,8 @@ capabilities = ["fund"]
                 capabilities: vec!["fund".to_owned()],
             }],
             tokens: vec!["CCD".to_owned()],
+            name: None,
+            description: None,
             keep_alive: false,
         });
         save_plan_atomic(&path, &plan).expect("save succeeds");
@@ -2650,6 +2810,9 @@ capabilities = ["fund"]
         assert!(help.contains("<lock-id>"));
         assert!(help.contains("base58check lock id"));
         assert!(help.contains("Account references:"));
+        assert!(help.contains("--name NAME"));
+        assert!(help.contains("--description DESCRIPTION"));
+        assert!(help.contains("no arbitrary metadata fields"));
         assert!(help.contains("@sender"));
     }
 
@@ -2689,23 +2852,30 @@ capabilities = ["fund"]
     #[test]
     fn parses_add_lock_create_with_inline_structured_grant() {
         let command = parse_repl_command(
-            "lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD --keep-alive",
+            "lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD --name 'Treasury vesting' --description 'Quarterly allocation' --keep-alive",
         )
         .expect("parse succeeds");
         assert!(matches!(
             command,
-            ReplCommand::Add(PlanOperation::LockCreate { grants, keep_alive: true, .. })
-                if grants == vec![PlanLockGrant {
+            ReplCommand::Add(PlanOperation::LockCreate {
+                grants,
+                name: Some(name),
+                description: Some(description),
+                keep_alive: true,
+                ..
+            }) if grants == vec![PlanLockGrant {
                     account: "alice".to_owned(),
                     capabilities: vec!["fund".to_owned(), "send".to_owned()],
                 }]
+                && name == "Treasury vesting"
+                && description == "Quarterly allocation"
         ));
     }
 
     #[test]
     fn parses_add_lock_create_with_any_recipient() {
         let command = parse_repl_command(
-            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --keep-alive",
+            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description '' --keep-alive",
         )
         .expect("parse succeeds");
         assert!(matches!(
@@ -2731,6 +2901,18 @@ capabilities = ["fund"]
         )
         .expect_err("parse must fail");
         assert!(err.to_string().contains("nonsense"));
+    }
+
+    #[test]
+    fn rejects_arbitrary_lock_metadata_option() {
+        let err = parse_repl_command(
+            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description '' --issuer Concordium --keep-alive",
+        )
+        .expect_err("arbitrary metadata option must fail");
+        assert!(
+            err.to_string()
+                .contains("unknown lock create option '--issuer'")
+        );
     }
 
     #[test]

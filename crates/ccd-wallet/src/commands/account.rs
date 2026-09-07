@@ -5,7 +5,8 @@ use crate::{
     },
     commands::{
         input::{Defaultable, InputMode, Promptable},
-        ledger_construction::{self, LedgerCredentialDeploymentInput},
+        ledger,
+        ledger_construction::{self, LedgerAccountCredentialDeploymentInput},
         stake::shared::{
             StakeDetailsView, render_stake_details_lines, stake_details_view_from_account_info,
         },
@@ -34,7 +35,8 @@ use ccd_wallet_core::{
     wallet::{ConcordiumHdWallet, Net},
 };
 use ccd_wallet_identity_provider::client::{self, PollResult};
-use cliclack::{input, password, select, spinner};
+use ccd_wallet_ledger::{ConcordiumLedgerApp, ExportPrivateKeyNetwork, HidTransport};
+use cliclack::{confirm, input, password, select, spinner};
 use concordium_rust_sdk::{
     common::types::{AccountAddress, KeyIndex, KeyPair},
     id::{
@@ -882,9 +884,10 @@ async fn rename_account(conn: &mut Connection, args: AccountRenameArgs) -> Resul
 }
 
 async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
-    let (key_source_label, key_source_source) = resolve_seed_label(
+    let (key_source_label, key_source_source) = resolve_key_source_label(
         conn,
         args.seed.as_deref(),
+        args.ledger,
         args.non_interactive,
         args.no_defaults,
     )?;
@@ -897,7 +900,6 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
             args.no_defaults,
         )
         .await?;
-
     log_resolved_context(&[
         ContextLine {
             label: "key source:",
@@ -920,7 +922,6 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         args.identity.as_deref(),
         args.non_interactive,
     )?;
-
     let label = resolve_account_label(args.label, args.non_interactive)?;
     validate_label("account", &label)?;
     if accounts::find_by_network_and_label(conn, &network_entry.genesis_hash, &label)?.is_some() {
@@ -930,7 +931,6 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
             network_name
         );
     }
-
     log_resolved_context(&[ContextLine {
         label: "identity:",
         value: identity.label.clone(),
@@ -938,50 +938,45 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
     }])?;
 
     if owner.kind == SignerOwnerKind::Ledger {
-        let details = signer_owners::find_ledger_details_by_owner_id(conn, &owner.id)?
-            .with_context(|| {
-                format!(
-                    "Ledger key source '{}' has no enrollment details",
-                    owner.label
-                )
-            })?;
-        let credential_counter = accounts::next_credential_counter(
-            conn,
-            &network_entry.genesis_hash,
-            &owner.id,
-            identity.ip_identity,
-            identity.identity_index,
+        approve_ledger_secret_export(
+            &owner.label,
+            args.non_interactive,
+            args.allow_ledger_secret_export,
         )?;
-        let credential_counter_u8 = credential_counter_to_u8(credential_counter)?;
-        ledger_construction::construct_credential_deployment(LedgerCredentialDeploymentInput {
-            owner_details: &details,
-            network_genesis_hash: &network_entry.genesis_hash,
-            ip_identity: identity.ip_identity,
-            identity_index: identity.identity_index,
-            credential_counter: credential_counter_u8,
-        })?;
     }
 
-    let seed = seeds::find_by_label(conn, &key_source_label)?
-        .with_context(|| format!("seed '{}' is not configured", key_source_label))?;
-    let password: String = password(format!("Password for seed '{}': ", seed.label))
-        .allow_empty()
-        .interact()?;
-    let unlocked_seed = seeds::unlock_context(conn, &seed.label, &password)?;
+    let (owner_dek, seed_phrase) = match owner.kind {
+        SignerOwnerKind::Seed => {
+            let seed = seeds::find_by_label(conn, &key_source_label)?
+                .with_context(|| format!("seed '{}' is not configured", key_source_label))?;
+            let password: String = password(format!("Password for seed '{}': ", seed.label))
+                .allow_empty()
+                .interact()?;
+            let unlocked = seeds::unlock_context(conn, &seed.label, &password)?;
+            let phrase = std::str::from_utf8(&unlocked.secret)
+                .context("stored seed phrase is not UTF-8")?
+                .to_owned();
+            (unlocked.dek, Some(phrase))
+        }
+        SignerOwnerKind::Ledger => {
+            let password: String = password(format!(
+                "Local password for Ledger key source '{}': ",
+                owner.label
+            ))
+            .allow_empty()
+            .interact()?;
+            let unlocked = signer_owners::unlock_by_id(conn, &owner.id, &password)?;
+            (unlocked.dek, None)
+        }
+    };
 
     if identity.status == IdentityStatus::Pending {
         let spin = spinner();
         spin.start("Checking pending identity status...");
-        identity = confirm_identity_if_pending(conn, identity, &unlocked_seed.dek).await?;
+        identity = confirm_identity_if_pending(conn, identity, &owner_dek).await?;
         spin.clear();
     }
     ensure_identity_selectable(&identity, now_unix_seconds()?)?;
-
-    let seed_phrase = std::str::from_utf8(&unlocked_seed.secret)
-        .context("stored seed phrase is not UTF-8")?
-        .to_owned();
-    let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
-    let wallet = ConcordiumHdWallet::from_seed_phrase(&seed_phrase, net)?;
 
     let spin = spinner();
     spin.start(format!("Connecting to node: {endpoint_label}"));
@@ -989,7 +984,6 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         .await
         .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
     spin.clear();
-
     let spin = spinner();
     spin.start("Fetching chain cryptographic parameters...");
     let global_context = client
@@ -998,7 +992,6 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
         .with_context(|| format!("failed to load cryptographic parameters from {endpoint_label}"))?
         .response;
     spin.clear();
-
     let spin = spinner();
     spin.start("Fetching identity providers...");
     let ip_infos = fetch_identity_providers(&mut client).await?;
@@ -1012,51 +1005,88 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
                 identity.ip_identity
             )
         })?;
-
     let spin = spinner();
     spin.start("Fetching anonymity revokers...");
     let ar_infos = fetch_anonymity_revokers(&mut client).await?;
     spin.clear();
 
-    let identity_payload =
-        identities::decrypt_private_payload(conn, identity.id, &unlocked_seed.dek)?;
-    let identity_object = identity_payload
-        .identity_object()
-        .context("identity has no stored identity object")?;
-    let identity_object = parse_identity_object(identity_object)?;
+    let identity_payload = identities::decrypt_private_payload(conn, identity.id, &owner_dek)?;
+    let identity_object = parse_identity_object(
+        identity_payload
+            .identity_object()
+            .context("identity has no stored identity object")?,
+    )?;
     let credential_counter = accounts::next_credential_counter(
         conn,
         &network_entry.genesis_hash,
-        &unlocked_seed.record.id,
+        &owner.id,
         identity.ip_identity,
         identity.identity_index,
     )?;
     let credential_counter_u8 = credential_counter_to_u8(credential_counter)?;
+    let spin = spinner();
+    spin.start("Constructing account credential deployment...");
+    let credential_deployment = match owner.kind {
+        SignerOwnerKind::Seed => {
+            let wallet = ConcordiumHdWallet::from_seed_phrase(
+                seed_phrase
+                    .as_deref()
+                    .context("seed phrase missing for seed owner")?,
+                crate::commands::seed::infer_net(&network_entry.genesis_hash),
+            )?;
+            build_credential_deployment(CredentialDeploymentInput {
+                wallet: &wallet,
+                ip_info,
+                ar_infos: &ar_infos,
+                global_context: &global_context,
+                identity_object,
+                identity_index: identity.identity_index,
+                credential_counter: credential_counter_u8,
+            })?
+        }
+        SignerOwnerKind::Ledger => {
+            let transport = HidTransport::open_first().context(
+                "failed to open Ledger device; connect a Ledger with the Concordium app open",
+            )?;
+            let mut app = ConcordiumLedgerApp::new(transport);
+            ledger::verify_connected_ledger_owner(conn, &owner.id, &mut app)?;
+            let net = crate::commands::seed::infer_net(&network_entry.genesis_hash);
+            ledger_construction::construct_credential_deployment_with_app(
+                LedgerAccountCredentialDeploymentInput {
+                    export_network: match net {
+                        Net::Mainnet => ExportPrivateKeyNetwork::Mainnet,
+                        Net::Testnet => ExportPrivateKeyNetwork::Testnet,
+                    },
+                    coin_type: match net {
+                        Net::Mainnet => 919,
+                        Net::Testnet => 1,
+                    },
+                    ip_info,
+                    ar_infos: &ar_infos,
+                    global_context: &global_context,
+                    identity_object,
+                    ip_identity: identity.ip_identity,
+                    identity_index: identity.identity_index,
+                    credential_counter: credential_counter_u8,
+                    approved_secret_export: true,
+                },
+                &mut app,
+            )?
+        }
+    };
+    spin.clear();
+
     let account_id = accounts::insert_pending(
         conn,
         accounts::PendingAccount {
             network_genesis_hash: &network_entry.genesis_hash,
-            signer_owner_id: &unlocked_seed.record.id,
+            signer_owner_id: &owner.id,
             ip_identity: identity.ip_identity,
             identity_index: identity.identity_index,
             credential_counter,
             label: &label,
         },
     )?;
-
-    let spin = spinner();
-    spin.start("Constructing account credential deployment...");
-    let credential_deployment = build_credential_deployment(CredentialDeploymentInput {
-        wallet: &wallet,
-        ip_info,
-        ar_infos: &ar_infos,
-        global_context: &global_context,
-        identity_object,
-        identity_index: identity.identity_index,
-        credential_counter: credential_counter_u8,
-    })?;
-    spin.clear();
-
     let block_item: BlockItem<Payload> = BlockItem::from(credential_deployment);
     let spin = spinner();
     spin.start("Submitting account credential deployment...");
@@ -1067,14 +1097,12 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
     spin.clear();
     let transaction_hash_label = format!("{transaction_hash}");
     accounts::set_submitted_transaction(conn, account_id, &transaction_hash_label)?;
-
     if args.no_wait {
         cliclack::log::success(format!(
             "Account '{label}' submitted and pending finalization. Transaction hash: {transaction_hash_label}"
         ))?;
         return Ok(());
     }
-
     let spin = spinner();
     spin.start("Waiting for account creation finalization...");
     let (_block_hash, summary) = client
@@ -1090,7 +1118,7 @@ async fn new(conn: &mut Connection, args: AccountNewArgs) -> Result<()> {
     accounts::set_finalized(
         conn,
         account_id,
-        &unlocked_seed.dek,
+        &owner_dek,
         Some(&transaction_hash_label),
         &account_address,
     )?;
@@ -2891,12 +2919,22 @@ fn prompt_account_label_with_default(prompt: &str, default: &str) -> Result<Stri
     Ok(label)
 }
 
-fn resolve_seed_label(
+fn resolve_key_source_label(
     conn: &Connection,
     explicit: Option<&str>,
+    ledger_source: bool,
     non_interactive: bool,
     no_defaults: bool,
 ) -> Result<(String, ResolutionSource)> {
+    if ledger_source {
+        let transport = HidTransport::open_first().context(
+            "failed to open Ledger device; connect a Ledger with the Concordium app open",
+        )?;
+        let mut app = ConcordiumLedgerApp::new(transport);
+        let owner = ledger::resolve_connected_ledger_owner(conn, &mut app)?;
+        return Ok((owner.label, ResolutionSource::Explicit));
+    }
+
     if let Some(label) = explicit {
         return signer_owners::find_by_label(conn, label)?
             .map(|owner| (owner.label, ResolutionSource::Explicit))
@@ -2929,6 +2967,31 @@ fn resolve_seed_label(
     .with_context(
         || "No active key source. Run `ccd-wallet seed use <LABEL>` or supply `--key-source <LABEL>`.",
     )
+}
+
+fn approve_ledger_secret_export(
+    key_source_label: &str,
+    non_interactive: bool,
+    allow_ledger_secret_export: bool,
+) -> Result<()> {
+    if allow_ledger_secret_export {
+        return Ok(());
+    }
+    if non_interactive {
+        bail!(
+            "Ledger account creation for key source '{key_source_label}' requires secret export; rerun with --allow-ledger-secret-export to explicitly allow this non-interactive flow"
+        );
+    }
+
+    let approved = confirm(format!(
+        "Ledger account creation for key source '{key_source_label}' temporarily exports secrets to construct proofs on this host. Final credential signing remains on the Ledger device. Continue?"
+    ))
+    .initial_value(false)
+    .interact()?;
+    if !approved {
+        bail!("Ledger secret export was declined; no local account state was written");
+    }
+    Ok(())
 }
 
 fn prompt_for_seed_label(conn: &Connection, active: Option<&str>) -> Result<String> {
@@ -3384,6 +3447,17 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrations::run(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn non_interactive_ledger_export_requires_allow_flag() {
+        let err = approve_ledger_secret_export("ledger", true, false).unwrap_err();
+        assert!(err.to_string().contains("--allow-ledger-secret-export"));
+    }
+
+    #[test]
+    fn explicit_ledger_export_flag_skips_interactive_approval() {
+        approve_ledger_secret_export("ledger", false, true).unwrap();
     }
 
     fn identity(status: IdentityStatus, expires_at: Option<i64>) -> IdentityRecord {

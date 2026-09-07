@@ -65,9 +65,10 @@ pub async fn run(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
 }
 
 async fn run_with_callback_session(conn: &mut Connection, args: IdentityNewArgs) -> Result<()> {
-    let (key_source_label, key_source_source) = resolve_seed_label(
+    let (key_source_label, key_source_source) = resolve_key_source_label(
         conn,
         args.seed.as_deref(),
+        args.ledger,
         args.non_interactive,
         args.no_defaults,
     )?;
@@ -450,12 +451,22 @@ fn resolve_identity_label(explicit: Option<String>, non_interactive: bool) -> Re
         .map(|resolved| resolved.into_value())
 }
 
-fn resolve_seed_label(
+fn resolve_key_source_label(
     conn: &Connection,
     explicit: Option<&str>,
+    ledger: bool,
     non_interactive: bool,
     no_defaults: bool,
 ) -> Result<(String, ResolutionSource)> {
+    if ledger {
+        let transport = HidTransport::open_first().context(
+            "failed to open Ledger device; connect a Ledger with the Concordium app open",
+        )?;
+        let mut app = ConcordiumLedgerApp::new(transport);
+        let owner = crate::commands::ledger::resolve_connected_ledger_owner(conn, &mut app)?;
+        return Ok((owner.label, ResolutionSource::Explicit));
+    }
+
     match explicit {
         Some(label) => signer_owners::find_by_label(conn, label)?
             .map(|owner| (owner.label, ResolutionSource::Explicit))

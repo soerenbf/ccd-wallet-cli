@@ -26,6 +26,8 @@ struct PreparedTokenLockCreate {
     expiry: Promptable<String>,
     grants: Vec<String>,
     tokens: Vec<TokenId>,
+    name: Option<String>,
+    description: Option<String>,
     keep_alive: bool,
 }
 
@@ -46,6 +48,8 @@ impl PreparedTokenLockCreate {
             expiry: Promptable::from_option(args.expiry, "expiry"),
             grants: args.grants,
             tokens: args.tokens,
+            name: args.name,
+            description: args.description,
             keep_alive: args.keep_alive,
         })
     }
@@ -241,6 +245,18 @@ fn confirm_validation_bypass(error: &str) -> Result<bool> {
         .map_err(Into::into)
 }
 
+fn resolve_optional_metadata_field(
+    value: Option<String>,
+    prompts_allowed: bool,
+    prompt: &str,
+) -> Result<Option<String>> {
+    match value {
+        Some(value) => Ok(shared::normalize_optional_text(Some(value))),
+        None if prompts_allowed => shared::prompt_optional_string(prompt),
+        None => Ok(None),
+    }
+}
+
 /// Create a protocol-level lock.
 pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Result<()> {
     let prepared = PreparedTokenLockCreate::from_args(args)?;
@@ -282,22 +298,42 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
     } else {
         prepared.tokens.clone()
     };
+    let name = resolve_optional_metadata_field(
+        prepared.name.clone(),
+        prepared.context.input_mode().prompts_allowed(),
+        "Lock name (optional):",
+    )?;
+    let description = resolve_optional_metadata_field(
+        prepared.description.clone(),
+        prepared.context.input_mode().prompts_allowed(),
+        "Lock description (optional):",
+    )?;
     let token_summary = tokens
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
     let recipient_summary = shared::render_lock_recipient_mode(&recipients);
-    let config = shared::build_lock_config(recipients, expiry, grants, tokens, keep_alive);
+    let config = shared::build_lock_config(
+        recipients,
+        expiry,
+        grants,
+        tokens,
+        keep_alive,
+        name.clone(),
+        description.clone(),
+    );
 
     cliclack::log::info(format!(
-        "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nkeep alive: {}",
+        "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nname: {}\ndescription: {}\nkeep alive: {}",
         context.network_name,
         context.endpoint_label,
         context.wallet.address,
         recipient_summary,
         expiry_input,
         token_summary,
+        name.as_deref().unwrap_or("none"),
+        description.as_deref().unwrap_or("none"),
         if keep_alive { "yes" } else { "no" },
     ))?;
     if !shared::confirm_submission(

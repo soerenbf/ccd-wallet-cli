@@ -12,6 +12,7 @@ hid = ["dep:hidapi"]
 [dependencies]
 concordium-rust-sdk = { workspace = true, optional = true }
 hidapi = { workspace = true, optional = true }
+zeroize.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

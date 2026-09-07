@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256, Sha512};
+use zeroize::Zeroizing;
 
 use concordium_rust_sdk::base::{
     base::CredentialRegistrationID,
@@ -21,6 +22,101 @@ const ED25519_CURVE: &[u8] = b"ed25519 seed";
 pub type Fr = BaseField;
 pub type CredId = <ArCurve as Curve>::Scalar;
 pub type PrfKey = dodis_yampolskiy_prf::SecretKey<ArCurve>;
+
+/// A zeroizing extended Ed25519 SLIP-10 node.
+///
+/// The node contains the private key and chain code needed to derive hardened child nodes. It is
+/// used for transient Ledger account-creation commitment-randomness exports.
+pub struct ExtendedSlip10Node {
+    private_key: Zeroizing<[u8; 32]>,
+    chain_code: Zeroizing<[u8; 32]>,
+}
+
+impl ExtendedSlip10Node {
+    /// Construct an extended node from `private_key || chain_code` bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Zeroizing 64-byte extended-node encoding.
+    ///
+    /// # Returns
+    ///
+    /// A node that clears its private key and chain code when dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ccd_wallet_core::wallet::ExtendedSlip10Node;
+    /// use zeroize::Zeroizing;
+    ///
+    /// let node = ExtendedSlip10Node::from_bytes(Zeroizing::new([0; 64]));
+    /// let _child = node.derive_hardened_child(0).unwrap();
+    /// ```
+    pub fn from_bytes(bytes: Zeroizing<[u8; 64]>) -> Self {
+        let mut private_key = Zeroizing::new([0; 32]);
+        private_key.copy_from_slice(&bytes[..32]);
+        let mut chain_code = Zeroizing::new([0; 32]);
+        chain_code.copy_from_slice(&bytes[32..]);
+        Self {
+            private_key,
+            chain_code,
+        }
+    }
+
+    /// Derive a hardened child node.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Unhardened child index, which must be smaller than `2^31`.
+    ///
+    /// # Returns
+    ///
+    /// A zeroizing node containing the derived child private key and chain code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `index` cannot be represented as a hardened SLIP-10 index.
+    pub fn derive_hardened_child(&self, index: u32) -> Result<Self> {
+        let index = harden(index)?;
+        let mut data = Zeroizing::new([0u8; 37]);
+        data[1..33].copy_from_slice(&self.private_key[..]);
+        data[33..].copy_from_slice(&index.to_be_bytes());
+
+        let mut mac = Hmac::<Sha512>::new_from_slice(&self.chain_code[..])
+            .expect("HMAC accepts keys of any length");
+        mac.update(&data[..]);
+        // `GenericArray` returned by `hmac` does not implement `Zeroize`; copy it immediately
+        // into the zeroizing child representation.
+        let digest = mac.finalize().into_bytes();
+        let mut child = Zeroizing::new([0; 64]);
+        child.copy_from_slice(&digest);
+
+        let mut private_key = Zeroizing::new([0; 32]);
+        private_key.copy_from_slice(&child[..32]);
+        let mut chain_code = Zeroizing::new([0; 32]);
+        chain_code.copy_from_slice(&child[32..]);
+        Ok(Self {
+            private_key,
+            chain_code,
+        })
+    }
+
+    /// Borrow this node's zeroizing private key.
+    fn private_key(&self) -> &Zeroizing<[u8; 32]> {
+        &self.private_key
+    }
+
+    /// Derive commitment randomness for a hardened attribute tag.
+    pub fn derive_attribute_commitment_randomness(
+        &self,
+        attribute_tag: AttributeTag,
+    ) -> Result<CommitmentRandomness<ArCurve>> {
+        let child = self.derive_hardened_child(u32::from(attribute_tag.0))?;
+        Ok(CommitmentRandomness::new(keygen_bls(
+            &**child.private_key(),
+        )?))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Net {
@@ -55,12 +151,13 @@ impl ConcordiumHdWallet {
         Ok(Self { seed, net })
     }
 
+    /// Derive the zeroizing account signing key for a credential.
     pub fn get_account_signing_key(
         &self,
         identity_provider_index: u32,
         identity_index: u32,
         credential_counter: u32,
-    ) -> Result<[u8; 32]> {
+    ) -> Result<Zeroizing<[u8; 32]>> {
         self.derive_identity_key(
             identity_provider_index,
             identity_index,
@@ -91,12 +188,12 @@ impl ConcordiumHdWallet {
         identity_index: u32,
     ) -> Result<CredId> {
         let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 2)?;
-        keygen_bls(&key_seed)
+        keygen_bls(&*key_seed)
     }
 
     pub fn get_prf_key(&self, identity_provider_index: u32, identity_index: u32) -> Result<PrfKey> {
         let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 3)?;
-        Ok(PrfKey::new(keygen_bls(&key_seed)?))
+        Ok(PrfKey::new(keygen_bls(&*key_seed)?))
     }
 
     pub fn get_blinding_randomness(
@@ -105,7 +202,7 @@ impl ConcordiumHdWallet {
         identity_index: u32,
     ) -> Result<SigRetrievalRandomness<IpPairing>> {
         let key_seed = self.derive_identity_key_leaf(identity_provider_index, identity_index, 4)?;
-        Ok(SigRetrievalRandomness::new(keygen_bls(&key_seed)?))
+        Ok(SigRetrievalRandomness::new(keygen_bls(&*key_seed)?))
     }
 
     pub fn get_credential_registration_id(
@@ -138,7 +235,7 @@ impl ConcordiumHdWallet {
             5,
             [credential_counter, u32::from(attribute_tag.0)],
         )?;
-        Ok(CommitmentRandomness::new(keygen_bls(&key_seed)?))
+        Ok(CommitmentRandomness::new(keygen_bls(&*key_seed)?))
     }
 
     fn derive_identity_key_leaf(
@@ -146,7 +243,7 @@ impl ConcordiumHdWallet {
         identity_provider_index: u32,
         identity_index: u32,
         leaf: u32,
-    ) -> Result<[u8; 32]> {
+    ) -> Result<Zeroizing<[u8; 32]>> {
         self.derive_identity_key(identity_provider_index, identity_index, leaf, [])
     }
 
@@ -156,7 +253,7 @@ impl ConcordiumHdWallet {
         identity_index: u32,
         leaf: u32,
         suffix: impl IntoIterator<Item = u32>,
-    ) -> Result<[u8; 32]> {
+    ) -> Result<Zeroizing<[u8; 32]>> {
         let mut path = vec![
             harden(44)?,
             harden(self.net.net_code())?,
@@ -178,42 +275,35 @@ pub fn harden(index: u32) -> Result<u32> {
     Ok(index + HARDENED_OFFSET)
 }
 
-pub fn slip10_derive(seed: &[u8; 64], path: &[u32]) -> [u8; 32] {
+/// Derive a zeroizing private key from a hardened SLIP-10 path.
+pub fn slip10_derive(seed: &[u8; 64], path: &[u32]) -> Zeroizing<[u8; 32]> {
+    let node = slip10_derive_extended(seed, path);
+    Zeroizing::new(**node.private_key())
+}
+
+fn slip10_derive_extended(seed: &[u8; 64], path: &[u32]) -> ExtendedSlip10Node {
     let mut mac =
         Hmac::<Sha512>::new_from_slice(ED25519_CURVE).expect("HMAC accepts keys of any length");
     mac.update(seed);
-    let master = mac.finalize().into_bytes();
+    // `GenericArray` returned by `hmac` does not implement `Zeroize`; copy it immediately
+    // into the zeroizing extended-node representation.
+    let digest = mac.finalize().into_bytes();
+    let mut master = Zeroizing::new([0; 64]);
+    master.copy_from_slice(&digest);
+    let node = ExtendedSlip10Node::from_bytes(master);
 
-    let mut private_key = [0u8; 32];
-    private_key.copy_from_slice(&master[..32]);
-    let mut chain_code = [0u8; 32];
-    chain_code.copy_from_slice(&master[32..]);
-
-    for index in path {
+    path.iter().fold(node, |node, index| {
         assert!(
             index & HARDENED_OFFSET != 0,
             "SLIP-0010 path must be hardened"
         );
-
-        let mut data = Vec::with_capacity(37);
-        data.push(0);
-        data.extend_from_slice(&private_key);
-        data.extend_from_slice(&index.to_be_bytes());
-
-        let mut mac =
-            Hmac::<Sha512>::new_from_slice(&chain_code).expect("HMAC accepts keys of any length");
-        mac.update(&data);
-        let child = mac.finalize().into_bytes();
-
-        private_key.copy_from_slice(&child[..32]);
-        chain_code.copy_from_slice(&child[32..]);
-    }
-
-    private_key
+        node.derive_hardened_child(index - HARDENED_OFFSET)
+            .expect("validated hardened SLIP-10 index")
+    })
 }
 
-pub fn keygen_bls(key_seed: &[u8; 32]) -> Result<Fr> {
-    let mut ikm = key_seed.to_vec();
+pub fn keygen_bls(key_seed: &[u8]) -> Result<Fr> {
+    let mut ikm = Zeroizing::new(key_seed.to_vec());
     ikm.push(0);
 
     let key_info = b"";
@@ -229,18 +319,20 @@ pub fn keygen_bls(key_seed: &[u8; 32]) -> Result<Fr> {
 
     while sk.is_zero() {
         let (_, hkdf) = hkdf::Hkdf::<Sha256>::extract(Some(&salt), &ikm);
-        let mut okm = vec![0u8; l as usize];
+        let mut okm = Zeroizing::new(vec![0u8; l as usize]);
         hkdf.expand(&l_bytes, &mut okm)
             .map_err(|_| anyhow::anyhow!("failed to expand BLS key material"))?;
         okm.reverse();
 
-        let mut y1_vec = [0u8; 32];
-        let mut y2_vec = [0u8; 32];
+        let mut y1_vec = Zeroizing::new([0u8; 32]);
+        let mut y2_vec = Zeroizing::new([0u8; 32]);
         y1_vec[..31].copy_from_slice(&okm[..31]);
         y2_vec[..17].copy_from_slice(&okm[31..]);
 
-        let y1 = ArCurve::scalar_from_bytes(y1_vec);
-        let mut y2 = ArCurve::scalar_from_bytes(y2_vec);
+        // The SDK takes scalar encodings by value, so these are the unavoidable final
+        // third-party value constructions; their source buffers remain zeroizing.
+        let y1 = ArCurve::scalar_from_bytes(*y1_vec);
+        let mut y2 = ArCurve::scalar_from_bytes(*y2_vec);
         y2.mul_assign(&shift);
         sk = y1;
         sk.add_assign(&y2);
@@ -261,6 +353,29 @@ mod tests {
         let decoded = hex::decode(TEST_SEED_1).unwrap();
         let seed: [u8; 64] = decoded.try_into().unwrap();
         ConcordiumHdWallet { seed, net }
+    }
+
+    #[test]
+    fn extended_node_attribute_children_match_full_seed_paths() {
+        let wallet = wallet(Net::Mainnet);
+        let root_path = [
+            harden(44).unwrap(),
+            harden(Net::Mainnet.net_code()).unwrap(),
+            harden(5).unwrap(),
+            harden(0).unwrap(),
+            harden(5).unwrap(),
+            harden(4).unwrap(),
+        ];
+        let root = slip10_derive_extended(&wallet.seed, &root_path);
+
+        for tag in [0u8, 1, 47] {
+            let child = root.derive_hardened_child(u32::from(tag)).unwrap();
+            let derived = CommitmentRandomness::new(keygen_bls(&**child.private_key()).unwrap());
+            let full_path = wallet
+                .get_attribute_commitment_randomness(5, 0, 4, AttributeTag(tag))
+                .unwrap();
+            assert_eq!(derived, full_path, "attribute tag {tag}");
+        }
     }
 
     #[test]

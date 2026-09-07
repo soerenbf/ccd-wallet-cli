@@ -396,12 +396,14 @@ pub struct PublicInfoForIpSigningRequest {
 pub struct CredentialSigningPayload {
     /// Serialized number of verification keys.
     pub verification_key_count: Vec<u8>,
-    /// Serialized key index, scheme, and verification-key fields.
-    pub key_index_scheme_public_key: Vec<u8>,
-    /// Serialized signature threshold, credential ID, identity provider ID, and AR-data count.
+    /// One serialized key-index, scheme, and verification-key entry per APDU.
+    pub verification_keys: Vec<Vec<u8>>,
+    /// Serialized account signature threshold, credential ID, identity provider ID, anonymity-
+    /// revocation threshold, and AR-data count.
     pub threshold_credential_id_identity: Vec<u8>,
-    /// Serialized anonymity revoker identity and encrypted ID credential public share fields.
-    pub ar_identity: Vec<u8>,
+    /// One serialized anonymity-revoker identity and encrypted ID-credential public-share pair
+    /// per APDU.
+    pub ar_identity_data: Vec<Vec<u8>>,
     /// Serialized valid-to, created-at, and revealed-attribute count fields.
     pub credential_dates: Vec<u8>,
     /// Serialized revealed attributes.
@@ -417,7 +419,7 @@ pub struct CredentialSigningPayload {
 pub struct CredentialAttribute {
     /// Serialized attribute tag byte.
     pub tag: Vec<u8>,
-    /// Serialized attribute value bytes.
+    /// Raw UTF-8 attribute value bytes, without its Concordium serialization length prefix.
     pub value: Vec<u8>,
 }
 

@@ -559,24 +559,26 @@ fn push_credential_payload(
         p2,
         credential.verification_key_count.clone(),
     ));
-    commands.push(ApduCommand::new(
-        ins,
-        P1_VERIFICATION_KEY,
-        p2,
-        credential.key_index_scheme_public_key.clone(),
-    ));
+    commands.extend(
+        credential
+            .verification_keys
+            .iter()
+            .cloned()
+            .map(|payload| ApduCommand::new(ins, P1_VERIFICATION_KEY, p2, payload)),
+    );
     commands.push(ApduCommand::new(
         ins,
         P1_SIGNATURE_THRESHOLD,
         p2,
         credential.threshold_credential_id_identity.clone(),
     ));
-    commands.push(ApduCommand::new(
-        ins,
-        P1_AR_IDENTITY,
-        p2,
-        credential.ar_identity.clone(),
-    ));
+    commands.extend(
+        credential
+            .ar_identity_data
+            .iter()
+            .cloned()
+            .map(|payload| ApduCommand::new(ins, P1_AR_IDENTITY, p2, payload)),
+    );
     commands.push(ApduCommand::new(
         ins,
         P1_CREDENTIAL_DATES,
@@ -636,9 +638,9 @@ mod tests {
     fn credential_payload() -> CredentialSigningPayload {
         CredentialSigningPayload {
             verification_key_count: vec![1],
-            key_index_scheme_public_key: vec![2],
+            verification_keys: vec![vec![2]],
             threshold_credential_id_identity: vec![3],
-            ar_identity: vec![4],
+            ar_identity_data: vec![vec![4]],
             credential_dates: vec![5],
             attributes: vec![CredentialAttribute {
                 tag: vec![6],
@@ -719,6 +721,40 @@ mod tests {
         assert_eq!(commands[2].p1, P1_PARAM);
         assert_eq!(&commands[1].data[..2], &(13u16.to_be_bytes()));
         assert_eq!(&commands[2].data[..2], &(2u16.to_be_bytes()));
+    }
+
+    #[test]
+    fn credential_upload_stages_each_verification_key_separately() {
+        let mut credential = credential_payload();
+        credential.verification_keys = vec![vec![2], vec![3], vec![4]];
+        credential.attributes = vec![CredentialAttribute {
+            tag: vec![0x0D],
+            value: b"DK".to_vec(),
+        }];
+        let request = CredentialDeploymentSigningRequest {
+            path: vec![1],
+            credential,
+            context: CredentialDeploymentContext::New { expiry: vec![0; 8] },
+        };
+
+        let commands = build_credential_deployment_commands(&request);
+        let keys = commands
+            .iter()
+            .filter(|command| command.p1 == P1_VERIFICATION_KEY)
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(
+            keys.iter()
+                .map(|command| command.data.clone())
+                .collect::<Vec<_>>(),
+            [vec![2], vec![3], vec![4]]
+        );
+        let dk_value = commands
+            .iter()
+            .position(|command| command.p1 == P1_ATTRIBUTE_VALUE && command.data == b"DK")
+            .unwrap();
+        assert_eq!(commands[dk_value - 1].p1, P1_ATTRIBUTE_TAG);
+        assert_eq!(commands[dk_value - 1].data, [0x0D, 2]);
     }
 
     #[test]

@@ -656,6 +656,7 @@ dependencies = [
  "anyhow",
  "concordium-rust-sdk",
  "hidapi",
+ "zeroize",
 ]
 
 [[package]]

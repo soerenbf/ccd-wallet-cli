@@ -1,15 +1,17 @@
 mod chain_parameters;
+mod chain_updates;
 
 use crate::{
-    cli::{NodeChainParametersArgs, NodeInfoArgs, NodeSubcommand},
+    cli::{NodeChainParametersArgs, NodeChainUpdatesArgs, NodeInfoArgs, NodeSubcommand},
     commands::ui::{SelectItem, select_or_single},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ccd_wallet_core::{
     config,
     store::{config::load, wallet_state},
 };
 use concordium_rust_sdk::v2;
+use futures_util::TryStreamExt;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::str::FromStr;
@@ -31,6 +33,7 @@ pub async fn run(conn: &Connection, command: NodeSubcommand) -> Result<()> {
     match command {
         NodeSubcommand::Info(args) => info(conn, args).await,
         NodeSubcommand::ChainParameters(args) => chain_parameters(conn, args).await,
+        NodeSubcommand::ChainUpdates(args) => chain_updates(conn, args).await,
     }
 }
 
@@ -131,6 +134,57 @@ fn prompt_for_network_name(
         .collect::<Vec<_>>();
     let initial = active.map(str::to_owned);
     select_or_single("Select network", &items, initial.as_ref())
+}
+
+async fn chain_updates(conn: &Connection, args: NodeChainUpdatesArgs) -> Result<()> {
+    let ResolvedEndpoint {
+        endpoint,
+        endpoint_label,
+        ..
+    } = resolve_endpoint_context(conn, args.network, args.node, args.no_defaults)?;
+    let block = crate::smart_contracts::shared::parse_block_identifier(args.block.as_deref())?;
+    let mut client = config::connect_v2_client(endpoint)
+        .await
+        .with_context(|| format!("failed to connect to Concordium node at {endpoint_label}"))?;
+    let sequences = client
+        .get_next_update_sequence_numbers(block)
+        .await
+        .with_context(|| {
+            format!("failed to query next update sequence numbers from node at {endpoint_label}")
+        })?;
+    let block_hash = sequences.block_hash;
+    let pending = client
+        .get_block_pending_updates(chain_updates::snapshot_block_identifier(block_hash))
+        .await
+        .with_context(|| {
+            format!("failed to query pending chain updates from node at {endpoint_label}")
+        })?;
+    ensure!(
+        pending.block_hash == block_hash,
+        "pending chain updates resolved to block {}, expected snapshot block {}",
+        pending.block_hash,
+        block_hash
+    );
+    let pending_updates = pending
+        .response
+        .try_collect::<Vec<_>>()
+        .await
+        .with_context(|| {
+            format!("failed while reading pending chain updates from node at {endpoint_label}")
+        })?;
+    let output = chain_updates::ChainUpdatesOutput::try_new(
+        endpoint_label,
+        block_hash.to_string(),
+        &sequences.response,
+        &pending_updates,
+    )?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("{}", chain_updates::render_human(&output)?);
+    }
+    Ok(())
 }
 
 async fn chain_parameters(conn: &Connection, args: NodeChainParametersArgs) -> Result<()> {

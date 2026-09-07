@@ -6,4 +6,4 @@ pub mod status;
 
 pub use constants::{Instruction, LEDGER_CLA};
 pub use exchange::{ApduCommand, ApduReply};
-pub use status::{StatusWord, split_status_word};
+pub use status::{StatusWord, split_status_word, strip_secret_status_word_in_place};
