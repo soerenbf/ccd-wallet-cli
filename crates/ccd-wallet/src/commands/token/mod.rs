@@ -48,7 +48,7 @@ pub async fn run(conn: &Connection, command: TokenSubcommand) -> Result<()> {
             TokenLockSubcommand::Create(args) => lock::create(conn, *args).await,
             TokenLockSubcommand::Fund(args) => lock::fund(conn, *args).await,
             TokenLockSubcommand::Send(args) => lock::send(conn, *args).await,
-            TokenLockSubcommand::Return(args) => lock::return_funds(conn, *args).await,
+            TokenLockSubcommand::Release(args) => lock::release_funds(conn, *args).await,
             TokenLockSubcommand::Cancel(args) => lock::cancel(conn, *args).await,
             TokenLockSubcommand::Show(args) => lock::show(conn, *args).await,
         },

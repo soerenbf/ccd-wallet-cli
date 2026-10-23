@@ -1261,7 +1261,7 @@ pub enum TokenSubcommand {
     Metadata(Box<TokenMetadataCommand>),
     /// Manage token locks.
     Lock(Box<TokenLockCommand>),
-    /// Build, preview, and submit composed token MetaUpdate transactions.
+    /// Build, preview, and submit composed token unscoped TokenUpdate transactions.
     Compose(Box<TokenComposeArgs>),
 }
 
@@ -1279,7 +1279,7 @@ pub struct TokenComposeArgs {
 pub enum TokenComposeSubcommand {
     /// List the operations recorded in a token composition plan.
     Preview(Box<TokenComposePreviewArgs>),
-    /// Submit a token composition plan as one MetaUpdate transaction.
+    /// Submit a token composition plan as one unscoped TokenUpdate transaction.
     Submit(Box<TokenComposeSubmitArgs>),
 }
 
@@ -1617,8 +1617,8 @@ pub enum TokenLockSubcommand {
     Fund(Box<TokenLockFundArgs>),
     /// Send locked funds to a limited-recipient or any-recipient lock target.
     Send(Box<TokenLockSendArgs>),
-    /// Return locked funds to the source account.
-    Return(Box<TokenLockReturnArgs>),
+    /// Release locked funds to the source account.
+    Release(Box<TokenLockReleaseArgs>),
     /// Cancel an existing lock.
     Cancel(Box<TokenLockCancelArgs>),
     /// Show protocol-level lock information, including limited or any-recipient status.
@@ -1659,7 +1659,7 @@ pub struct TokenLockCreateArgs {
     #[arg(long = "description", value_name = "DESCRIPTION")]
     pub description: Option<String>,
 
-    /// Keep the lock alive after all funds have been returned.
+    /// Keep the lock alive after all funds have been released.
     #[arg(long = "keep-alive")]
     pub keep_alive: bool,
 
@@ -1783,12 +1783,12 @@ pub struct TokenLockSendArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct TokenLockReturnArgs {
+pub struct TokenLockReleaseArgs {
     /// Lock identifier to use. If omitted interactively, the CLI prompts for it.
     #[arg(value_name = "LOCK_ID")]
     pub lock_id: Option<concordium_rust_sdk::protocol_level_tokens::LockId>,
 
-    /// Token identifier whose locked funds are being returned. If omitted interactively, the CLI prompts from the lock's configured tokens.
+    /// Token identifier whose locked funds are being released. If omitted interactively, the CLI prompts from the lock's configured tokens.
     #[arg(long = "token", value_name = "TOKEN_ID")]
     pub token_id: Option<concordium_rust_sdk::protocol_level_tokens::TokenId>,
 
@@ -3825,7 +3825,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_token_lock_send_and_return_with_label_references() {
+    fn rejects_legacy_lock_return_command() {
+        assert!(Cli::try_parse_from(["ccd-wallet", "token", "lock", "return"]).is_err());
+        assert!(Cli::try_parse_from(["ccd-wallet", "token", "lock", "release"]).is_ok());
+    }
+
+    #[test]
+    fn parses_token_lock_send_and_release_with_label_references() {
         let send = Cli::parse_from([
             "ccd-wallet",
             "token",
@@ -3856,18 +3862,24 @@ mod tests {
             other => panic!("expected token command, got {other:?}"),
         }
 
-        let return_funds =
-            Cli::parse_from(["ccd-wallet", "token", "lock", "return", "--source", "alice"]);
-        match return_funds.command {
+        let release_funds = Cli::parse_from([
+            "ccd-wallet",
+            "token",
+            "lock",
+            "release",
+            "--source",
+            "alice",
+        ]);
+        match release_funds.command {
             Command::Token(command) => match command.command {
                 TokenSubcommand::Lock(command) => match command.command {
-                    TokenLockSubcommand::Return(args) => {
+                    TokenLockSubcommand::Release(args) => {
                         assert_eq!(
                             args.source.as_ref().map(ToString::to_string).as_deref(),
                             Some("alice")
                         );
                     }
-                    other => panic!("expected token lock return command, got {other:?}"),
+                    other => panic!("expected token lock release command, got {other:?}"),
                 },
                 other => panic!("expected token lock command, got {other:?}"),
             },

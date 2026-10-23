@@ -23,11 +23,12 @@ use concordium_rust_sdk::{
         contracts_common::AccountAddress,
         hashes::Hash,
         protocol_level_locks::{
-            LockConfig, LockController, LockControllerSimpleV0, LockControllerSimpleV0Capability,
+            LockConfig, LockConfigSimpleV0, LockControllerSimpleV0Capability,
             LockControllerSimpleV0Grant, LockId, LockInfo, LockMetadata, LockRecipients,
         },
         protocol_level_tokens::{
-            MetadataUrl, RawCbor, TokenAdminRole, TokenAmount, TokenId, TokenModuleState,
+            MetadataUrl, RawCbor, TokenAdminRole, TokenAmount, TokenId, TokenMetadataUrlDetails,
+            TokenModuleState,
         },
     },
     protocol_level_tokens::{LockInfoResponse, TokenInfo, token_client::TokenClient},
@@ -381,9 +382,10 @@ pub(super) fn select_lock_token(
     select_always("Select token", &items, None)
 }
 
+/// Return the configured token identifiers from the tagged lock configuration.
 pub(super) fn configured_lock_tokens(lock_info: &LockInfo) -> Vec<TokenId> {
-    match &lock_info.controller {
-        LockController::SimpleV0(controller) => controller.tokens.clone(),
+    match &lock_info.config {
+        LockConfig::SimpleV0(controller) => controller.tokens.clone(),
     }
 }
 
@@ -546,12 +548,17 @@ pub(super) fn parse_checksum_sha_256(input: Option<&str>) -> Result<Option<Hash>
         .context("invalid SHA-256 checksum hex")
 }
 
-/// Build token metadata from CLI inputs.
-pub(super) fn build_metadata_url(url: String, checksum: Option<&str>) -> Result<MetadataUrl> {
-    Ok(MetadataUrl {
+/// Build token metadata update inputs without narrowing queried metadata state.
+///
+/// `url` is preserved; `checksum` is an optional 64-character SHA-256 hex string.
+/// Returns an error for a malformed checksum.
+pub(super) fn build_metadata_url(
+    url: String,
+    checksum: Option<&str>,
+) -> Result<TokenMetadataUrlDetails> {
+    Ok(TokenMetadataUrlDetails {
         url,
         checksum_sha_256: parse_checksum_sha_256(checksum)?,
-        additional: HashMap::new(),
     })
 }
 
@@ -715,22 +722,23 @@ fn format_optional_flag(label: &str, value: Option<bool>) -> String {
 
 /// Render a human-readable lock summary.
 pub(super) fn render_lock_info(info: &LockInfo) -> Result<String> {
+    let LockConfig::SimpleV0(config) = &info.config;
     let mut lines = vec![
         format!("Lock ID: {}", info.lock),
-        format!("Expiry: {}", format_transaction_time(info.expiry)?),
+        format!("Expiry: {}", format_transaction_time(config.expiry)?),
         String::new(),
         "Metadata:".to_owned(),
     ];
-    lines.extend(render_lock_metadata_lines(info.metadata.as_ref()));
+    lines.extend(render_lock_metadata_lines(config.metadata.as_ref()));
 
     lines.push(String::new());
     lines.push("Recipients:".to_owned());
-    lines.extend(render_lock_recipients_lines(&info.recipients));
+    lines.extend(render_lock_recipients_lines(&config.recipients));
 
     lines.push(String::new());
     lines.push("Controller:".to_owned());
-    match &info.controller {
-        LockController::SimpleV0(controller) => {
+    match &info.config {
+        LockConfig::SimpleV0(controller) => {
             lines.push("  Type: simple-v0".to_owned());
             lines.push(format!("  Keep alive: {}", yes_no(controller.keep_alive)));
             lines.push(format!(
@@ -810,7 +818,7 @@ fn yes_no(value: bool) -> &'static str {
 fn lock_capability_name(value: &LockControllerSimpleV0Capability) -> &'static str {
     match value {
         LockControllerSimpleV0Capability::Fund => "fund",
-        LockControllerSimpleV0Capability::Return => "return",
+        LockControllerSimpleV0Capability::Release => "release",
         LockControllerSimpleV0Capability::Send => "send",
         LockControllerSimpleV0Capability::Cancel => "cancel",
     }
@@ -836,7 +844,7 @@ pub(super) struct UnresolvedLockGrant {
 pub(super) fn lock_capability_cli_name(value: LockControllerSimpleV0Capability) -> &'static str {
     match value {
         LockControllerSimpleV0Capability::Fund => "fund",
-        LockControllerSimpleV0Capability::Return => "return",
+        LockControllerSimpleV0Capability::Release => "release",
         LockControllerSimpleV0Capability::Send => "send",
         LockControllerSimpleV0Capability::Cancel => "cancel",
     }
@@ -908,7 +916,7 @@ fn lock_capability_items() -> Vec<FuzzySelectItem<LockControllerSimpleV0Capabili
     [
         LockControllerSimpleV0Capability::Fund,
         LockControllerSimpleV0Capability::Send,
-        LockControllerSimpleV0Capability::Return,
+        LockControllerSimpleV0Capability::Release,
         LockControllerSimpleV0Capability::Cancel,
     ]
     .into_iter()
@@ -938,16 +946,16 @@ pub(super) fn parse_lock_grant_roles(
 pub(super) fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV0Capability> {
     match input {
         "fund" => Ok(LockControllerSimpleV0Capability::Fund),
-        "return" => Ok(LockControllerSimpleV0Capability::Return),
+        "release" => Ok(LockControllerSimpleV0Capability::Release),
         "send" => Ok(LockControllerSimpleV0Capability::Send),
         "cancel" => Ok(LockControllerSimpleV0Capability::Cancel),
         other => {
-            bail!("unknown lock capability '{other}'; expected one of: fund, send, return, cancel")
+            bail!("unknown lock capability '{other}'; expected one of: fund, send, release, cancel")
         }
     }
 }
 
-/// Resolve whether a lock should be kept alive after funds are returned.
+/// Resolve whether a lock should be kept alive after funds are released.
 pub(super) fn resolve_lock_keep_alive(
     explicit_keep_alive: bool,
     non_interactive: bool,
@@ -955,7 +963,7 @@ pub(super) fn resolve_lock_keep_alive(
     if explicit_keep_alive || non_interactive {
         return Ok(explicit_keep_alive);
     }
-    Ok(confirm("Keep the lock alive after funds are returned?")
+    Ok(confirm("Keep the lock alive after funds are released?")
         .initial_value(false)
         .interact()?)
 }
@@ -1032,17 +1040,15 @@ pub(super) fn build_lock_config(
                 .collect(),
         ),
     };
-    LockConfig {
+    LockConfig::SimpleV0(LockConfigSimpleV0 {
         recipients,
         expiry,
-        controller: LockController::SimpleV0(LockControllerSimpleV0 {
-            grants,
-            tokens,
-            keep_alive,
-            memo: None,
-        }),
+        grants,
+        tokens,
+        keep_alive,
+        memo: None,
         metadata: build_lock_metadata(name, description),
-    }
+    })
 }
 
 /// Parse a lock expiry time input.
@@ -1116,9 +1122,89 @@ mod tests {
     use concordium_rust_sdk::base::{
         common::types::TransactionTime,
         contracts_common::AccountAddress,
-        protocol_level_locks::{LockControllerSimpleV0Capability, LockMetadata, LockRecipients},
+        protocol_level_locks::{
+            LockConfig, LockControllerSimpleV0Capability, LockMetadata, LockRecipients,
+        },
         protocol_level_tokens::{RawCbor, TokenAdminRole},
     };
+
+    #[test]
+    fn scoped_transfer_and_metadata_payloads_preserve_inputs() {
+        use concordium_rust_sdk::base::{
+            common::cbor,
+            protocol_level_tokens::{TokenOperation, TokenOperations, token_operations},
+            transactions::{Payload, TokenUpdatePayload, construct},
+        };
+        let sender = AccountAddress([3; 32]);
+        for checksum in [None, Some("ab".repeat(32))] {
+            let metadata =
+                super::build_metadata_url("https://example.com".to_owned(), checksum.as_deref())
+                    .unwrap();
+            assert_eq!(metadata.url, "https://example.com");
+            assert_eq!(metadata.checksum_sha_256.is_some(), checksum.is_some());
+            let ops = TokenOperations::new(vec![
+                token_operations::transfer_tokens(
+                    sender,
+                    super::parse_token_amount("1.25", 2).unwrap(),
+                ),
+                TokenOperation::UpdateMetadata(metadata),
+            ]);
+            let tx = construct::token_update_operations(
+                1,
+                sender,
+                1.into(),
+                TransactionTime::from_seconds(100),
+                "CCD".parse().unwrap(),
+                ops.clone(),
+            );
+            let Payload::TokenUpdate {
+                payload: TokenUpdatePayload::Scoped(payload),
+            } = tx.payload
+            else {
+                panic!("scoped")
+            };
+            assert_eq!(payload.token_id.to_string(), "CCD");
+            assert_eq!(payload.operations.as_ref(), cbor::cbor_encode(&ops));
+        }
+        assert!(super::build_metadata_url("url".to_owned(), Some("bad")).is_err());
+        assert!(super::parse_lock_capability("return").is_err());
+        assert_eq!(
+            super::parse_lock_capability("release").unwrap(),
+            LockControllerSimpleV0Capability::Release
+        );
+    }
+
+    #[test]
+    fn simple_v0_lock_state_preserves_configuration() {
+        use concordium_rust_sdk::base::protocol_level_locks::{LockId, LockInfo};
+        let grant = concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Grant {
+            account: AccountAddress([3; 32]).into(),
+            roles: super::parse_lock_grant_roles("alice:fund,release", "fund,release").unwrap(),
+        };
+        let config = build_lock_config(
+            super::LockRecipientMode::Any,
+            TransactionTime::from_seconds(100),
+            vec![grant.clone()],
+            vec!["CCD".parse().unwrap()],
+            true,
+            Some("Treasury".to_owned()),
+            None,
+        );
+        let LockConfig::SimpleV0(details) = &config;
+        assert_eq!(details.grants, vec![grant]);
+        assert!(details.keep_alive);
+        assert!(details.memo.is_none());
+        let info = LockInfo {
+            lock: LockId::new(1, 2, 0),
+            config,
+            funds: vec![],
+        };
+        assert_eq!(super::configured_lock_tokens(&info)[0].to_string(), "CCD");
+        let rendered = super::render_lock_info(&info).unwrap();
+        assert!(rendered.contains("Treasury"));
+        assert!(rendered.contains("release"));
+        assert!(rendered.contains("any eligible account"));
+    }
 
     #[test]
     fn parses_decimal_token_amount_with_padding() {
@@ -1199,6 +1285,7 @@ mod tests {
             None,
             None,
         );
+        let LockConfig::SimpleV0(config) = config;
         assert!(matches!(config.recipients, LockRecipients::Any));
     }
 
@@ -1214,6 +1301,7 @@ mod tests {
             None,
             None,
         );
+        let LockConfig::SimpleV0(config) = config;
         match config.recipients {
             LockRecipients::Limited(recipients) => assert_eq!(recipients[0].address, address),
             LockRecipients::Any => panic!("expected limited recipients"),

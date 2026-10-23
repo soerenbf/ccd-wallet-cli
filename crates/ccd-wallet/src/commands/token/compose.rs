@@ -20,9 +20,7 @@ use concordium_rust_sdk::{
         common::types::TransactionTime,
         contracts_common::AccountAddress,
         protocol_level_locks::{LockId, LockRecipients},
-        protocol_level_tokens::{
-            TokenAmount, TokenId, meta_operations, meta_operations::MetaUpdateOperations,
-        },
+        protocol_level_tokens::{Operation, Operations, TokenAmount, TokenId, operations},
         transactions::{BlockItem, ExactSizeTransactionSigner, construct},
     },
     protocol_level_tokens::lock_client,
@@ -153,7 +151,7 @@ async fn submit_prepared(conn: &Connection, prepared: PreparedTokenComposeSubmit
     let mut context = shared::resolve_prepared_mutation_context(conn, &mutation_context).await?;
 
     validate_plan_network_matches_context(&plan, &context)?;
-    let operations = resolve_meta_update_operations(conn, &mut context, &plan).await?;
+    let operations = resolve_token_update_operations(conn, &mut context, &plan).await?;
     let summary = render_plan_preview(&plan, Some(prepared.plan_path()))?;
     cliclack::log::info(format!(
         "Token composition transaction\nnetwork: {} ({})\naccount: {}\n\n{}",
@@ -168,7 +166,7 @@ async fn submit_prepared(conn: &Connection, prepared: PreparedTokenComposeSubmit
 
     let spin = cliclack::spinner();
     spin.start("Submitting token composition...");
-    let transaction_hash = sign_and_send_meta_update(&mut context, &operations).await?;
+    let transaction_hash = sign_and_send_token_update(&mut context, &operations).await?;
     spin.clear();
     cliclack::log::success(format!(
         "Submitted token composition on {} ({}): {transaction_hash}",
@@ -224,11 +222,11 @@ fn validate_plan_network_matches_context(
     Ok(())
 }
 
-async fn resolve_meta_update_operations(
+async fn resolve_token_update_operations(
     conn: &Connection,
     context: &mut shared::MutationContext,
     plan: &Plan,
-) -> Result<MetaUpdateOperations> {
+) -> Result<Operations> {
     let predicted_locks = predict_created_locks(context, plan).await?;
     let mut operations = Vec::with_capacity(plan.operations.len());
     for operation in &plan.operations {
@@ -241,39 +239,34 @@ async fn resolve_meta_update_operations(
                 let token_id = parse_token_id(token)?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
                 let recipient = resolve_account(conn, context, recipient, "recipient")?;
-                operations.push(meta_operations::transfer_tokens(
-                    token_id, recipient, amount,
-                ));
+                operations.push(operations::transfer_tokens(token_id, recipient, amount));
             }
             PlanOperation::Mint { token, amount } => {
                 let token_id = parse_token_id(token)?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
-                operations.push(meta_operations::mint_tokens(token_id, amount));
+                operations.push(operations::mint_tokens(token_id, amount));
             }
             PlanOperation::Burn { token, amount } => {
                 let token_id = parse_token_id(token)?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
-                operations.push(meta_operations::burn_tokens(token_id, amount));
+                operations.push(operations::burn_tokens(token_id, amount));
             }
             PlanOperation::Pause { token } => {
-                operations.push(meta_operations::pause(parse_token_id(token)?));
+                operations.push(operations::pause_token(parse_token_id(token)?));
             }
             PlanOperation::Unpause { token } => {
-                operations.push(meta_operations::unpause(parse_token_id(token)?));
+                operations.push(operations::unpause_token(parse_token_id(token)?));
             }
             PlanOperation::AllowListAdd { token, targets } => {
                 let token_id = parse_token_id(token)?;
                 for target in resolve_accounts(conn, context, targets, "target")? {
-                    operations.push(meta_operations::add_token_allow_list(
-                        token_id.clone(),
-                        target,
-                    ));
+                    operations.push(operations::add_token_allow_list(token_id.clone(), target));
                 }
             }
             PlanOperation::AllowListRemove { token, targets } => {
                 let token_id = parse_token_id(token)?;
                 for target in resolve_accounts(conn, context, targets, "target")? {
-                    operations.push(meta_operations::remove_token_allow_list(
+                    operations.push(operations::remove_token_allow_list(
                         token_id.clone(),
                         target,
                     ));
@@ -282,19 +275,13 @@ async fn resolve_meta_update_operations(
             PlanOperation::DenyListAdd { token, targets } => {
                 let token_id = parse_token_id(token)?;
                 for target in resolve_accounts(conn, context, targets, "target")? {
-                    operations.push(meta_operations::add_token_deny_list(
-                        token_id.clone(),
-                        target,
-                    ));
+                    operations.push(operations::add_token_deny_list(token_id.clone(), target));
                 }
             }
             PlanOperation::DenyListRemove { token, targets } => {
                 let token_id = parse_token_id(token)?;
                 for target in resolve_accounts(conn, context, targets, "target")? {
-                    operations.push(meta_operations::remove_token_deny_list(
-                        token_id.clone(),
-                        target,
-                    ));
+                    operations.push(operations::remove_token_deny_list(token_id.clone(), target));
                 }
             }
             PlanOperation::AdminRolesAssign {
@@ -305,7 +292,9 @@ async fn resolve_meta_update_operations(
                 let token_id = parse_token_id(token)?;
                 let target = resolve_account(conn, context, target, "target")?;
                 let roles = parse_admin_roles(roles)?;
-                operations.push(meta_operations::assign_admin_roles(token_id, target, roles));
+                operations.push(operations::assign_token_admin_roles(
+                    token_id, target, roles,
+                ));
             }
             PlanOperation::AdminRolesRevoke {
                 token,
@@ -315,7 +304,9 @@ async fn resolve_meta_update_operations(
                 let token_id = parse_token_id(token)?;
                 let target = resolve_account(conn, context, target, "target")?;
                 let roles = parse_admin_roles(roles)?;
-                operations.push(meta_operations::revoke_admin_roles(token_id, target, roles));
+                operations.push(operations::revoke_token_admin_roles(
+                    token_id, target, roles,
+                ));
             }
             PlanOperation::MetadataUpdate {
                 token,
@@ -324,7 +315,7 @@ async fn resolve_meta_update_operations(
             } => {
                 let token_id = parse_token_id(token)?;
                 let metadata = shared::build_metadata_url(url.clone(), checksum_sha256.as_deref())?;
-                operations.push(meta_operations::update_metadata(token_id, metadata));
+                operations.push(operations::update_token_metadata(token_id, metadata));
             }
             PlanOperation::LockCreate {
                 recipients,
@@ -354,7 +345,7 @@ async fn resolve_meta_update_operations(
                     name.clone(),
                     description.clone(),
                 );
-                operations.push(meta_operations::lock_create(config));
+                operations.push(operations::create_lock(config));
             }
             PlanOperation::LockFund {
                 lock,
@@ -364,7 +355,7 @@ async fn resolve_meta_update_operations(
                 let token_id = parse_token_id(token)?;
                 let lock_id = resolve_lock_reference(lock, &predicted_locks)?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
-                operations.push(meta_operations::lock_fund(token_id, lock_id, amount, None));
+                operations.push(operations::fund_lock(token_id, lock_id, amount, None));
             }
             PlanOperation::LockSend {
                 lock,
@@ -378,31 +369,48 @@ async fn resolve_meta_update_operations(
                 let source = resolve_account(conn, context, source, "source")?;
                 let recipient = resolve_account(conn, context, recipient, "recipient")?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
-                operations.push(meta_operations::lock_send(
+                operations.push(operations::send_locked_tokens(
                     token_id, lock_id, source, recipient, amount, None,
                 ));
             }
-            PlanOperation::LockReturn {
+            PlanOperation::LockRelease {
                 lock,
                 token,
                 source,
                 amount,
             } => {
                 let token_id = parse_token_id(token)?;
-                let lock_id = resolve_lock_reference(lock, &predicted_locks)?;
                 let source = resolve_account(conn, context, source, "source")?;
                 let amount = resolve_amount(context, token_id.clone(), amount).await?;
-                operations.push(meta_operations::lock_return(
-                    token_id, lock_id, source, amount, None,
-                ));
+                operations.push(resolve_release_operation(
+                    lock,
+                    &predicted_locks,
+                    token_id,
+                    source,
+                    amount,
+                )?);
             }
             PlanOperation::LockCancel { lock } => {
                 let lock_id = resolve_lock_reference(lock, &predicted_locks)?;
-                operations.push(meta_operations::lock_cancel(lock_id, None));
+                operations.push(operations::cancel_lock(lock_id, None));
             }
         }
     }
-    Ok(MetaUpdateOperations::new(operations))
+    Ok(Operations::new(operations))
+}
+
+// Keep same-plan reference mapping at the operation construction boundary.
+fn resolve_release_operation(
+    lock: &str,
+    predicted_locks: &[LockId],
+    token_id: TokenId,
+    source: AccountAddress,
+    amount: TokenAmount,
+) -> Result<Operation> {
+    let lock_id = resolve_lock_reference(lock, predicted_locks)?;
+    Ok(operations::release_locked_tokens(
+        token_id, lock_id, source, amount, None,
+    ))
 }
 
 async fn predict_created_locks(
@@ -598,9 +606,9 @@ fn parse_admin_roles(
         .collect()
 }
 
-async fn sign_and_send_meta_update(
+async fn sign_and_send_token_update(
     context: &mut shared::MutationContext,
-    operations: &MetaUpdateOperations,
+    operations: &Operations,
 ) -> Result<concordium_rust_sdk::base::hashes::TransactionHash> {
     let expiry = TransactionTime::seconds_after(DEFAULT_EXPIRY_SECS);
     let nonce = context
@@ -609,7 +617,7 @@ async fn sign_and_send_meta_update(
         .await
         .context("failed to query next account sequence number")?
         .nonce;
-    let transaction = construct::meta_update_operations(
+    let transaction = construct::operations(
         context.wallet.num_keys(),
         context.wallet.address,
         nonce,
@@ -744,7 +752,7 @@ async fn validate_operation_tokens_and_amounts(
             token,
             amount,
         }
-        | PlanOperation::LockReturn {
+        | PlanOperation::LockRelease {
             lock,
             token,
             amount,
@@ -923,7 +931,9 @@ async fn configured_recipients_for_lock_reference(
             };
             let lock_id = lock.parse().context("invalid lock identifier")?;
             let info = shared::query_lock_info(client, lock_id).await?;
-            match info.recipients {
+            let concordium_rust_sdk::base::protocol_level_locks::LockConfig::SimpleV0(config) =
+                info.config;
+            match config.recipients {
                 LockRecipients::Any => Ok(shared::LockRecipientMode::Any),
                 LockRecipients::Limited(recipients) => Ok(shared::LockRecipientMode::Limited(
                     recipients
@@ -1088,12 +1098,12 @@ fn resolve_operation_account_references(
             recipient: resolve_plan_account(conn, genesis_hash, &recipient, "recipient", unlocks)?,
             amount,
         },
-        PlanOperation::LockReturn {
+        PlanOperation::LockRelease {
             lock,
             token,
             source,
             amount,
-        } => PlanOperation::LockReturn {
+        } => PlanOperation::LockRelease {
             lock,
             token,
             source: resolve_plan_account(conn, genesis_hash, &source, "source", unlocks)?,
@@ -1298,7 +1308,7 @@ fn nested_command_candidates(first: &str) -> Vec<String> {
             "create".to_owned(),
             "fund".to_owned(),
             "send".to_owned(),
-            "return".to_owned(),
+            "release".to_owned(),
             "cancel".to_owned(),
         ],
         _ => Vec::new(),
@@ -1327,7 +1337,7 @@ fn flag_candidates(words: &[String]) -> Vec<String> {
         ],
         (Some("lock"), Some("fund")) => &["--token", "--amount"],
         (Some("lock"), Some("send")) => &["--source", "--recipient", "--token", "--amount"],
-        (Some("lock"), Some("return")) => &["--source", "--token", "--amount"],
+        (Some("lock"), Some("release")) => &["--source", "--token", "--amount"],
         (Some("submit"), _) => &[
             "--sender",
             "--network",
@@ -1385,7 +1395,7 @@ async fn parse_repl_command_for_plan(plan: &Plan, line: &str) -> Result<ReplComm
     if matches!(words.first().map(String::as_str), Some("lock"))
         && matches!(
             words.get(1).map(String::as_str),
-            Some("fund" | "send" | "return")
+            Some("fund" | "send" | "release")
         )
     {
         return parse_plan_aware_lock_op(plan, &words)
@@ -1459,10 +1469,10 @@ async fn parse_plan_aware_lock_op(plan: &Plan, words: &[String]) -> Result<PlanO
                 amount: args.take_or_prompt("amount", "Token amount:")?,
             })
         }
-        "return" => {
+        "release" => {
             let lock = args.take_positional_or_prompt("lock", "Lock id or @ reference:")?;
             let token = args.take_token_or_select_for_lock(plan, &lock).await?;
-            Ok(PlanOperation::LockReturn {
+            Ok(PlanOperation::LockRelease {
                 lock,
                 token,
                 source: args.take_or_prompt("source", "Source account address or @sender:")?,
@@ -1641,7 +1651,7 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
             recipient: args.take_or_prompt("recipient", "Recipient account address or @sender:")?,
             amount: args.take_or_prompt("amount", "Token amount:")?,
         }),
-        "return" => Ok(PlanOperation::LockReturn {
+        "release" => Ok(PlanOperation::LockRelease {
             lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
             token: args.take_or_prompt("token", "Token identifier:")?,
             source: args.take_or_prompt("source", "Source account address or @sender:")?,
@@ -1691,7 +1701,7 @@ impl OperationArgs {
         if self.flag("keep-alive") {
             return Ok(true);
         }
-        Ok(confirm("Keep the lock alive after funds are returned?")
+        Ok(confirm("Keep the lock alive after funds are released?")
             .initial_value(false)
             .interact()?)
     }
@@ -1887,7 +1897,7 @@ fn help_text() -> &'static str {
   lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--name NAME] [--description DESCRIPTION] [--keep-alive]
   lock fund LOCK --token TOKEN --amount AMOUNT
   lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
-  lock return LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
+  lock release LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
   lock cancel LOCK
 
 Plan commands:
@@ -2012,7 +2022,8 @@ enum PlanOperation {
         recipient: String,
         amount: String,
     },
-    LockReturn {
+    #[serde(alias = "lock-return")]
+    LockRelease {
         lock: String,
         token: String,
         source: String,
@@ -2103,7 +2114,20 @@ impl PlanLockRecipients {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PlanLockGrant {
     account: String,
+    #[serde(deserialize_with = "deserialize_saved_capabilities")]
     capabilities: Vec<String>,
+}
+
+fn deserialize_saved_capabilities<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<String>, D::Error> {
+    let mut capabilities = Vec::<String>::deserialize(deserializer)?;
+    for capability in &mut capabilities {
+        if capability == "return" {
+            *capability = "release".to_owned();
+        }
+    }
+    Ok(capabilities)
 }
 
 impl PlanLockGrant {
@@ -2157,7 +2181,7 @@ impl PlanOperation {
         match self {
             Self::LockFund { lock, .. }
             | Self::LockSend { lock, .. }
-            | Self::LockReturn { lock, .. }
+            | Self::LockRelease { lock, .. }
             | Self::LockCancel { lock } => Some(lock),
             _ => None,
         }
@@ -2260,12 +2284,12 @@ impl PlanOperation {
                 recipient,
                 amount,
             } => format!("Send {amount} {token} from {source} in lock {lock} to {recipient}"),
-            Self::LockReturn {
+            Self::LockRelease {
                 lock,
                 token,
                 source,
                 amount,
-            } => format!("Return {amount} {token} from {source} in lock {lock}"),
+            } => format!("Release {amount} {token} from {source} in lock {lock}"),
             Self::LockCancel { lock } => format!("Cancel lock {lock}"),
         }
     }
@@ -2463,7 +2487,7 @@ fn validate_lock_references(plan: &Plan) -> Result<()> {
         let lock = match operation {
             PlanOperation::LockFund { lock, .. }
             | PlanOperation::LockSend { lock, .. }
-            | PlanOperation::LockReturn { lock, .. }
+            | PlanOperation::LockRelease { lock, .. }
             | PlanOperation::LockCancel { lock } => lock,
             _ => continue,
         };
@@ -2516,6 +2540,160 @@ mod tests {
                     amount: "100".to_owned(),
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn legacy_plan_load_is_read_only_and_save_is_canonical() {
+        let path = std::env::temp_dir().join(format!("p11-legacy-{}.toml", std::process::id()));
+        let legacy = r#"version = 1
+[[operations]]
+type = "lock-create"
+recipients = "any"
+expiry = "30d"
+tokens = ["CCD"]
+[[operations.grants]]
+account = "@sender"
+capabilities = ["fund", "return"]
+[[operations]]
+type = "lock-return"
+lock = "@1"
+token = "CCD"
+source = "@sender"
+amount = "1.25"
+"#;
+        fs::write(&path, legacy).unwrap();
+        let plan = read_plan(&path).unwrap();
+        assert!(
+            render_plan_preview(&plan, Some(&path))
+                .unwrap()
+                .contains("Release 1.25")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        let PlanOperation::LockCreate { grants, .. } = &plan.operations[0] else {
+            panic!("create")
+        };
+        assert_eq!(grants[0].to_unresolved().unwrap().roles[1],
+            concordium_rust_sdk::base::protocol_level_locks::LockControllerSimpleV0Capability::Release);
+        let PlanOperation::LockRelease {
+            lock,
+            token,
+            amount,
+            source,
+        } = &plan.operations[1]
+        else {
+            panic!("release")
+        };
+        assert_eq!(source, "@sender");
+        let sender = AccountAddress([7; 32]);
+        let predicted = vec![LockId::new(1, 2, 0), LockId::new(1, 2, 1)];
+        // Node-backed account/decimal/ID queries are deliberately outside this boundary.
+        let release = resolve_release_operation(
+            lock,
+            &predicted,
+            parse_token_id(token).unwrap(),
+            sender,
+            shared::parse_token_amount(amount, 2).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            release,
+            operations::release_locked_tokens(
+                "CCD".parse().unwrap(),
+                predicted[0].clone(),
+                sender,
+                TokenAmount::from_raw(125, 2),
+                None,
+            )
+        );
+        assert!(
+            resolve_release_operation(
+                "@3",
+                &predicted,
+                "CCD".parse().unwrap(),
+                sender,
+                TokenAmount::from_raw(125, 2),
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), legacy);
+        save_plan_atomic(&path, &plan).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("lock-release"));
+        assert!(!saved.contains("return"));
+        assert_eq!(read_plan(&path).unwrap(), plan);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repl_release_is_canonical_and_completed() {
+        assert!(matches!(
+            parse_repl_command("lock release @1 --token CCD --source @sender --amount 1").unwrap(),
+            ReplCommand::Add(PlanOperation::LockRelease { .. })
+        ));
+        assert!(
+            parse_repl_command("lock return @1 --token CCD --source @sender --amount 1").is_err()
+        );
+        assert!(parse_repl_command("lock create --any-recipient --expiry 1d --token CCD --grant @sender:return --keep-alive false --name x --description y").is_err());
+        let candidates = nested_command_candidates("lock");
+        assert!(candidates.contains(&"release".to_owned()));
+        assert!(!candidates.contains(&"return".to_owned()));
+    }
+
+    #[test]
+    fn ordered_operations_are_always_unscoped() {
+        use concordium_rust_sdk::base::{
+            contracts_common::AccountAddress,
+            transactions::{Payload, TokenUpdatePayload},
+        };
+        let sender = AccountAddress([7; 32]);
+        let lock = LockId::new(1, 2, 0);
+        let config = shared::build_lock_config(
+            shared::LockRecipientMode::Any,
+            TransactionTime::from_seconds(100),
+            vec![],
+            vec!["CCD".parse().unwrap()],
+            false,
+            None,
+            None,
+        );
+        let metadata =
+            shared::build_metadata_url("https://example.com".to_owned(), Some(&"ab".repeat(32)))
+                .unwrap();
+        let ops = Operations::new(vec![
+            operations::mint_tokens("CCD".parse().unwrap(), TokenAmount::from_raw(100, 2)),
+            operations::create_lock(config),
+            operations::fund_lock(
+                "CCD".parse().unwrap(),
+                lock.clone(),
+                TokenAmount::from_raw(100, 2),
+                None,
+            ),
+            operations::release_locked_tokens(
+                "CCD".parse().unwrap(),
+                lock,
+                sender,
+                TokenAmount::from_raw(25, 2),
+                None,
+            ),
+            operations::update_token_metadata("OTHER".parse().unwrap(), metadata),
+        ]);
+        for count in [1, ops.operations.len()] {
+            let selected = Operations::new(ops.operations[..count].to_vec());
+            let tx = construct::operations(
+                1,
+                sender,
+                1.into(),
+                TransactionTime::from_seconds(200),
+                &selected,
+            );
+            let Payload::TokenUpdate {
+                payload: TokenUpdatePayload::Unscoped(payload),
+            } = tx.payload
+            else {
+                panic!("unscoped")
+            };
+            assert_eq!(payload.decode_operations().unwrap(), selected);
         }
     }
 
@@ -2597,6 +2775,7 @@ capabilities = ["fund"]
             Some("Treasury vesting".to_owned()),
             Some("Quarterly contributor allocation".to_owned()),
         );
+        let concordium_rust_sdk::base::protocol_level_locks::LockConfig::SimpleV0(config) = config;
         let raw = config.metadata.expect("metadata is encoded");
         let metadata =
             concordium_rust_sdk::base::protocol_level_locks::LockMetadata::decode_raw_cbor(&raw)

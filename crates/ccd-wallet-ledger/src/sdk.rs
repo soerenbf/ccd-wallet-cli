@@ -95,7 +95,9 @@ impl From<SdkAccountTransactionInput<ConfigureDelegationPayload>> for ChunkedSig
 impl From<SdkAccountTransactionInput<TokenOperationsPayload>> for ChunkedSigningRequest {
     fn from(value: SdkAccountTransactionInput<TokenOperationsPayload>) -> Self {
         let payload = Payload::TokenUpdate {
-            payload: value.payload,
+            payload: concordium_rust_sdk::base::transactions::TokenUpdatePayload::Scoped(
+                value.payload,
+            ),
         };
         let transaction = serialize_payload(&value.header, &payload);
         Self {
@@ -189,4 +191,48 @@ fn serialize_payload(header: &TransactionHeader, payload: &Payload) -> Vec<u8> {
 
 fn split_serialized_u16_prefixed_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[2..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use concordium_rust_sdk::base::{
+        common::types::TransactionTime,
+        contracts_common::AccountAddress,
+        protocol_level_tokens::{TokenAmount, TokenOperations, token_operations},
+        transactions::{TokenUpdatePayload, construct},
+    };
+
+    #[test]
+    fn scoped_token_update_signing_bytes_match_sdk() {
+        let sender = AccountAddress([7; 32]);
+        let operations = TokenOperations::new(vec![token_operations::transfer_tokens(
+            sender,
+            TokenAmount::from_raw(125, 2),
+        )]);
+        let transaction = construct::token_update_operations(
+            1,
+            sender,
+            1.into(),
+            TransactionTime::from_seconds(100),
+            "CCD".parse().unwrap(),
+            operations,
+        );
+        let expected = serialize_payload(&transaction.header, &transaction.payload);
+        let Payload::TokenUpdate {
+            payload: TokenUpdatePayload::Scoped(payload),
+        } = transaction.payload
+        else {
+            panic!("scoped payload")
+        };
+        let path = DerivationPath::new([0x8000_002c, 0x8000_0397]).unwrap();
+        let request: ChunkedSigningRequest =
+            SdkAccountTransactionInput::new(path.clone(), transaction.header.clone(), payload)
+                .into();
+        assert_eq!(request.path, path);
+        assert_eq!(request.transaction, expected);
+        let mut bytes = serialize(&transaction.header);
+        bytes.extend_from_slice(transaction.encoded.as_ref());
+        assert_eq!(request.transaction, bytes);
+    }
 }

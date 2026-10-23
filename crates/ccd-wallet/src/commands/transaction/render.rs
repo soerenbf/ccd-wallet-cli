@@ -5,8 +5,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use concordium_rust_sdk::{
     base::transactions::{BlockItem, EncodedPayload},
     types::{
-        AccountCreationDetails, AccountTransactionDetails, BlockItemSummary,
-        BlockItemSummaryDetails, TokenCreationDetails, TransactionStatus, UpdateDetails,
+        AccountCreationDetails, AccountTransactionDetails, AccountTransactionEffects,
+        BlockItemSummary, BlockItemSummaryDetails, TokenCreationDetails, TransactionStatus,
+        UpdateDetails,
         hashes::{BlockHash, TransactionHash},
     },
 };
@@ -396,6 +397,37 @@ fn render_token_creation(details: &TokenCreationDetails) -> Result<VariantRender
 }
 
 fn account_transaction_event_lines(summary: &BlockItemSummary) -> Result<Vec<String>> {
+    if let Some(BlockItemSummaryDetails::AccountTransaction(details)) = summary.details.as_known()
+        && let Some(AccountTransactionEffects::TokenUpdate { events }) = details.effects.as_known()
+        && events.iter().any(|event| event.as_known().is_none())
+    {
+        // The SDK cannot serialize an unknown Upward event in a whole summary.
+        let mut known_summary = summary.clone();
+        if let concordium_rust_sdk::v2::Upward::Known(BlockItemSummaryDetails::AccountTransaction(
+            details,
+        )) = &mut known_summary.details
+            && let concordium_rust_sdk::v2::Upward::Known(AccountTransactionEffects::TokenUpdate {
+                events,
+            }) = &mut details.effects
+        {
+            events.retain(|event| event.as_known().is_some());
+        }
+        let mut known_lines = account_transaction_event_lines(&known_summary)?.into_iter();
+        return events
+            .iter()
+            .map(|event| {
+                if event.as_known().is_some() {
+                    known_lines
+                        .next()
+                        .ok_or_else(|| anyhow!("missing known TokenUpdate event"))
+                } else {
+                    render_event_line(
+                        &serde_json::json!({"tag": "Unknown", "details": format!("{event:?}")}),
+                    )
+                }
+            })
+            .collect();
+    }
     let summary_json = serde_json::to_value(summary)
         .context("failed to serialize successful transaction summary to JSON")?;
     let events = summary_json
@@ -554,8 +586,8 @@ mod tests {
         common::types::{Amount, TransactionSignature, TransactionTime},
         id::types::AccountAddress,
         protocol_level_tokens::{
-            LockCreateEvent, LockDestroyEvent, MetaEvent, TokenEvent, TokenEventDetails,
-            TokenHolder, TokenId, TokenModuleRef, TokenTransferEvent,
+            LockCreateEvent, LockDestroyEvent, LockEvent, OperationEvent, TokenEvent,
+            TokenEventDetails, TokenHolder, TokenId, TokenModuleRef, TokenTransferEvent,
         },
         types::{
             AccountCreationDetails, AccountTransactionDetails, AccountTransactionEffects,
@@ -691,6 +723,39 @@ mod tests {
                 },
             )),
         }
+    }
+
+    #[test]
+    fn token_update_transfer_retains_lock_annotations() {
+        let event = serde_json::json!({
+            "tag": "TokenTransfer", "tokenId": "CCD",
+            "amount": {"value": "125", "decimals": 2},
+            "from": {"address": "alice"}, "to": {"address": "bob"},
+            "toLock": {"accountIndex": 1, "sequenceNumber": 2, "creationOrder": 0}
+        });
+        let rendered = render_event_line(&event).unwrap();
+        assert!(rendered.contains("Transfer 1.25 CCD: alice -> bob"));
+        assert!(rendered.contains("(locked @ "));
+    }
+
+    #[test]
+    fn unknown_event_between_known_siblings_retains_raw_details() {
+        let events = serde_json::json!([
+            {"tag": "LockCreated", "lockId": {"accountIndex": 1, "sequenceNumber": 2, "creationOrder": 0}},
+            {"tag": "FutureOperation", "details": {"raw": "aabb", "value": 42}},
+            {"tag": "LockDestroyed", "lockId": {"accountIndex": 1, "sequenceNumber": 2, "creationOrder": 0}}
+        ]);
+        let lines: Vec<_> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| render_event_line(event).unwrap())
+            .collect();
+        assert!(lines[0].contains("Lock created:"));
+        assert!(lines[1].contains("FutureOperation"));
+        assert!(lines[1].contains("aabb"));
+        assert!(lines[1].contains("42"));
+        assert!(lines[2].contains("Lock destroyed:"));
     }
 
     #[test]
@@ -888,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_meta_update_renders_lock_events_as_single_lines() {
+    fn finalized_token_update_renders_lock_events_as_single_lines() {
         let hash =
             transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
         let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
@@ -905,15 +970,20 @@ mod tests {
                         cost: Amount::from_micro_ccd(11_600),
                         sender: account_address(),
                         sponsor: None,
-                        effects: Upward::Known(AccountTransactionEffects::MetaUpdate {
+                        effects: Upward::Known(AccountTransactionEffects::TokenUpdate {
                             events: vec![
-                                MetaEvent::LockCreate(LockCreateEvent {
-                                    lock_id: lock_id.clone(),
-                                    lock_config: Vec::<u8>::new().into(),
-                                }),
-                                MetaEvent::LockDestroy(LockDestroyEvent {
-                                    lock_id: lock_id.clone(),
-                                }),
+                                Upward::Known(OperationEvent::Lock(LockEvent::Create(
+                                    LockCreateEvent {
+                                        lock_id: lock_id.clone(),
+                                        lock_config: Vec::<u8>::new().into(),
+                                    },
+                                ))),
+                                Upward::Unknown(()),
+                                Upward::Known(OperationEvent::Lock(LockEvent::Destroy(
+                                    LockDestroyEvent {
+                                        lock_id: lock_id.clone(),
+                                    },
+                                ))),
                             ],
                         }),
                     },
@@ -929,12 +999,22 @@ mod tests {
         )
         .unwrap();
 
-        assert!(rendered.contains(&format!("- Lock created: {lock_id}")));
-        assert!(rendered.contains(&format!("- Lock destroyed: {lock_id}")));
+        let created = rendered
+            .find(&format!("- Lock created: {lock_id}"))
+            .unwrap();
+        let unknown = rendered.find("Unknown(())").unwrap();
+        let destroyed = rendered
+            .find(&format!("- Lock destroyed: {lock_id}"))
+            .unwrap();
+        assert!(created < unknown && unknown < destroyed);
+        // Protobuf Upward::Unknown(()) carries no residual bytes or fields.
+        assert!(rendered.contains(r#""details":"Unknown(())""#));
+        assert_eq!(rendered.matches("- Lock created:").count(), 1);
+        assert_eq!(rendered.matches("- Lock destroyed:").count(), 1);
     }
 
     #[test]
-    fn finalized_meta_update_renders_token_transfer_as_single_line() {
+    fn finalized_token_update_renders_token_transfer_as_single_line() {
         let hash =
             transaction_hash("0fda6e284f9cd4429c6f76fd1bf6179aad4fa1bb218fe5ec8ad33916bf84a833");
         let block = block_hash("e2a12d06273f5641ea8157e04367eae49a72706aa831aa58b60ee5c062cdd6e2");
@@ -949,8 +1029,8 @@ mod tests {
                         cost: Amount::from_micro_ccd(11_700),
                         sender: account_address(),
                         sponsor: None,
-                        effects: Upward::Known(AccountTransactionEffects::MetaUpdate {
-                            events: vec![MetaEvent::Token(TokenEvent {
+                        effects: Upward::Known(AccountTransactionEffects::TokenUpdate {
+                            events: vec![Upward::Known(OperationEvent::Token(TokenEvent {
                                 token_id: TokenId::from_str("TEST").unwrap(),
                                 event: TokenEventDetails::Transfer(TokenTransferEvent {
                                     from: TokenHolder::Account {
@@ -961,10 +1041,8 @@ mod tests {
                                     },
                                     amount: concordium_rust_sdk::base::protocol_level_tokens::TokenAmount::from_raw(1000, 2),
                                     memo: None,
-                                    from_lock: None,
-                                    to_lock: None,
                                 }),
-                            })],
+                            }))],
                         }),
                     },
                 )),

@@ -2,7 +2,7 @@
 
 use crate::{
     cli::{
-        TokenLockCancelArgs, TokenLockCreateArgs, TokenLockFundArgs, TokenLockReturnArgs,
+        TokenLockCancelArgs, TokenLockCreateArgs, TokenLockFundArgs, TokenLockReleaseArgs,
         TokenLockSendArgs, TokenLockShowArgs,
     },
     commands::{
@@ -14,7 +14,7 @@ use anyhow::{Result, bail};
 use cliclack::{confirm, spinner};
 use concordium_rust_sdk::protocol_level_tokens::{
     LockId, TokenId,
-    lock_client::{self, FundTokens, ReturnTokens, SendTokens, Validation},
+    lock_client::{self, FundTokens, ReleaseTokens, SendTokens, Validation},
 };
 use rusqlite::Connection;
 
@@ -170,7 +170,7 @@ impl PreparedTokenLockSend {
 }
 
 #[derive(Clone, Debug)]
-struct PreparedTokenLockReturn {
+struct PreparedTokenLockRelease {
     context: shared::PreparedTokenMutationContext,
     validation: ValidationPolicy,
     lock_id: Promptable<LockId>,
@@ -179,8 +179,8 @@ struct PreparedTokenLockReturn {
     amount: Promptable<TokenAmountInput>,
 }
 
-impl PreparedTokenLockReturn {
-    fn from_args(args: TokenLockReturnArgs) -> Result<Self> {
+impl PreparedTokenLockRelease {
+    fn from_args(args: TokenLockReleaseArgs) -> Result<Self> {
         Ok(Self {
             context: shared::PreparedTokenMutationContext::from_raw(
                 args.account.as_deref(),
@@ -233,6 +233,10 @@ fn lock_validation(policy: ValidationPolicy) -> Result<Validation> {
         "Skipping client-side lock validation; the node may still reject the transaction.",
     )?;
     Ok(Validation::NoValidation)
+}
+
+fn release_validation_retry_allowed(validation: Validation, prompts_allowed: bool) -> bool {
+    validation == Validation::Validate && prompts_allowed
 }
 
 fn confirm_validation_bypass(error: &str) -> Result<bool> {
@@ -614,9 +618,9 @@ pub(super) async fn send(conn: &Connection, args: TokenLockSendArgs) -> Result<(
     Ok(())
 }
 
-/// Return locked funds to the source account.
-pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -> Result<()> {
-    let prepared = PreparedTokenLockReturn::from_args(args)?;
+/// Release locked funds to the source account.
+pub(super) async fn release_funds(conn: &Connection, args: TokenLockReleaseArgs) -> Result<()> {
+    let prepared = PreparedTokenLockRelease::from_args(args)?;
     let mut context = shared::resolve_prepared_mutation_context(conn, &prepared.context).await?;
     let lock_id = prepared
         .lock_id
@@ -646,7 +650,7 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
     shared::ensure_lock_token(lock_client.lock_info(), &token_id)?;
     let mut query_client = context.client.clone();
     let token_info = shared::query_token_info(&mut query_client, token_id.clone()).await?;
-    let payload = ReturnTokens {
+    let payload = ReleaseTokens {
         token_id: token_id.clone(),
         source,
         amount: shared::resolve_token_amount(
@@ -663,7 +667,7 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
     };
 
     cliclack::log::info(format!(
-        "Token lock return\nnetwork: {} ({})\naccount: {}\nlock: {}\ntoken: {}\nsource: {}\namount: {}",
+        "Token lock release\nnetwork: {} ({})\naccount: {}\nlock: {}\ntoken: {}\nsource: {}\namount: {}",
         context.network_name,
         context.endpoint_label,
         context.wallet.address,
@@ -673,17 +677,17 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
         payload.amount,
     ))?;
     if !shared::confirm_submission(
-        "Approve and submit this token lock return?",
-        "token lock return declined by user",
+        "Approve and submit this token lock release?",
+        "token lock release declined by user",
     )? {
         return Ok(());
     }
 
     let validation = lock_validation(prepared.validation)?;
     let spin = spinner();
-    spin.start("Submitting token lock return...");
+    spin.start("Submitting token lock release...");
     let transaction_hash = match lock_client
-        .return_funds(
+        .release_funds(
             &context.wallet,
             payload.clone(),
             Some(lock_client::TransactionMetadata::default()),
@@ -693,14 +697,16 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
     {
         Ok(transaction_hash) => transaction_hash,
         Err(error) => {
-            if validation == Validation::Validate && prepared.context.input_mode().prompts_allowed()
-            {
+            if release_validation_retry_allowed(
+                validation,
+                prepared.context.input_mode().prompts_allowed(),
+            ) {
                 spin.clear();
                 if confirm_validation_bypass(&error.to_string())? {
                     let spin = spinner();
-                    spin.start("Submitting token lock return without client-side validation...");
+                    spin.start("Submitting token lock release without client-side validation...");
                     let transaction_hash = lock_client
-                        .return_funds(
+                        .release_funds(
                             &context.wallet,
                             payload,
                             Some(lock_client::TransactionMetadata::default()),
@@ -719,7 +725,7 @@ pub(super) async fn return_funds(conn: &Connection, args: TokenLockReturnArgs) -
         }
     };
     cliclack::log::success(format!(
-        "Submitted token lock return on {} ({}): {transaction_hash}",
+        "Submitted token lock release on {} ({}): {transaction_hash}",
         context.network_name, context.endpoint_label
     ))?;
     if prepared.context.should_wait_for_finalization() {
@@ -824,4 +830,21 @@ pub(super) async fn show(conn: &Connection, args: TokenLockShowArgs) -> Result<(
     let info = shared::query_lock_info(&mut client, args.lock_id).await?;
     println!("{}", shared::render_lock_info(&info)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_validation_requires_explicit_bypass_and_never_retries_non_interactively() {
+        let validate = lock_validation(ValidationPolicy::from_no_validate(false)).unwrap();
+        assert_eq!(validate, Validation::Validate);
+        let bypass = lock_validation(ValidationPolicy::from_no_validate(true)).unwrap();
+        assert_eq!(bypass, Validation::NoValidation);
+        assert!(release_validation_retry_allowed(validate, true));
+        assert!(!release_validation_retry_allowed(validate, false));
+        assert!(!release_validation_retry_allowed(bypass, true));
+        assert!(!release_validation_retry_allowed(bypass, false));
+    }
 }
