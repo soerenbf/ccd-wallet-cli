@@ -2,17 +2,20 @@
   "updateType": "createPlt",
   "update": {
     "tokenId": "TEST",
-    "tokenModule": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tokenModule": "5c5c2645db84a7026d78f2501740f60a8ccb8fae5c166dc2428077fd9a699a4a",
     "decimals": 6,
     "initializationParametersJson": {
       "name": "Test token",
       "metadata": {
         "url": "https://example.com/token.json"
       },
-      "governanceAccount": null,
+      "governanceAccount": {
+        "type": "account",
+        "address": "3m8BqSVdRSj1kSKspuEDs5ijeLsjbRc191tnMfgy2R393qDtGC"
+      },
       "allowList": false,
       "denyList": false,
-      "initialSupply": null,
+      "initialSupply": { "value": "50000", "decimals": 6 },
       "mintable": true,
       "burnable": true
     }
