@@ -447,6 +447,21 @@ fn render_event_line(event: &serde_json::Value) -> Result<String> {
         .unwrap_or("Unknown");
     match tag {
         "TokenTransfer" => render_token_transfer_event_line(event),
+        "LockAmount" | "UnlockAmount" => {
+            let token_id = event_string_field(event, "tokenId")?;
+            let holder = render_holder(event.get("tokenHolder"));
+            let lock_id = render_json_lock_id(event.get("lockId"))?;
+            let amount = render_json_token_amount(event.get("amount"))?;
+            if tag == "LockAmount" {
+                Ok(format!(
+                    "- Transfer {amount} {token_id}: {holder} -> {holder} (locked @ {lock_id})"
+                ))
+            } else {
+                Ok(format!(
+                    "- Transfer {amount} {token_id}: {holder} (locked @ {lock_id}) -> {holder}"
+                ))
+            }
+        }
         "LockCreated" => Ok(format!(
             "- Lock created: {}",
             render_json_lock_id(event.get("lockId"))?
@@ -479,8 +494,8 @@ fn render_event_line(event: &serde_json::Value) -> Result<String> {
 
 fn render_token_transfer_event_line(event: &serde_json::Value) -> Result<String> {
     let token_id = event_string_field(event, "tokenId")?;
-    let from = render_holder_with_optional_lock(event.get("from"), event.get("fromLock"))?;
-    let to = render_holder_with_optional_lock(event.get("to"), event.get("toLock"))?;
+    let from = render_holder(event.get("from"));
+    let to = render_holder(event.get("to"));
     let amount = render_json_token_amount(event.get("amount"))?;
     Ok(format!("- Transfer {amount} {token_id}: {from} -> {to}"))
 }
@@ -491,19 +506,6 @@ fn render_holder(holder: Option<&serde_json::Value>) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown")
         .to_owned()
-}
-
-fn render_holder_with_optional_lock(
-    holder: Option<&serde_json::Value>,
-    lock: Option<&serde_json::Value>,
-) -> Result<String> {
-    let mut rendered = render_holder(holder);
-    if let Some(lock) = lock {
-        rendered.push_str(" (locked @ ");
-        rendered.push_str(&render_json_lock_id(Some(lock))?);
-        rendered.push(')');
-    }
-    Ok(rendered)
 }
 
 fn render_json_lock_id(value: Option<&serde_json::Value>) -> Result<String> {
@@ -586,8 +588,9 @@ mod tests {
         common::types::{Amount, TransactionSignature, TransactionTime},
         id::types::AccountAddress,
         protocol_level_tokens::{
-            LockCreateEvent, LockDestroyEvent, LockEvent, OperationEvent, TokenEvent,
-            TokenEventDetails, TokenHolder, TokenId, TokenModuleRef, TokenTransferEvent,
+            LockAmountEvent, LockCreateEvent, LockDestroyEvent, LockEvent, OperationEvent,
+            TokenEvent, TokenEventDetails, TokenHolder, TokenId, TokenModuleRef,
+            TokenTransferEvent, UnlockAmountEvent,
         },
         types::{
             AccountCreationDetails, AccountTransactionDetails, AccountTransactionEffects,
@@ -723,19 +726,6 @@ mod tests {
                 },
             )),
         }
-    }
-
-    #[test]
-    fn token_update_transfer_retains_lock_annotations() {
-        let event = serde_json::json!({
-            "tag": "TokenTransfer", "tokenId": "CCD",
-            "amount": {"value": "125", "decimals": 2},
-            "from": {"address": "alice"}, "to": {"address": "bob"},
-            "toLock": {"accountIndex": 1, "sequenceNumber": 2, "creationOrder": 0}
-        });
-        let rendered = render_event_line(&event).unwrap();
-        assert!(rendered.contains("Transfer 1.25 CCD: alice -> bob"));
-        assert!(rendered.contains("(locked @ "));
     }
 
     #[test]
@@ -978,7 +968,23 @@ mod tests {
                                         lock_config: Vec::<u8>::new().into(),
                                     },
                                 ))),
+                                Upward::Known(OperationEvent::Lock(LockEvent::LockAmount(
+                                    LockAmountEvent {
+                                        token_holder: TokenHolder::Account { address: account_address() },
+                                        lock_id: lock_id.clone(),
+                                        token_id: TokenId::from_str("TEST").unwrap(),
+                                        amount: concordium_rust_sdk::base::protocol_level_tokens::TokenAmount::from_raw(125, 2),
+                                    },
+                                ))),
                                 Upward::Unknown(()),
+                                Upward::Known(OperationEvent::Lock(LockEvent::UnlockAmount(
+                                    UnlockAmountEvent {
+                                        token_holder: TokenHolder::Account { address: account_address() },
+                                        lock_id: lock_id.clone(),
+                                        token_id: TokenId::from_str("TEST").unwrap(),
+                                        amount: concordium_rust_sdk::base::protocol_level_tokens::TokenAmount::from_raw(50, 2),
+                                    },
+                                ))),
                                 Upward::Known(OperationEvent::Lock(LockEvent::Destroy(
                                     LockDestroyEvent {
                                         lock_id: lock_id.clone(),
@@ -1006,7 +1012,19 @@ mod tests {
         let destroyed = rendered
             .find(&format!("- Lock destroyed: {lock_id}"))
             .unwrap();
-        assert!(created < unknown && unknown < destroyed);
+        let holder = account_address();
+        let funded = rendered
+            .find(&format!(
+                "- Transfer 1.25 TEST: {holder} -> {holder} (locked @ {lock_id})"
+            ))
+            .unwrap();
+        let released = rendered
+            .find(&format!(
+                "- Transfer 0.50 TEST: {holder} (locked @ {lock_id}) -> {holder}"
+            ))
+            .unwrap();
+        assert!(created < funded && funded < unknown && unknown < released && released < destroyed);
+        assert_eq!(rendered.matches("- Transfer ").count(), 2);
         // Protobuf Upward::Unknown(()) carries no residual bytes or fields.
         assert!(rendered.contains(r#""details":"Unknown(())""#));
         assert_eq!(rendered.matches("- Lock created:").count(), 1);

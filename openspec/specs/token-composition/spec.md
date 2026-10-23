@@ -37,8 +37,8 @@ The CLI SHALL provide `ccd-wallet token compose <PLAN>` to create or continue a 
 - **WHEN** a user requests completion for a value starting with `@`
 - **THEN** the composer suggests `@sender`, `@`, and explicit same-plan lock references such as `@1` and `@2` based on the current saved plan
 
-### Requirement: Compose records all token and lock MetaUpdate operation families
-The interactive composer SHALL let users add every user-facing token and lock MetaUpdate operation family to the plan through top-level operation commands: token transfer, mint, burn, pause, unpause, allow-list add/remove, deny-list add/remove, admin-roles assign/revoke, metadata update, lock create, lock fund, lock send, lock return, and lock cancel. Operation commands SHALL accept inline arguments where supplied and SHALL prompt for missing required non-secret fields in interactive mode. Before saving an added operation, the composer SHALL bind the plan to a network genesis hash, resolve any local account labels in the operation to raw account addresses, preserve the special `@sender` account reference where supplied, validate referenced tokens against the bound network, and validate token amounts against each token's configured decimals. For lock creation, the composer SHALL support either repeated `--recipient` values for limited-recipient locks or `--any-recipient` for any-recipient locks. When interactive lock creation omits both forms, the composer SHALL prompt for recipient mode before collecting any recipient-account inputs. For lock send, limited-recipient locks SHALL continue to validate recipients against the configured recipient set and SHALL present a selector when the recipient is omitted, while any-recipient locks SHALL accept any resolved recipient and SHALL prompt with free-form account input when the recipient is omitted.
+### Requirement: Compose records all token and lock TokenUpdate operation families
+The interactive composer SHALL let users add every user-facing token and lock TokenUpdate operation family to the plan through top-level operation commands: token transfer, mint, burn, pause, unpause, allow-list add/remove, deny-list add/remove, admin-roles assign/revoke, metadata update, lock create, lock fund, lock send, lock release, and lock cancel. Operation commands SHALL accept inline arguments where supplied and SHALL prompt for missing required non-secret fields in interactive mode. Before saving an added operation, the composer SHALL bind the plan to a network genesis hash, resolve any local account labels in the operation to raw account addresses, preserve the special `@sender` account reference where supplied, validate referenced tokens against the bound network, and validate token amounts against each token's configured decimals. For lock creation, the composer SHALL support either repeated `--recipient` values for limited-recipient locks or `--any-recipient` for any-recipient locks. When interactive lock creation omits both forms, the composer SHALL prompt for recipient mode before collecting any recipient-account inputs. For lock send, limited-recipient locks SHALL continue to validate recipients against the configured recipient set and SHALL present a selector when the recipient is omitted, while any-recipient locks SHALL accept any resolved recipient and SHALL prompt with free-form account input when the recipient is omitted.
 
 #### Scenario: User adds an operation with inline arguments
 - **WHEN** a user enters `mint --token CCD --amount 100` in the interactive composer
@@ -147,7 +147,7 @@ The token compose REPL SHALL support optional `--name` and `--description` input
 
 #### Scenario: Compose submission encodes lock metadata
 - **WHEN** a user submits a composition plan containing a lock name or description
-- **THEN** the corresponding lock-create MetaUpdate operation contains metadata with those recognized fields
+- **THEN** the corresponding lock-create TokenUpdate operation contains metadata with those recognized fields
 - **AND** arbitrary additional metadata fields are not encoded
 
 #### Scenario: Metadata-free version-1 plan remains compatible
@@ -225,14 +225,14 @@ The CLI SHALL provide `ccd-wallet token compose preview <PLAN>` to render the or
 - **WHEN** a user previews a composition plan containing an any-recipient lock creation operation
 - **THEN** the preview describes that lock as targeting `any eligible account`
 - **AND** it does not render a synthetic recipient list for that operation
-### Requirement: Compose submit submits a plan as one MetaUpdate transaction
-The CLI SHALL provide `ccd-wallet token compose submit <PLAN> --sender <LABEL> ...` to resolve and submit a token composition plan as one protocol-level token MetaUpdate account transaction. Submit SHALL resolve network and node context, signer account, token amounts, existing lock IDs, and same-plan `@N` lock references before presenting a final confirmation and submitting the transaction. When neither `--network` nor `--node` is supplied, submit SHALL infer the network from the plan's stored genesis hash instead of prompting for network selection. In interactive mode, submit SHALL always require explicit sender selection when no sender is supplied, even if only one account is available. Submit SHALL reject plans whose stored network genesis hash does not match the selected network.
+### Requirement: Compose submit submits a plan as one TokenUpdate transaction
+The CLI SHALL provide `ccd-wallet token compose submit <PLAN> --sender <LABEL> ...` to resolve and submit a token composition plan as one unscoped TokenUpdate account transaction. Submit SHALL resolve network and node context, signer account, token amounts, existing lock IDs, and same-plan `@N` lock references before presenting a final confirmation and submitting the transaction. When neither `--network` nor `--node` is supplied, submit SHALL infer the network from the plan's stored genesis hash instead of prompting for network selection. In interactive mode, submit SHALL always require explicit sender selection when no sender is supplied, even if only one account is available. Submit SHALL reject plans whose stored network genesis hash does not match the selected network.
 
 #### Scenario: User submits a saved plan
 - **WHEN** a user runs `ccd-wallet token compose submit plan.toml --sender alice --network testnet`
 - **AND** `plan.toml` contains a valid token composition plan for testnet's genesis hash
 - **THEN** the CLI resolves the plan using Alice as the signing account on testnet
-- **AND** submits all planned operations as a single MetaUpdate transaction after confirmation
+- **AND** submits all planned operations as a single unscoped TokenUpdate transaction after confirmation
 - **AND** reports the submitted transaction hash
 
 #### Scenario: User submits without network flag
@@ -292,4 +292,18 @@ Both `ccd-wallet token compose submit <PLAN>` and the REPL `submit` command SHAL
 - **AND** the plan contains a network genesis hash that maps to a configured network
 - **THEN** the shared prepared submit resolver can use the plan-derived network inference according to existing token composition semantics
 - **AND** still validates that the resolved network matches the plan genesis hash before submitting
+
+### Requirement: Version-1 plans preserve legacy release spellings
+The composer SHALL read existing version-1 plans containing legacy lock-return operation tags and `return` grant capabilities as release operations and capabilities. New saves SHALL use canonical release spellings without changing the plan version, operation order, amounts, account references, or lock references. Loading or previewing SHALL NOT rewrite the file.
+
+#### Scenario: Legacy plan can be previewed and submitted
+- **WHEN** a version-1 plan contains a legacy lock-return operation and a lock grant with the `return` capability
+- **THEN** preview describes them using release terminology
+- **AND** submission constructs the corresponding release operation and grant
+- **AND** loading and previewing leave the file unchanged
+
+#### Scenario: Saving canonicalizes legacy plan spellings
+- **WHEN** the composer successfully saves a loaded legacy version-1 plan
+- **THEN** the saved operation and grant capability use release spellings
+- **AND** the plan remains version 1 with its existing semantic values and operation order preserved
 
