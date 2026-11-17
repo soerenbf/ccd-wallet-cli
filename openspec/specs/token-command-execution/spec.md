@@ -80,7 +80,7 @@ Covered inputs include recipient, target, source, repeated target and recipient 
 - **THEN** the CLI resolves the later local account reference without prompting again for the same seed password
 
 ### Requirement: Token lock commands manage protocol-level locks
-The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, releases, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the CLI SHALL support either repeated `--recipient` values for limited-recipient locks or `--any-recipient` for any-recipient locks, and those inputs SHALL be mutually exclusive. In interactive mode, when neither limited recipients nor `--any-recipient` is supplied, the CLI SHALL prompt for recipient mode before collecting any recipient-account inputs. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For lock creation, omitted `--keep-alive` SHALL prompt in interactive mode with No selected by default and SHALL default to false in non-interactive mode. For fund, send, release, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and release SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted. For lock send, limited-recipient locks SHALL continue to require a configured recipient, while any-recipient locks SHALL accept any resolved recipient account.
+The CLI SHALL let a user manage protocol-level token locks through nested `token lock` commands for lock creation, funding, lock-controlled sends, releases, and cancellation. All token lock mutation commands SHALL always present the account selector to make the signer explicit. For lock creation, the CLI SHALL support either repeated `--recipient` values for limited-recipient locks or `--any-recipient` for any-recipient locks, and those inputs SHALL be mutually exclusive. In interactive mode, when neither limited recipients nor `--any-recipient` is supplied, the CLI SHALL prompt for recipient mode before collecting any recipient-account inputs. For lock creation, the `--grant` option SHALL be optional in interactive mode and omitted grants SHALL be collected through a guided grant composition flow that prompts for a grant account and lets the user select known capabilities. For fund, send, release, and cancel, the lock identifier SHALL have interactive prompt fallback when omitted. The token identifier for fund, send, and release SHALL be supplied via `--token` and SHALL have an interactive selector populated from the lock's configured token set when omitted. For lock send, limited-recipient locks SHALL continue to require a configured recipient, while any-recipient locks SHALL accept any resolved recipient account.
 
 #### Scenario: User creates a limited-recipient token lock
 - **WHEN** a user runs `ccd-wallet token lock create` with one or more `--recipient` values, the required lock configuration, and signing account context
@@ -97,11 +97,6 @@ The CLI SHALL let a user manage protocol-level token locks through nested `token
 - **THEN** the CLI prompts for at least one grant account
 - **AND** the CLI lets the user select one or more lock capabilities from the known capability set for each grant
 - **AND** the CLI asks whether another grant should be added
-
-#### Scenario: User creates a token lock without keep-alive flag interactively
-- **WHEN** a user runs `ccd-wallet token lock create` without `--keep-alive` in interactive mode
-- **THEN** the CLI asks whether to keep the lock alive after funds are released
-- **AND** the default selected answer is No
 
 #### Scenario: User creates a token lock without recipient mode interactively
 - **WHEN** a user runs `ccd-wallet token lock create` without `--recipient` values and without `--any-recipient` in interactive mode

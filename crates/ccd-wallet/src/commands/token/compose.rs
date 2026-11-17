@@ -20,7 +20,7 @@ use concordium_rust_sdk::{
         common::types::TransactionTime,
         contracts_common::AccountAddress,
         protocol_level_locks::{LockId, LockRecipients},
-        protocol_level_tokens::{Operation, Operations, TokenAmount, TokenId, operations},
+        protocol_level_tokens::{OperationInput, TokenAmount, TokenId, operations},
         transactions::{BlockItem, ExactSizeTransactionSigner, construct},
     },
     protocol_level_tokens::lock_client,
@@ -226,7 +226,7 @@ async fn resolve_token_update_operations(
     conn: &Connection,
     context: &mut shared::MutationContext,
     plan: &Plan,
-) -> Result<Operations> {
+) -> Result<Vec<OperationInput>> {
     let predicted_locks = predict_created_locks(context, plan).await?;
     let mut operations = Vec::with_capacity(plan.operations.len());
     for operation in &plan.operations {
@@ -324,7 +324,6 @@ async fn resolve_token_update_operations(
                 tokens,
                 name,
                 description,
-                keep_alive,
             } => {
                 let recipients = recipients.resolve_accounts(conn, context)?;
                 let expiry = shared::parse_expiry_time(expiry)?;
@@ -341,7 +340,6 @@ async fn resolve_token_update_operations(
                     expiry,
                     grants,
                     tokens,
-                    *keep_alive,
                     name.clone(),
                     description.clone(),
                 );
@@ -390,13 +388,9 @@ async fn resolve_token_update_operations(
                     amount,
                 )?);
             }
-            PlanOperation::LockCancel { lock } => {
-                let lock_id = resolve_lock_reference(lock, &predicted_locks)?;
-                operations.push(operations::cancel_lock(lock_id, None));
-            }
         }
     }
-    Ok(Operations::new(operations))
+    Ok(operations)
 }
 
 // Keep same-plan reference mapping at the operation construction boundary.
@@ -406,7 +400,7 @@ fn resolve_release_operation(
     token_id: TokenId,
     source: AccountAddress,
     amount: TokenAmount,
-) -> Result<Operation> {
+) -> Result<OperationInput> {
     let lock_id = resolve_lock_reference(lock, predicted_locks)?;
     Ok(operations::release_locked_tokens(
         token_id, lock_id, source, amount, None,
@@ -608,7 +602,7 @@ fn parse_admin_roles(
 
 async fn sign_and_send_token_update(
     context: &mut shared::MutationContext,
-    operations: &Operations,
+    operations: &[OperationInput],
 ) -> Result<concordium_rust_sdk::base::hashes::TransactionHash> {
     let expiry = TransactionTime::seconds_after(DEFAULT_EXPIRY_SECS);
     let nonce = context
@@ -773,15 +767,6 @@ async fn validate_operation_tokens_and_amounts(
             validate_lock_token(client, plan, lock, &token_id).await?;
             validate_lock_recipient(client, plan, lock, recipient).await?;
             validate_token_amount(client, token_id, amount).await?;
-        }
-        PlanOperation::LockCancel { lock } => {
-            if matches!(
-                ParsedLockReference::parse(lock)?,
-                ParsedLockReference::Existing(_)
-            ) {
-                let lock_id = lock.parse().context("invalid lock identifier")?;
-                shared::query_lock_info(client, lock_id).await?;
-            }
         }
     }
     Ok(())
@@ -1072,7 +1057,6 @@ fn resolve_operation_account_references(
             tokens,
             name,
             description,
-            keep_alive,
         } => PlanOperation::LockCreate {
             recipients: recipients.resolve_plan_accounts(conn, genesis_hash, unlocks)?,
             expiry,
@@ -1083,7 +1067,6 @@ fn resolve_operation_account_references(
             tokens,
             name,
             description,
-            keep_alive,
         },
         PlanOperation::LockSend {
             lock,
@@ -1309,7 +1292,6 @@ fn nested_command_candidates(first: &str) -> Vec<String> {
             "fund".to_owned(),
             "send".to_owned(),
             "release".to_owned(),
-            "cancel".to_owned(),
         ],
         _ => Vec::new(),
     }
@@ -1333,7 +1315,6 @@ fn flag_candidates(words: &[String]) -> Vec<String> {
             "--token",
             "--name",
             "--description",
-            "--keep-alive",
         ],
         (Some("lock"), Some("fund")) => &["--token", "--amount"],
         (Some("lock"), Some("send")) => &["--source", "--recipient", "--token", "--amount"],
@@ -1627,7 +1608,6 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
             let name = args.take_optional_or_prompt("name", "Lock name (optional):")?;
             let description =
                 args.take_optional_or_prompt("description", "Lock description (optional):")?;
-            let keep_alive = args.take_keep_alive()?;
             args.ensure_no_remaining_values()?;
             Ok(PlanOperation::LockCreate {
                 recipients,
@@ -1636,7 +1616,6 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
                 tokens,
                 name,
                 description,
-                keep_alive,
             })
         }
         "fund" => Ok(PlanOperation::LockFund {
@@ -1657,9 +1636,6 @@ fn parse_lock_op(mut words: WordCursor) -> Result<PlanOperation> {
             source: args.take_or_prompt("source", "Source account address or @sender:")?,
             amount: args.take_or_prompt("amount", "Token amount:")?,
         }),
-        "cancel" => Ok(PlanOperation::LockCancel {
-            lock: args.take_positional_or_prompt("lock", "Lock id or @ reference:")?,
-        }),
         other => bail!("unknown lock action '{other}'"),
     }
 }
@@ -1679,7 +1655,7 @@ impl OperationArgs {
         while let Some(word) = words.pop() {
             if let Some(name) = word.strip_prefix("--") {
                 match name {
-                    "keep-alive" | "any-recipient" => flags.push(name.to_owned()),
+                    "any-recipient" => flags.push(name.to_owned()),
                     _ => options.push((name.to_owned(), words.required_word(name)?)),
                 }
             } else {
@@ -1695,15 +1671,6 @@ impl OperationArgs {
 
     fn flag(&self, name: &str) -> bool {
         self.flags.iter().any(|flag| flag == name)
-    }
-
-    fn take_keep_alive(&self) -> Result<bool> {
-        if self.flag("keep-alive") {
-            return Ok(true);
-        }
-        Ok(confirm("Keep the lock alive after funds are released?")
-            .initial_value(false)
-            .interact()?)
     }
 
     fn take_lock_recipients(&mut self) -> Result<PlanLockRecipients> {
@@ -1894,11 +1861,10 @@ fn help_text() -> &'static str {
   admin-roles assign --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   admin-roles revoke --token TOKEN --target ACCOUNT --role ROLE [--role ROLE...]
   metadata update --token TOKEN --url URL [--checksum-sha256 HEX]
-  lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--name NAME] [--description DESCRIPTION] [--keep-alive]
+  lock create (--recipient ACCOUNT [--recipient ACCOUNT...] | --any-recipient) --expiry TIME --grant GRANT --token TOKEN [--name NAME] [--description DESCRIPTION]
   lock fund LOCK --token TOKEN --amount AMOUNT
   lock send LOCK --source ACCOUNT --recipient ACCOUNT --token TOKEN --amount AMOUNT
   lock release LOCK --source ACCOUNT --token TOKEN --amount AMOUNT
-  lock cancel LOCK
 
 Plan commands:
   preview
@@ -2007,8 +1973,6 @@ enum PlanOperation {
         name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
-        #[serde(default)]
-        keep_alive: bool,
     },
     LockFund {
         lock: String,
@@ -2028,9 +1992,6 @@ enum PlanOperation {
         token: String,
         source: String,
         amount: String,
-    },
-    LockCancel {
-        lock: String,
     },
 }
 
@@ -2181,8 +2142,7 @@ impl PlanOperation {
         match self {
             Self::LockFund { lock, .. }
             | Self::LockSend { lock, .. }
-            | Self::LockRelease { lock, .. }
-            | Self::LockCancel { lock } => Some(lock),
+            | Self::LockRelease { lock, .. } => Some(lock),
             _ => None,
         }
     }
@@ -2245,7 +2205,6 @@ impl PlanOperation {
                 tokens,
                 name,
                 description,
-                keep_alive,
             } => {
                 let mut metadata = Vec::new();
                 if let Some(name) = name {
@@ -2260,7 +2219,7 @@ impl PlanOperation {
                     metadata.join(", ")
                 };
                 format!(
-                    "Create lock @{} for tokens [{}], recipients [{}], expiry {expiry}, grants [{}], metadata [{metadata}], keep alive {}",
+                    "Create lock @{} for tokens [{}], recipients [{}], expiry {expiry}, grants [{}], metadata [{metadata}]",
                     lock_create_index.unwrap_or_default(),
                     tokens.join(", "),
                     recipients.preview(),
@@ -2269,7 +2228,6 @@ impl PlanOperation {
                         .map(PlanLockGrant::preview)
                         .collect::<Vec<_>>()
                         .join("; "),
-                    if *keep_alive { "yes" } else { "no" }
                 )
             }
             Self::LockFund {
@@ -2290,7 +2248,6 @@ impl PlanOperation {
                 source,
                 amount,
             } => format!("Release {amount} {token} from {source} in lock {lock}"),
-            Self::LockCancel { lock } => format!("Cancel lock {lock}"),
         }
     }
 }
@@ -2487,8 +2444,7 @@ fn validate_lock_references(plan: &Plan) -> Result<()> {
         let lock = match operation {
             PlanOperation::LockFund { lock, .. }
             | PlanOperation::LockSend { lock, .. }
-            | PlanOperation::LockRelease { lock, .. }
-            | PlanOperation::LockCancel { lock } => lock,
+            | PlanOperation::LockRelease { lock, .. } => lock,
             _ => continue,
         };
         match ParsedLockReference::parse(lock)? {
@@ -2532,7 +2488,6 @@ mod tests {
                     tokens: vec!["CCD".to_owned()],
                     name: None,
                     description: None,
-                    keep_alive: false,
                 },
                 PlanOperation::LockFund {
                     lock: "@1".to_owned(),
@@ -2634,7 +2589,7 @@ amount = "1.25"
         assert!(
             parse_repl_command("lock return @1 --token CCD --source @sender --amount 1").is_err()
         );
-        assert!(parse_repl_command("lock create --any-recipient --expiry 1d --token CCD --grant @sender:return --keep-alive false --name x --description y").is_err());
+        assert!(parse_repl_command("lock create --any-recipient --expiry 1d --token CCD --grant @sender:return --name x --description y").is_err());
         let candidates = nested_command_candidates("lock");
         assert!(candidates.contains(&"release".to_owned()));
         assert!(!candidates.contains(&"return".to_owned()));
@@ -2644,6 +2599,7 @@ amount = "1.25"
     fn ordered_operations_are_always_unscoped() {
         use concordium_rust_sdk::base::{
             contracts_common::AccountAddress,
+            protocol_level_tokens::{Operation, Operations},
             transactions::{Payload, TokenUpdatePayload},
         };
         let sender = AccountAddress([7; 32]);
@@ -2653,14 +2609,13 @@ amount = "1.25"
             TransactionTime::from_seconds(100),
             vec![],
             vec!["CCD".parse().unwrap()],
-            false,
             None,
             None,
         );
         let metadata =
             shared::build_metadata_url("https://example.com".to_owned(), Some(&"ab".repeat(32)))
                 .unwrap();
-        let ops = Operations::new(vec![
+        let ops = [
             operations::mint_tokens("CCD".parse().unwrap(), TokenAmount::from_raw(100, 2)),
             operations::create_lock(config),
             operations::fund_lock(
@@ -2677,15 +2632,15 @@ amount = "1.25"
                 None,
             ),
             operations::update_token_metadata("OTHER".parse().unwrap(), metadata),
-        ]);
-        for count in [1, ops.operations.len()] {
-            let selected = Operations::new(ops.operations[..count].to_vec());
+        ];
+        for count in [1, ops.len()] {
+            let selected = &ops[..count];
             let tx = construct::operations(
                 1,
                 sender,
                 1.into(),
                 TransactionTime::from_seconds(200),
-                &selected,
+                selected,
             );
             let Payload::TokenUpdate {
                 payload: TokenUpdatePayload::Unscoped(payload),
@@ -2693,7 +2648,10 @@ amount = "1.25"
             else {
                 panic!("unscoped")
             };
-            assert_eq!(payload.decode_operations().unwrap(), selected);
+            assert_eq!(
+                payload.decode_operations().unwrap(),
+                Operations::new(selected.iter().cloned().map(Operation::from).collect())
+            );
         }
     }
 
@@ -2771,7 +2729,6 @@ capabilities = ["fund"]
             TransactionTime::from_seconds(1),
             Vec::new(),
             vec!["CCD".parse().expect("valid token id")],
-            false,
             Some("Treasury vesting".to_owned()),
             Some("Quarterly contributor allocation".to_owned()),
         );
@@ -2800,7 +2757,6 @@ capabilities = ["fund"]
             tokens: vec!["CCD".to_owned()],
             name: Some("Treasury vesting".to_owned()),
             description: Some("Quarterly contributor allocation".to_owned()),
-            keep_alive: false,
         };
         let conn = Connection::open_in_memory().expect("in-memory db opens");
         let mut unlocks = AccountReferenceUnlocks::new();
@@ -2906,7 +2862,6 @@ capabilities = ["fund"]
             tokens: vec!["CCD".to_owned()],
             name: None,
             description: None,
-            keep_alive: false,
         });
         plan.operations.push(PlanOperation::LockFund {
             lock: "@2".to_owned(),
@@ -2941,7 +2896,13 @@ capabilities = ["fund"]
         assert!(flags.contains(&"--any-recipient".to_owned()));
         assert!(flags.contains(&"--name".to_owned()));
         assert!(flags.contains(&"--description".to_owned()));
-        assert!(flags.contains(&"--keep-alive".to_owned()));
+
+        let actions = complete_compose_line("lock ", 5, None)
+            .into_iter()
+            .map(|suggestion| suggestion.value)
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&"create".to_owned()));
+        assert!(actions.contains(&"release".to_owned()));
     }
 
     #[test]
@@ -2963,7 +2924,6 @@ capabilities = ["fund"]
             tokens: vec!["CCD".to_owned()],
             name: None,
             description: None,
-            keep_alive: false,
         });
         save_plan_atomic(&path, &plan).expect("save succeeds");
         let refs = complete_compose_line("lock fund @", 11, Some(path.as_path()))
@@ -3031,7 +2991,7 @@ capabilities = ["fund"]
     #[test]
     fn parses_add_lock_create_with_inline_structured_grant() {
         let command = parse_repl_command(
-            "lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD --name 'Treasury vesting' --description 'Quarterly allocation' --keep-alive",
+            "lock create --recipient bob --expiry 1d --grant alice:fund,send --token CCD --name 'Treasury vesting' --description 'Quarterly allocation'",
         )
         .expect("parse succeeds");
         assert!(matches!(
@@ -3040,7 +3000,6 @@ capabilities = ["fund"]
                 grants,
                 name: Some(name),
                 description: Some(description),
-                keep_alive: true,
                 ..
             }) if grants == vec![PlanLockGrant {
                     account: "alice".to_owned(),
@@ -3054,7 +3013,7 @@ capabilities = ["fund"]
     #[test]
     fn parses_add_lock_create_with_any_recipient() {
         let command = parse_repl_command(
-            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description '' --keep-alive",
+            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description ''",
         )
         .expect("parse succeeds");
         assert!(matches!(
@@ -3067,7 +3026,7 @@ capabilities = ["fund"]
     #[test]
     fn rejects_add_lock_create_with_mixed_recipient_modes() {
         let err = parse_repl_command(
-            "lock create --any-recipient --recipient bob --expiry 1d --grant alice:fund --token CCD --keep-alive",
+            "lock create --any-recipient --recipient bob --expiry 1d --grant alice:fund --token CCD",
         )
         .expect_err("mixed recipient modes must fail");
         assert!(err.to_string().contains("--any-recipient"));
@@ -3076,7 +3035,7 @@ capabilities = ["fund"]
     #[test]
     fn rejects_add_lock_create_with_unknown_inline_grant_capability() {
         let err = parse_repl_command(
-            "lock create --recipient bob --expiry 1d --grant alice:fund,nonsense --token CCD --keep-alive",
+            "lock create --recipient bob --expiry 1d --grant alice:fund,nonsense --token CCD",
         )
         .expect_err("parse must fail");
         assert!(err.to_string().contains("nonsense"));
@@ -3085,7 +3044,7 @@ capabilities = ["fund"]
     #[test]
     fn rejects_arbitrary_lock_metadata_option() {
         let err = parse_repl_command(
-            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description '' --issuer Concordium --keep-alive",
+            "lock create --any-recipient --expiry 1d --grant alice:fund --token CCD --name '' --description '' --issuer Concordium",
         )
         .expect_err("arbitrary metadata option must fail");
         assert!(
@@ -3178,7 +3137,6 @@ capabilities = ["fund"]
     fn saved_plan_uses_structured_lock_grants() {
         let plan = sample_plan();
         let serialized = toml::to_string_pretty(&plan).expect("serialize succeeds");
-        assert!(serialized.contains("keep_alive = false"));
         assert!(serialized.contains("[[operations.grants]]"));
         assert!(serialized.contains("account = \"alice\""));
         assert!(serialized.contains("capabilities = [\"fund\"]"));

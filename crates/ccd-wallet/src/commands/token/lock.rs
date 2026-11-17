@@ -28,7 +28,6 @@ struct PreparedTokenLockCreate {
     tokens: Vec<TokenId>,
     name: Option<String>,
     description: Option<String>,
-    keep_alive: bool,
 }
 
 impl PreparedTokenLockCreate {
@@ -50,7 +49,6 @@ impl PreparedTokenLockCreate {
             tokens: args.tokens,
             name: args.name,
             description: args.description,
-            keep_alive: args.keep_alive,
         })
     }
 }
@@ -290,10 +288,6 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         .iter()
         .map(|grant| shared::resolve_lock_grant(conn, &mut context, grant))
         .collect::<Result<Vec<_>>>()?;
-    let keep_alive = shared::resolve_lock_keep_alive(
-        prepared.keep_alive,
-        !prepared.context.input_mode().prompts_allowed(),
-    )?;
     let tokens = if prepared.tokens.is_empty() {
         if !prepared.context.input_mode().prompts_allowed() {
             bail!("at least one --token must be provided in --non-interactive mode");
@@ -323,13 +317,12 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         expiry,
         grants,
         tokens,
-        keep_alive,
         name.clone(),
         description.clone(),
     );
 
     cliclack::log::info(format!(
-        "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nname: {}\ndescription: {}\nkeep alive: {}",
+        "Token lock create\nnetwork: {} ({})\naccount: {}\nrecipients: {}\nexpiry: {}\ntokens: {}\nname: {}\ndescription: {}",
         context.network_name,
         context.endpoint_label,
         context.wallet.address,
@@ -338,7 +331,6 @@ pub(super) async fn create(conn: &Connection, args: TokenLockCreateArgs) -> Resu
         token_summary,
         name.as_deref().unwrap_or("none"),
         description.as_deref().unwrap_or("none"),
-        if keep_alive { "yes" } else { "no" },
     ))?;
     if !shared::confirm_submission(
         "Approve and submit this token lock creation?",

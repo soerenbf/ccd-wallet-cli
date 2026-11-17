@@ -1659,10 +1659,6 @@ pub struct TokenLockCreateArgs {
     #[arg(long = "description", value_name = "DESCRIPTION")]
     pub description: Option<String>,
 
-    /// Keep the lock alive after all funds have been released.
-    #[arg(long = "keep-alive")]
-    pub keep_alive: bool,
-
     /// Account label to sign with. If omitted, interactive mode opens an account selector.
     #[arg(long = "account", value_name = "LABEL")]
     pub account: Option<String>,

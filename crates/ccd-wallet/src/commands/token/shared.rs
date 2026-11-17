@@ -740,7 +740,6 @@ pub(super) fn render_lock_info(info: &LockInfo) -> Result<String> {
     match &info.config {
         LockConfig::SimpleV0(controller) => {
             lines.push("  Type: simple-v0".to_owned());
-            lines.push(format!("  Keep alive: {}", yes_no(controller.keep_alive)));
             lines.push(format!(
                 "  Tokens: {}",
                 controller
@@ -809,10 +808,6 @@ fn render_lock_metadata_lines(metadata: Option<&RawCbor>) -> Vec<String> {
         lines.push("  no recognized fields".to_owned());
     }
     lines
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }
 
 fn lock_capability_name(value: &LockControllerSimpleV0Capability) -> &'static str {
@@ -955,19 +950,6 @@ pub(super) fn parse_lock_capability(input: &str) -> Result<LockControllerSimpleV
     }
 }
 
-/// Resolve whether a lock should be kept alive after funds are released.
-pub(super) fn resolve_lock_keep_alive(
-    explicit_keep_alive: bool,
-    non_interactive: bool,
-) -> Result<bool> {
-    if explicit_keep_alive || non_interactive {
-        return Ok(explicit_keep_alive);
-    }
-    Ok(confirm("Keep the lock alive after funds are released?")
-        .initial_value(false)
-        .interact()?)
-}
-
 /// Unresolved lock recipient mode selected by CLI or compose input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum LockRecipientMode<T> {
@@ -1027,7 +1009,6 @@ pub(super) fn build_lock_config(
     expiry: TransactionTime,
     grants: Vec<LockControllerSimpleV0Grant>,
     tokens: Vec<TokenId>,
-    keep_alive: bool,
     name: Option<String>,
     description: Option<String>,
 ) -> LockConfig {
@@ -1045,7 +1026,6 @@ pub(super) fn build_lock_config(
         expiry,
         grants,
         tokens,
-        keep_alive,
         memo: None,
         metadata: build_lock_metadata(name, description),
     })
@@ -1186,13 +1166,11 @@ mod tests {
             TransactionTime::from_seconds(100),
             vec![grant.clone()],
             vec!["CCD".parse().unwrap()],
-            true,
             Some("Treasury".to_owned()),
             None,
         );
         let LockConfig::SimpleV0(details) = &config;
         assert_eq!(details.grants, vec![grant]);
-        assert!(details.keep_alive);
         assert!(details.memo.is_none());
         let info = LockInfo {
             lock: LockId::new(1, 2, 0),
@@ -1281,7 +1259,6 @@ mod tests {
             TransactionTime::from_seconds(1),
             Vec::new(),
             vec!["CCD".parse().unwrap()],
-            false,
             None,
             None,
         );
@@ -1297,7 +1274,6 @@ mod tests {
             TransactionTime::from_seconds(1),
             Vec::new(),
             vec!["CCD".parse().unwrap()],
-            false,
             None,
             None,
         );
